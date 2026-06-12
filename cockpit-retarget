@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# cockpit-retarget — DEPRECATED shim. The retarget chooser now lives in
+# `cockpit-pick` and is bound directly to a display-popup (Alt-r), because a
+# display-menu can't be opened from run-shell (no client). Kept so anything
+# calling this path still works.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$HERE/cockpit-pick" retarget "$@"

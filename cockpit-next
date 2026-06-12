@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# cockpit-next — select the next attention-worthy pane.
+# Priority: needs-input > just-finished > working. Cycles within a tier,
+# advancing past the currently-active pane. Bound to Alt-Tab by the launcher.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+active=$($TMUX display -p '#{pane_id}')
+# pane_id<TAB>state, in pane order
+mapfile -t rows < <($TMUX list-panes -t "$COCKPIT_SESSION:0" -F '#{pane_id}	#{@state}')
+
+pick_tier() {  # $1 = state to match; echo the next matching pane after $active, else first
+  local want="$1" first="" seen=0 pid st
+  for r in "${rows[@]}"; do
+    IFS=$'\t' read -r pid st <<< "$r"; [[ "$st" == "$want" ]] || continue
+    [[ -z "$first" ]] && first="$pid"
+    if (( seen )); then echo "$pid"; return 0; fi
+    [[ "$pid" == "$active" ]] && seen=1
+  done
+  [[ -n "$first" ]] && { echo "$first"; return 0; }
+  return 1
+}
+
+for tier in needs-input just-finished working; do
+  if target=$(pick_tier "$tier"); then $TMUX select-pane -t "$target"; exit 0; fi
+done
+$TMUX display-message "cockpit: nothing active"

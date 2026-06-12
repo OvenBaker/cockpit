@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# shim/wt.exe — a stand-in for Windows Terminal, used ONLY when cockpit puts
+# this directory at the front of PATH before launching `santa-claude tui`.
+#
+# santa-claude's resume action runs (bare `wt.exe`, so PATH picks us):
+#   wt.exe -w new wsl.exe -d Ubuntu bash -ilc 'cd <cwd> && claude --resume <id>'
+# We dig the session id out of the argv and hand it to cockpit-send, which
+# resumes it as a pane in the grid instead of opening a Windows Terminal tab.
+#
+# Non-resume invocations (anything without `claude --resume`) are swallowed
+# silently — this shim only exists for the cockpit↔santa handoff.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SEND="${COCKPIT_SEND:-$HERE/../cockpit-send}"
+
+all="$*"
+id=$(grep -oiE 'claude --resume [0-9a-f-]{8,36}' <<<"$all" | awk '{print $NF}' | head -1)
+[[ -n "$id" ]] && exec "$SEND" "$id"
+exit 0

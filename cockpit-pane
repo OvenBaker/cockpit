@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# cockpit-pane — grow or shrink the grid. Bound to Alt-n (add) by the launcher.
+#
+#   cockpit-pane remove   kill the active pane, re-tile (refuses the last pane).
+#
+# Adding a pane is handled by `cockpit-pick add` (Alt-n), which must run in a
+# popup (it picks a session) — a popup needs a client, which run-shell lacks.
+# Removing is a pure server op, so it stays here on run-shell.
+#
+# Reducing via C-b x / the right-click Kill menu also works — the poller
+# re-tiles on any pane-count change, so the grid re-evens itself either way.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+W="$COCKPIT_SESSION:0"
+
+case "${1:-remove}" in
+  add)   # kept for back-compat; the real path is `cockpit-pick add` in a popup
+    exec "$HERE/cockpit-pick" add;;
+  remove)
+    n=$($TMUX list-panes -t "$W" -F x | wc -l)
+    (( n <= 1 )) && { $TMUX display-message "cockpit: can't remove the last pane"; exit 0; }
+    $TMUX kill-pane
+    $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT"
+    ;;
+  *) echo "usage: cockpit-pane {add|remove}" >&2; exit 2;;
+esac

@@ -1,0 +1,4 @@
+# scratch / runtime
+*.log
+*.swp
+.DS_Store

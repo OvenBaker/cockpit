@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# cockpit-pick — interactive chooser over dormant Claude sessions.
+# Plain numbered selection on a real tty. Three uses:
+#
+#   cockpit-pick startup           multi-select in the launching terminal;
+#                                  prints chosen  id<TAB>cwd<TAB>title  to stdout
+#                                  (UI is written to /dev/tty so stdout is clean)
+#   cockpit-pick retarget <pane>   single-select; respawn <pane> onto the choice
+#   cockpit-pick add               single-select; split a fresh pane, respawn it
+#
+# Why a popup, not display-menu, and bound DIRECTLY (not via run-shell)?
+# Popups/menus need a client to draw on; `run-shell` has none (it returns 1),
+# so the launcher binds  display-popup -E "cockpit-pick …"  straight to the key.
+# A popup is a real pty, so this same numbered prompt works there too — no fzf
+# dependency, no press-and-hold mouse menu.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+POOL="${COCKPIT_POOL:-40}"             # how many candidates to list
+DEF_N="${COCKPIT_DEFAULT_N:-6}"        # default selection count (startup, empty input)
+MODE="${1:-startup}"
+
+say() { printf '%s\n' "$*" >/dev/tty; }
+pause() { read -rsn1 -p "$1" </dev/tty || true; say ""; }
+
+fmt_age() { local s=$1
+  (( s < 3600 ))  && { printf '%dm' $((s/60));    return; }
+  (( s < 86400 )) && { printf '%dh' $((s/3600));  return; }
+  printf '%dd' $((s/86400)); }
+
+# expand a selection string ("1 3 5-8", "a"/"all", commas ok) into 1-based indices
+parse_sel() {
+  local raw="${1//,/ }" tok lo hi x
+  if [[ "$raw" =~ ^[Aa]([Ll][Ll])?$ ]]; then seq 1 "${#CAND[@]}"; return; fi
+  for tok in $raw; do
+    if [[ "$tok" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      lo=${BASH_REMATCH[1]}; hi=${BASH_REMATCH[2]}
+      (( lo <= hi )) && for ((x=lo; x<=hi; x++)); do echo "$x"; done
+    elif [[ "$tok" =~ ^[0-9]+$ ]]; then echo "$tok"; fi
+  done
+}
+
+# respawn a pane onto a chosen session and re-stamp it so the poller tracks it
+retarget_pane() {
+  local pane="$1" id="$2" cwd="$3" title="$4"
+  if session_is_running "$id"; then          # re-check at action time (menu may have sat open)
+    say "cockpit: $id went live elsewhere — not retargeting"; sleep 1; return 0
+  fi
+  local cmd="cd $(printf %q "$cwd") && exec claude --resume $id"
+  $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
+  $TMUX set -p -t "$pane" @session_id "$id"
+  $TMUX set -p -t "$pane" @cwd "$cwd"
+  $TMUX set -p -t "$pane" @label "${title:0:32}"
+  $TMUX set -p -t "$pane" @badge "starting"
+}
+
+# --- gather + render ---------------------------------------------------------
+mapfile -t CAND < <(cockpit_candidates "$POOL")
+if (( ${#CAND[@]} == 0 )); then
+  say "cockpit: no dormant sessions to choose from."
+  [[ "$MODE" == startup ]] || pause "(any key to close) "
+  exit 0
+fi
+
+say ""
+say "  cockpit · dormant Claude sessions"
+say "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+i=0
+for row in "${CAND[@]}"; do
+  IFS=$'\t' read -r id cwd title <<< "$row"
+  i=$((i+1))
+  jsonl=$(session_jsonl "$id" "$cwd")
+  age=$(fmt_age "$(idle_seconds "$jsonl")")
+  printf '  %2d  %4s  %-22s  %s\n' "$i" "$age" "${cwd/#$HOME/\~}" "${title:0:46}" >/dev/tty
+done
+say ""
+
+# --- act on the mode ---------------------------------------------------------
+case "$MODE" in
+  startup)
+    n_def=$(( DEF_N < ${#CAND[@]} ? DEF_N : ${#CAND[@]} ))
+    say "  Select panes to open:  e.g.  1 3 5-8   ·   a = all   ·   Enter = top $n_def"
+    printf '  > ' >/dev/tty
+    read -r line </dev/tty || line=""
+    if [[ -z "${line// }" ]]; then mapfile -t idx < <(seq 1 "$n_def")
+    else mapfile -t idx < <(parse_sel "$line"); fi
+    declare -A seen
+    for nsel in "${idx[@]}"; do
+      (( nsel >= 1 && nsel <= ${#CAND[@]} )) || continue
+      [[ -n "${seen[$nsel]:-}" ]] && continue; seen[$nsel]=1
+      printf '%s\n' "${CAND[$((nsel-1))]}"          # → stdout, captured by launcher
+    done
+    ;;
+
+  retarget)
+    pane="${2:-}"
+    # empty, or an unexpanded "#{pane_id}" → resolve the window's active pane
+    # (unchanged by the keypress, so it's the pane the user pressed Alt-r on).
+    [[ -z "$pane" || "$pane" == *'#{'* ]] && \
+      pane=$($TMUX display -p -t "$COCKPIT_SESSION:0" '#{pane_id}' 2>/dev/null)
+    say "  Retarget this pane → which session?"
+    printf '  > ' >/dev/tty
+    read -r line </dev/tty || line=""
+    mapfile -t idx < <(parse_sel "$line"); nsel="${idx[0]:-}"
+    [[ -n "$nsel" ]] && (( nsel >= 1 && nsel <= ${#CAND[@]} )) || { say "  cancelled."; sleep 0.6; exit 0; }
+    IFS=$'\t' read -r id cwd title <<< "${CAND[$((nsel-1))]}"
+    retarget_pane "$pane" "$id" "$cwd" "$title"
+    say "  → ${title:0:50}"; sleep 0.6
+    ;;
+
+  add)
+    pane=$($TMUX split-window -t "$COCKPIT_SESSION:0" -P -F '#{pane_id}' "bash -l" 2>/dev/null) \
+      || { say "  no room for another pane at this width."; pause "(any key) "; exit 0; }
+    $TMUX select-layout -t "$COCKPIT_SESSION:0" "$COCKPIT_LAYOUT" 2>/dev/null
+    say "  New pane → which session?"
+    printf '  > ' >/dev/tty
+    read -r line </dev/tty || line=""
+    mapfile -t idx < <(parse_sel "$line"); nsel="${idx[0]:-}"
+    if [[ -z "$nsel" ]] || ! (( nsel >= 1 && nsel <= ${#CAND[@]} )); then
+      $TMUX kill-pane -t "$pane" 2>/dev/null                 # cancelled → drop the empty pane
+      $TMUX select-layout -t "$COCKPIT_SESSION:0" "$COCKPIT_LAYOUT" 2>/dev/null
+      say "  cancelled."; sleep 0.6; exit 0
+    fi
+    IFS=$'\t' read -r id cwd title <<< "${CAND[$((nsel-1))]}"
+    retarget_pane "$pane" "$id" "$cwd" "$title"
+    say "  → ${title:0:50}"; sleep 0.6
+    ;;
+
+  *) echo "usage: cockpit-pick {startup|retarget <pane>|add}" >&2; exit 2;;
+esac

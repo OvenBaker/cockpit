@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# cockpit-help — show the key reference in a popup. Bound to Alt-? / Alt-h.
+#
+#   cockpit-help        open the popup (default)
+#   cockpit-help show   render the text inside the popup, wait for a key
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+if [[ "${1:-popup}" == "show" ]]; then
+  cat <<'EOF'
+
+   cockpit — keys  (no prefix needed)
+
+   Alt-1 … 9     jump to pane N
+   Alt-Tab       next attention-worthy pane
+   Alt-z         zoom / unzoom the active pane
+   Alt-i         collapse idle panes / restore
+   Alt-r         retarget pane → pick a session (popup)
+   Alt-n         add a pane → pick a session (popup)
+   Alt-s         browse santa-claude TUI → resume sends here
+   Alt-x         remove the active pane
+   Alt-/ h ?     this help
+
+   border colour
+     green  working      blue  just-finished
+     red    needs-input  dim   idle
+     yellow = the active (focused) pane
+
+   mouse   click = focus · drag border = resize
+           right-click (hold) = pane menu
+
+   tmux    C-b d detach   (cockpit --attach to return)
+           C-b x kill pane · C-b { } swap panes
+
+   press any key to close
+EOF
+  read -rsn1 </dev/tty 2>/dev/null || read -rsn1
+  exit 0
+fi
+
+$TMUX display-popup -E -w 60 -h 24 "$HERE/cockpit-help show"

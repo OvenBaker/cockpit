@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# cockpit-toggle-idle — collapse idle panes into a hidden "parked" window, or
+# restore them. Default cockpit view is dim-in-place; this is the on-demand
+# declutter. Bound to Alt-i by the launcher.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+W="$COCKPIT_SESSION:0"; PARK="$COCKPIT_SESSION:parked"
+
+collapsed=$($TMUX show -gv @idle_collapsed 2>/dev/null || echo 0)
+
+if [[ "$collapsed" == "1" ]]; then
+  # restore: pull every parked pane back into the grid
+  if $TMUX has-session -t "$PARK" 2>/dev/null; then
+    while read -r pid; do [[ -n "$pid" ]] && $TMUX join-pane -d -s "$pid" -t "$W"; done \
+      < <($TMUX list-panes -t "$PARK" -F '#{pane_id}')
+  fi
+  $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT"
+  $TMUX set -g @idle_collapsed 0
+  $TMUX display-message "cockpit: idle panes restored"
+else
+  # collapse: move idle panes out (keep at least one pane in the grid)
+  mapfile -t idle < <($TMUX list-panes -t "$W" -F '#{pane_id}	#{@state}' | awk -F'\t' '$2=="idle"{print $1}')
+  total=$($TMUX list-panes -t "$W" -F x | wc -l)
+  moved=0
+  for pid in "${idle[@]}"; do
+    (( total - moved <= 1 )) && break
+    if $TMUX has-session -t "$PARK" 2>/dev/null; then $TMUX join-pane -d -s "$pid" -t "$PARK"
+    else $TMUX break-pane -d -s "$pid" -n parked; fi
+    moved=$((moved+1))
+  done
+  $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT"
+  $TMUX set -g @idle_collapsed 1
+  $TMUX display-message "cockpit: parked $moved idle pane(s)"
+fi

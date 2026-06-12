@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# cockpit-send — resume a Claude session as a cockpit pane.
+#
+#   cockpit-send <id|prefix> [--cwd PATH]
+#
+# If a cockpit grid is running: split a new pane onto the session, stamp it so
+# the poller tracks it, and re-tile. If not: append it to a pending queue that
+# `cockpit --santa` drains into a fresh grid when the picker TUI exits.
+#
+# This is the bridge that lets santa-claude's TUI "resume" feed cockpit instead
+# of opening a wt.exe tab — see shim/wt.exe.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
+
+id=""; cwd=""
+while [[ $# -gt 0 ]]; do case "$1" in
+  --cwd) cwd="${2:-}"; shift;; *) id="$1";; esac; shift; done
+[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH]" >&2; exit 2; }
+
+# resolve full id + cwd + title from santa-claude's index
+title=""
+row=$(sqlite3 -separator $'\t' "$SANTA_DB" \
+  "SELECT id, coalesce(cwd,''), coalesce(nullif(summary_title,''), substr(first_user_text,1,48),'') \
+   FROM sessions WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+if [[ -n "$row" ]]; then
+  IFS=$'\t' read -r fid fcwd ftitle <<< "$row"
+  id="$fid"; [[ -z "$cwd" ]] && cwd="$fcwd"; title="$ftitle"
+fi
+[[ -z "$cwd" ]] && { j=$(session_jsonl "$id" ""); [[ -n "$j" ]] && cwd=$(jq -r 'select(.cwd)|.cwd' "$j" 2>/dev/null | head -1); }
+[[ -n "$cwd" ]] || cwd="$HOME"
+[[ -n "$title" ]] || title="${id:0:8}"
+
+if ! $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
+  printf '%s\t%s\t%s\n' "$id" "$cwd" "$title" >> "$PENDING"   # queue for cold build
+  exit 0
+fi
+
+if session_is_running "$id"; then
+  $TMUX display-message "cockpit: ${id:0:8} is already live — not duplicating"
+  exit 0
+fi
+
+cmd="cd $(printf %q "$cwd") && exec claude --resume $id"
+pane=$($TMUX split-window -t "$COCKPIT_SESSION:0" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+  || { $TMUX display-message "cockpit: no room for another pane at this width"; exit 0; }
+$TMUX set -p -t "$pane" @session_id "$id"
+$TMUX set -p -t "$pane" @cwd "$cwd"
+$TMUX set -p -t "$pane" @label "${title:0:32}"
+$TMUX set -p -t "$pane" @badge "starting"
+$TMUX select-layout -t "$COCKPIT_SESSION:0" "$COCKPIT_LAYOUT" 2>/dev/null
+$TMUX display-message "cockpit: + ${title:0:40}"

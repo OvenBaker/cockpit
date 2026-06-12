@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# cockpit-poller — watches each pane's transcript and paints live state onto
+# the frame. Runs as a background daemon spawned by `cockpit`. One per server.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+INTERVAL="${COCKPIT_INTERVAL:-2}"
+
+# --- singleton -------------------------------------------------------------
+# Only ONE poller per session may paint. Two or more independently compute the
+# just-finished latch and both rewrite pane-border-style every cycle, so they
+# fight over the same borders — the gray/blue flicker. Kill any other poller
+# for this socket before we start, and drop a pidfile.
+PIDFILE="${TMPDIR:-/tmp}/cockpit-poller.${COCKPIT_SESSION}.pid"
+# Match ONLY a real poller: its argv is exactly `bash …/cockpit-poller`, so the
+# joined cmdline ends in "cockpit-poller". This deliberately won't match the
+# launcher's `… nohup …/cockpit-poller >log` wrapper or a `pgrep cockpit-poller`
+# (those have trailing text), so we never kill the wrong process.
+for p in $(pgrep -f cockpit-poller 2>/dev/null); do
+  [[ "$p" == "$$" || "$p" == "$PPID" ]] && continue
+  [[ -r "/proc/$p/cmdline" ]] || continue          # pid vanished between calls
+  c=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+  [[ "$c" == *"cockpit-poller " ]] && kill "$p" 2>/dev/null || true
+done
+echo $$ >"$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+
+declare -A PREV       # pane_id -> last raw state
+declare -A FIN        # pane_id -> 1 if in just-finished (cleared when visited)
+declare -A LASTSTYLE  # pane_id -> last border style WE wrote (skip redundant writes)
+declare -A LASTBADGE  # pane_id -> last badge WE wrote
+prev_count=-1         # last seen pane count; re-tile the grid when it changes
+
+color() { case "$1" in
+  working)      echo 'fg=colour41';;     # green
+  just-finished)echo 'fg=colour39,bold';; # blue
+  needs-input)  echo 'fg=colour196,bold';;# red
+  idle)         echo 'fg=colour240';;     # dim
+  *)            echo 'fg=colour240';; esac; }
+
+# compact duration so long idles roll over instead of reading "180m"/"2880m"
+dur() { local s=$1
+  (( s < 60 ))    && { echo "${s}s"; return; }
+  (( s < 3600 ))  && { echo "$((s/60))m"; return; }
+  (( s < 86400 )) && { echo "$((s/3600))h"; return; }
+  echo "$((s/86400))d"; }
+
+badge() { local s="$1" t; t=$(dur "$2")
+  case "$s" in
+    working)      echo "⠿ working";;
+    just-finished)echo "✓ done $t";;
+    needs-input)  echo "◉ NEEDS INPUT";;
+    idle)         echo "○ idle $t";;
+    *)            echo "…";; esac; }
+
+while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
+  active_pane=$($TMUX display -p -t "$COCKPIT_SESSION:0" '#{pane_id}' 2>/dev/null)
+  # re-even the grid when panes are added/removed (by Alt-n, C-b x, kill menu…).
+  # Only on change, so manual swaps between cycles aren't disturbed.
+  count=$($TMUX list-panes -t "$COCKPIT_SESSION:0" -F x 2>/dev/null | wc -l)
+  if [[ "$count" != "$prev_count" ]]; then
+    (( count > 0 )) && $TMUX select-layout -t "$COCKPIT_SESSION:0" "${COCKPIT_LAYOUT:-even-horizontal}" 2>/dev/null
+    prev_count="$count"
+  fi
+  nA=0; nF=0; nI=0
+  while IFS=$'\t' read -r pid sid cwd; do
+    [[ -n "$sid" ]] || continue
+    jsonl=$(session_jsonl "$sid" "$cwd")
+    raw=$(classify_state "$jsonl"); age=$(idle_seconds "$jsonl")
+
+    state="$raw"
+    # working -> idle edge = just-finished (your priority signal); sticky until visited
+    if [[ "${PREV[$pid]:-}" == "working" && "$raw" == "idle" ]]; then FIN[$pid]=1; fi
+    [[ "$raw" == "working" || "$raw" == "needs-input" ]] && FIN[$pid]=""   # woke back up
+    [[ "$pid" == "$active_pane" ]] && FIN[$pid]=""                          # acknowledged by visiting
+    [[ "${FIN[$pid]:-}" == "1" ]] && state=just-finished
+    PREV[$pid]="$raw"
+
+    # Only write when the value actually changes. Re-setting an option to the
+    # same value still makes tmux redraw the border — a needless flash every
+    # cycle — so memoise what we last wrote and skip no-op writes.
+    nstyle="$(color "$state")"
+    if [[ "${LASTSTYLE[$pid]:-}" != "$nstyle" ]]; then
+      $TMUX set -p -t "$pid" pane-border-style "$nstyle"; LASTSTYLE[$pid]="$nstyle"
+    fi
+    nbadge="$(badge "$state" "$age")"
+    if [[ "${LASTBADGE[$pid]:-}" != "$nbadge" ]]; then
+      $TMUX set -p -t "$pid" @badge "$nbadge"; LASTBADGE[$pid]="$nbadge"
+    fi
+    $TMUX set -p -t "$pid" @state "$state"   # no visual; read by cockpit-next
+
+    case "$state" in
+      working|needs-input) nA=$((nA+1));; just-finished) nF=$((nF+1));; idle) nI=$((nI+1));;
+    esac
+  done < <($TMUX list-panes -t "$COCKPIT_SESSION:0" -F '#{pane_id}	#{@session_id}	#{@cwd}' 2>/dev/null)
+
+  $TMUX set -g @active_count "$nA"; $TMUX set -g @finished_count "$nF"; $TMUX set -g @idle_count "$nI"
+  sleep "$INTERVAL"
+done
