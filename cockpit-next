@@ -7,8 +7,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 
 active=$($TMUX display -p '#{pane_id}')
+W=$(cockpit_cur_window)   # cycle attention within the current workspace
 # pane_id<TAB>state, in pane order
-mapfile -t rows < <($TMUX list-panes -t "$COCKPIT_SESSION:0" -F '#{pane_id}	#{@state}')
+mapfile -t rows < <($TMUX list-panes -t "$W" -F '#{pane_id}	#{@state}')
 
 pick_tier() {  # $1 = state to match; echo the next matching pane after $active, else first
   local want="$1" first="" seen=0 pid st

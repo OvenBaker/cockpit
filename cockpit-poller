@@ -12,6 +12,9 @@ INTERVAL="${COCKPIT_INTERVAL:-2}"
 # fight over the same borders — the gray/blue flicker. Kill any other poller
 # for this socket before we start, and drop a pidfile.
 PIDFILE="${TMPDIR:-/tmp}/cockpit-poller.${COCKPIT_SESSION}.pid"
+# Escape hatch for testing a second poller on a throwaway socket without it
+# evicting the real one (the scan below is socket-agnostic — it matches by argv).
+if [[ -z "${COCKPIT_NO_SINGLETON:-}" ]]; then
 # Match ONLY a real poller: its argv is exactly `bash …/cockpit-poller`, so the
 # joined cmdline ends in "cockpit-poller". This deliberately won't match the
 # launcher's `… nohup …/cockpit-poller >log` wrapper or a `pgrep cockpit-poller`
@@ -24,12 +27,28 @@ for p in $(pgrep -f cockpit-poller 2>/dev/null); do
 done
 echo $$ >"$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
+fi
 
 declare -A PREV       # pane_id -> last raw state
 declare -A FIN        # pane_id -> 1 if in just-finished (cleared when visited)
 declare -A LASTSTYLE  # pane_id -> last border style WE wrote (skip redundant writes)
 declare -A LASTBADGE  # pane_id -> last badge WE wrote
-prev_count=-1         # last seen pane count; re-tile the grid when it changes
+declare -A LASTLABEL  # pane_id -> last label seen/written (so titles can upgrade)
+declare -A PREV_WCOUNT # window_id -> last pane count (re-tile that window on change)
+declare -A LASTWS     # window_id -> last @ws_badge written (workspace tab colour)
+declare -A ADOPTED    # session id -> already claimed by a pane (Alt-N new sessions)
+# Labels are stamped once at pane creation, often from a fallback (first prompt)
+# before santa-claude has summarised the session. Re-query the DB occasionally
+# and upgrade the @label when a better title lands — throttled, not every cycle.
+TITLE_REFRESH="${COCKPIT_TITLE_REFRESH:-15}"
+next_titles=0
+# Per-pane read format. Two gotchas: IFS=$'\t' treats tab as whitespace and
+# COLLAPSES empty fields (a pending pane's blank @session_id would shift every
+# later field), and tmux escapes raw control bytes so a non-whitespace separator
+# can't pass through -F. Fix: tab-separate but emit a <nil> token for any blank
+# field so nothing is ever empty (→ no collapse), then restore "" after reading.
+TAB=$'\t'; NIL='<nil>'
+PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@born,#{@born},$NIL}"
 
 color() { case "$1" in
   working)      echo 'fg=colour41';;     # green
@@ -53,18 +72,44 @@ badge() { local s="$1" t; t=$(dur "$2")
     idle)         echo "○ idle $t";;
     *)            echo "…";; esac; }
 
+# attention priority for a workspace tab: needs-input > just-finished > working > idle
+rank() { case "$1" in needs-input) echo 3;; just-finished) echo 2;; working) echo 1;; *) echo 0;; esac; }
+worst() { (( $(rank "$1") >= $(rank "$2") )) && echo "$1" || echo "$2"; }
+# colour the workspace NAME by its worst pane state (a #[fg=…] directive)
+ws_color() { case "$1" in
+  needs-input)  echo '#[fg=colour196,bold]';;
+  just-finished)echo '#[fg=colour39,bold]';;
+  working)      echo '#[fg=colour41]';;
+  *)            echo '#[fg=colour245]';; esac; }
+
 while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
-  active_pane=$($TMUX display -p -t "$COCKPIT_SESSION:0" '#{pane_id}' 2>/dev/null)
-  # re-even the grid when panes are added/removed (by Alt-n, C-b x, kill menu…).
-  # Only on change, so manual swaps between cycles aren't disturbed.
-  count=$($TMUX list-panes -t "$COCKPIT_SESSION:0" -F x 2>/dev/null | wc -l)
-  if [[ "$count" != "$prev_count" ]]; then
-    (( count > 0 )) && $TMUX select-layout -t "$COCKPIT_SESSION:0" "${COCKPIT_LAYOUT:-even-horizontal}" 2>/dev/null
-    prev_count="$count"
-  fi
+  # the pane/window the user is actually looking at
+  active_pane=$($TMUX display -p -t "$COCKPIT_SESSION" '#{pane_id}' 2>/dev/null)
+  active_win=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_id}' 2>/dev/null)
+  # decide once per cycle whether titles are due for a refresh
+  now=$(date +%s); do_titles=0
+  if (( now >= next_titles )); then do_titles=1; next_titles=$((now + TITLE_REFRESH)); fi
+
+  # per-cycle, per-window tallies (workspaces = windows)
+  declare -A WCOUNT=() WSTATE=()
   nA=0; nF=0; nI=0
-  while IFS=$'\t' read -r pid sid cwd; do
-    [[ -n "$sid" ]] || continue
+  while IFS="$TAB" read -r win pid sid cwd curlabel born; do
+    [[ -n "$win" ]] || continue
+    [[ "$sid" == "$NIL" ]] && sid=""; [[ "$cwd" == "$NIL" ]] && cwd=""
+    [[ "$curlabel" == "$NIL" ]] && curlabel=""; [[ "$born" == "$NIL" ]] && born=""
+    WCOUNT[$win]=$(( ${WCOUNT[$win]:-0} + 1 ))
+    if [[ -z "$sid" ]]; then
+      # a pending NEW session (Alt-N): claim the transcript that appeared in this
+      # pane's cwd after it was born, then track it like any other.
+      if [[ -n "$cwd" && -n "$born" ]]; then
+        a=$(cockpit_adopt "$cwd" "$born")
+        if [[ -n "$a" && -z "${ADOPTED[$a]:-}" ]]; then
+          ADOPTED[$a]=1; $TMUX set -p -t "$pid" @session_id "$a"; sid="$a"
+        fi
+      fi
+      [[ -n "$sid" ]] || continue        # still pending, or a bare scratch shell — skip
+    fi
+    [[ -n "${LASTLABEL[$pid]:-}" ]] || LASTLABEL[$pid]="$curlabel"   # seed from what's on the border
     jsonl=$(session_jsonl "$sid" "$cwd")
     raw=$(classify_state "$jsonl"); age=$(idle_seconds "$jsonl")
 
@@ -89,10 +134,38 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     fi
     $TMUX set -p -t "$pid" @state "$state"   # no visual; read by cockpit-next
 
+    # upgrade the title if santa-claude has since produced a better one
+    if (( do_titles )); then
+      t=$(sqlite3 "$SANTA_DB" \
+        "SELECT coalesce(nullif(summary_title,''), substr(first_user_text,1,48), '') \
+         FROM sessions WHERE id='$sid' LIMIT 1;" 2>/dev/null)
+      t="${t:0:32}"
+      if [[ -n "$t" && "$t" != "${LASTLABEL[$pid]:-}" ]]; then
+        $TMUX set -p -t "$pid" @label "$t"; LASTLABEL[$pid]="$t"
+      fi
+    fi
+
+    # the workspace tab takes its colour from its worst (most-attention) pane,
+    # but NOT from the window you're currently looking at (you've seen it).
+    if [[ "$win" != "$active_win" ]]; then
+      WSTATE[$win]=$(worst "${WSTATE[$win]:-idle}" "$state")
+    fi
     case "$state" in
       working|needs-input) nA=$((nA+1));; just-finished) nF=$((nF+1));; idle) nI=$((nI+1));;
     esac
-  done < <($TMUX list-panes -t "$COCKPIT_SESSION:0" -F '#{pane_id}	#{@session_id}	#{@cwd}' 2>/dev/null)
+  done < <($TMUX list-panes -s -t "$COCKPIT_SESSION" -F "$PANE_FMT" 2>/dev/null)
+
+  # re-tile any window whose pane count changed; colour each workspace tab
+  for win in "${!WCOUNT[@]}"; do
+    if [[ "${PREV_WCOUNT[$win]:-}" != "${WCOUNT[$win]}" ]]; then
+      $TMUX select-layout -t "$win" "${COCKPIT_LAYOUT:-even-horizontal}" 2>/dev/null
+      PREV_WCOUNT[$win]="${WCOUNT[$win]}"
+    fi
+    nws="$(ws_color "${WSTATE[$win]:-idle}")"
+    if [[ "${LASTWS[$win]:-}" != "$nws" ]]; then
+      $TMUX set -w -t "$win" @ws_badge "$nws"; LASTWS[$win]="$nws"
+    fi
+  done
 
   $TMUX set -g @active_count "$nA"; $TMUX set -g @finished_count "$nF"; $TMUX set -g @idle_count "$nI"
   sleep "$INTERVAL"

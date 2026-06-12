@@ -54,6 +54,51 @@ retarget_pane() {
   $TMUX set -p -t "$pane" @badge "starting"
 }
 
+# spawn a brand-NEW claude session (no --resume) in <cwd>, reusing a bare shell
+# if the active pane is one, else splitting. No @session_id is set — the poller
+# adopts the transcript once Claude writes it (cockpit_adopt), keyed by @born.
+spawn_new() {
+  local W="$1" cwd="$2" cmd act actsid pane
+  cmd="cd $(printf %q "$cwd") && exec claude"
+  act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
+  actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
+  if [[ -z "$actsid" && -n "$act" ]]; then
+    pane="$act"; $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
+  else
+    pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+      || { say "  no room for another pane at this width."; return 1; }
+  fi
+  $TMUX set -p -t "$pane" @session_id ""           # explicit: pending adoption
+  $TMUX set -p -t "$pane" @cwd "$cwd"
+  $TMUX set -p -t "$pane" @born "$(date +%s)"
+  $TMUX set -p -t "$pane" @label "new · $(basename "$cwd")"
+  $TMUX set -p -t "$pane" @badge "starting"
+  $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
+}
+
+# new-session mode runs before the dormant-session gather (it needs cwds, not sessions)
+if [[ "$MODE" == new ]]; then
+  W=$(cockpit_cur_window)
+  mapfile -t CWDS < <(cockpit_recent_cwds 15)
+  say ""
+  say "  cockpit · new Claude session"
+  say "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+  i=0; for d in "${CWDS[@]}"; do i=$((i+1)); printf '  %2d  %s\n' "$i" "${d/#$HOME/\~}" >/dev/tty; done
+  say ""
+  say "  Pick a number, or type a path (~ ok).  Enter = cancel."
+  printf '  > ' >/dev/tty
+  read -r line </dev/tty || line=""
+  [[ -n "${line// }" ]] || { say "  cancelled."; sleep 0.4; exit 0; }
+  if [[ "$line" =~ ^[0-9]+$ ]] && (( line >= 1 && line <= ${#CWDS[@]} )); then
+    target="${CWDS[$((line-1))]}"
+  else
+    target="${line/#\~/$HOME}"
+  fi
+  [[ -d "$target" ]] || { say "  not a directory: $target"; sleep 1; exit 0; }
+  spawn_new "$W" "$target" && { say "  → new session in ${target/#$HOME/\~}"; sleep 0.5; }
+  exit 0
+fi
+
 # --- gather + render ---------------------------------------------------------
 mapfile -t CAND < <(cockpit_candidates "$POOL")
 if (( ${#CAND[@]} == 0 )); then
@@ -109,17 +154,27 @@ case "$MODE" in
     ;;
 
   add)
-    pane=$($TMUX split-window -t "$COCKPIT_SESSION:0" -P -F '#{pane_id}' "bash -l" 2>/dev/null) \
-      || { say "  no room for another pane at this width."; pause "(any key) "; exit 0; }
-    $TMUX select-layout -t "$COCKPIT_SESSION:0" "$COCKPIT_LAYOUT" 2>/dev/null
+    W=$(cockpit_cur_window)   # add to the workspace you're viewing
+    # If the active pane is a bare untracked shell (e.g. a fresh 'scratch'
+    # workspace's placeholder), reuse it instead of splitting — otherwise split.
+    act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
+    actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
+    split_made=0
+    if [[ -z "$actsid" ]]; then
+      pane="$act"                                            # reuse placeholder shell
+    else
+      pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -l" 2>/dev/null) \
+        || { say "  no room for another pane at this width."; pause "(any key) "; exit 0; }
+      split_made=1
+      $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
+    fi
     say "  New pane → which session?"
     printf '  > ' >/dev/tty
     read -r line </dev/tty || line=""
     mapfile -t idx < <(parse_sel "$line"); nsel="${idx[0]:-}"
     if [[ -z "$nsel" ]] || ! (( nsel >= 1 && nsel <= ${#CAND[@]} )); then
-      $TMUX kill-pane -t "$pane" 2>/dev/null                 # cancelled → drop the empty pane
-      $TMUX select-layout -t "$COCKPIT_SESSION:0" "$COCKPIT_LAYOUT" 2>/dev/null
-      say "  cancelled."; sleep 0.6; exit 0
+      (( split_made )) && { $TMUX kill-pane -t "$pane" 2>/dev/null; $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null; }
+      say "  cancelled."; sleep 0.6; exit 0      # reused placeholder is left as-is
     fi
     IFS=$'\t' read -r id cwd title <<< "${CAND[$((nsel-1))]}"
     retarget_pane "$pane" "$id" "$cwd" "$title"

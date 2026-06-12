@@ -13,11 +13,14 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
+LOG="${TMPDIR:-/tmp}/cockpit-send.log"
+log() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true; }
 
 id=""; cwd=""
 while [[ $# -gt 0 ]]; do case "$1" in
   --cwd) cwd="${2:-}"; shift;; *) id="$1";; esac; shift; done
-[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH]" >&2; exit 2; }
+log "invoked: id='$id' cwd-arg='$cwd' COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}' TMUX-cmd='$TMUX'"
+[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH]" >&2; log "ABORT: no id"; exit 2; }
 
 # resolve full id + cwd + title from santa-claude's index
 title=""
@@ -43,11 +46,19 @@ if session_is_running "$id"; then
 fi
 
 cmd="cd $(printf %q "$cwd") && exec claude --resume $id"
-pane=$($TMUX split-window -t "$COCKPIT_SESSION:0" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
-  || { $TMUX display-message "cockpit: no room for another pane at this width"; exit 0; }
+W=$(cockpit_cur_window)   # land in the workspace you're viewing
+# reuse a bare untracked shell (fresh 'scratch') if that's the active pane
+act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
+actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
+if [[ -z "$actsid" && -n "$act" ]]; then
+  pane="$act"; $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
+else
+  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+    || { $TMUX display-message "cockpit: no room for another pane at this width"; exit 0; }
+fi
 $TMUX set -p -t "$pane" @session_id "$id"
 $TMUX set -p -t "$pane" @cwd "$cwd"
 $TMUX set -p -t "$pane" @label "${title:0:32}"
 $TMUX set -p -t "$pane" @badge "starting"
-$TMUX select-layout -t "$COCKPIT_SESSION:0" "$COCKPIT_LAYOUT" 2>/dev/null
+$TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 $TMUX display-message "cockpit: + ${title:0:40}"

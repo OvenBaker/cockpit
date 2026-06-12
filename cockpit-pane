@@ -12,7 +12,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
-W="$COCKPIT_SESSION:0"
+W=$(cockpit_cur_window)   # act on the workspace you're viewing
 
 case "${1:-remove}" in
   add)   # kept for back-compat; the real path is `cockpit-pick add` in a popup

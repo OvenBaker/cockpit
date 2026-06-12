@@ -5,7 +5,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
-W="$COCKPIT_SESSION:0"; PARK="$COCKPIT_SESSION:parked"
+W=$(cockpit_cur_window); PARK="$COCKPIT_SESSION:parked"   # park idle panes of the current workspace
 
 collapsed=$($TMUX show -gv @idle_collapsed 2>/dev/null || echo 0)
 

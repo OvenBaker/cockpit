@@ -9,6 +9,15 @@ COCKPIT_SESSION="${COCKPIT_SESSION:-cockpit}"
 # monitors); tiled = grid; even-vertical = stacked rows. Override via env.
 COCKPIT_LAYOUT="${COCKPIT_LAYOUT:-even-horizontal}"
 
+# The window the user is currently viewing = the active workspace. Helpers that
+# add/remove/retarget panes act on THIS window, not a hardcoded :0, so they work
+# whichever workspace you're in. Falls back to :0 if nothing's resolvable.
+cockpit_cur_window() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} w
+  w=$($tmux display -p -t "$COCKPIT_SESSION" '#{window_id}' 2>/dev/null)
+  echo "${w:-$COCKPIT_SESSION:0}"
+}
+
 # --- session selection ------------------------------------------------------
 
 # Encode a cwd to its ~/.claude/projects directory name (Claude replaces / and . with -)
@@ -82,6 +91,29 @@ cockpit_candidates() {
     n=$((n+1)); [[ $n -ge $limit ]] && break
   done < <(find "$PROJECTS_DIR" -maxdepth 2 -name '*.jsonl' -printf '%T@\t%p\n' 2>/dev/null \
             | sort -rn | cut -f2-)
+}
+
+# Distinct working directories you've worked in recently, newest first, filtered
+# to ones that still exist — for the new-session picker (Alt-N). $1 = limit.
+cockpit_recent_cwds() {
+  local limit="${1:-15}" d
+  sqlite3 "$SANTA_DB" \
+    "SELECT cwd FROM sessions WHERE coalesce(cwd,'')<>'' \
+     GROUP BY cwd ORDER BY MAX(coalesce(last_active_at, ended_at, started_at)) DESC \
+     LIMIT $((limit*2));" 2>/dev/null \
+  | while IFS= read -r d; do [[ -d "$d" ]] && echo "$d"; done | head -n "$limit"
+}
+
+# Adopt a just-started session: the newest transcript under <cwd>'s project dir
+# modified after <born-epoch>. Used by the poller to bind a freshly-spawned
+# `claude` (no --resume, so no id up front) to its pane once Claude writes.
+cockpit_adopt() {
+  local cwd="$1" born="$2" dir f
+  dir="$PROJECTS_DIR/$(encode_project_dir "$cwd")"
+  [[ -d "$dir" ]] || return 0
+  f=$(find "$dir" -maxdepth 1 -name '*.jsonl' -newermt "@$born" -printf '%T@\t%p\n' 2>/dev/null \
+      | sort -rn | head -1 | cut -f2)
+  [[ -n "$f" ]] && basename "$f" .jsonl
 }
 
 # --- state classification ---------------------------------------------------

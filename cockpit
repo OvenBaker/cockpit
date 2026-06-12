@@ -7,23 +7,29 @@
 #   cockpit --rebuild    tear down a running cockpit, then build a fresh one
 #   cockpit --auto       skip the picker: just open the top -n sessions
 #   cockpit --list       dry run: show the candidate sessions
-#   cockpit -n N         default selection / --auto pane count (default 6)
+#   cockpit -n N         default selection / --auto pane count (default 5)
 #   cockpit --attach     just attach to an existing cockpit
 #   cockpit --kill       tear down the cockpit server
+#
+# Workspaces = tmux windows. Builds two: 'work' (your picked sessions) and an
+# empty 'scratch' for quick/transient ones. The status bar shows them as tabs,
+# tinted by each workspace's most-urgent pane.
 #
 # Frame: titled bordered panes, colored by live state (green=working,
 # blue=just-finished, red=needs-input, dim=idle; active pane = yellow border).
 # Keys (no prefix needed):
-#   Alt-1..9  jump to pane     Alt-Tab  next attention-worthy pane
-#   Alt-z     zoom toggle      Alt-i    collapse/restore idle panes
+#   Alt-←/→   switch workspace    Alt-w/W  new / close workspace
+#   Alt-1..9  jump to pane        Alt-Tab  next attention-worthy pane
+#   Alt-z     zoom toggle         Alt-i    collapse/restore idle panes
 #   Alt-r     retarget pane → pick a dormant session (popup, list refreshed live)
-#   Alt-n     add a pane (popup picker)            Alt-x  remove the active pane
+#   Alt-n     add a pane: resume a session         Alt-N  new session in a cwd
+#   Alt-x     remove the active pane
 #   Alt-s     browse santa-claude's TUI; resume there sends the session here
 #   Alt-/ , Alt-h , Alt-?     show the key reference popup
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX="tmux -L cockpit"
-N=6; MODE=build; AUTO=0; REBUILD=0; SANTA=0
+N=5; MODE=build; AUTO=0; REBUILD=0; SANTA=0
 while [[ $# -gt 0 ]]; do case "$1" in
   --list|-l) MODE=list;; --attach|-a) MODE=attach;; --kill) MODE=kill;;
   --rebuild) REBUILD=1;; --auto) AUTO=1;; --santa) SANTA=1;; -n) N="$2"; shift;;
@@ -99,6 +105,15 @@ apply_chrome() {
   $TMUX set -g status-left  ' cockpit '
   $TMUX set -g status-right '#[fg=colour39]#{@active_count} active#[default]  #{@finished_count} done  #{@idle_count} idle '
   $TMUX set -g status-right-length 60
+  # workspaces = windows. Each tab is named, and the poller tints the name by the
+  # workspace's most-urgent pane (@ws_badge) so a needs-input session glows even
+  # when you're looking elsewhere. The current workspace gets a highlighted slab.
+  $TMUX set -g status-justify left
+  $TMUX set -g window-status-separator ''
+  $TMUX set -g window-status-style 'fg=colour245'
+  $TMUX set -g window-status-current-style 'bg=colour238,fg=colour255,bold'
+  $TMUX set -g window-status-format         ' #{?@ws_badge,#{@ws_badge},}#W#[default] '
+  $TMUX set -g window-status-current-format ' #{?@ws_badge,#{@ws_badge},}#W '
   # keybinds (no-prefix Alt-…).
   # Server ops (select-pane, layout, kill) go via run-shell. But popups/menus
   # need a client, which run-shell has NOT — so the choosers/help are bound
@@ -110,28 +125,34 @@ apply_chrome() {
   $TMUX bind -n M-i   run-shell "$HERE/cockpit-toggle-idle"
   $TMUX bind -n M-r   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick retarget #{pane_id}"
   $TMUX bind -n M-n   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick add"
+  $TMUX bind -n M-N   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick new"
   # browse in santa-claude's TUI; its resume key drops the session into the grid
   $TMUX bind -n M-s   display-popup -E -w 95% -h 90% \
     "SANTA_RESUME_CMD=$HERE/cockpit-send SANTA_RESUME_LABEL=cockpit PATH=$HERE/shim:\$PATH COCKPIT_SEND=$HERE/cockpit-send COCKPIT_TMUX='$TMUX' santa-claude tui"
   $TMUX bind -n M-x   run-shell "$HERE/cockpit-pane remove"
-  $TMUX bind -n M-/   display-popup -E -w 64 -h 26 "$HERE/cockpit-help show"
-  $TMUX bind -n M-h   display-popup -E -w 64 -h 26 "$HERE/cockpit-help show"
-  $TMUX bind -n M-?   display-popup -E -w 64 -h 26 "$HERE/cockpit-help show"
+  # workspaces: switch with Alt-←/→, create with Alt-w, close with Alt-W
+  $TMUX bind -n M-Left  previous-window
+  $TMUX bind -n M-Right next-window
+  $TMUX bind -n M-w command-prompt -p "new workspace:" "new-window -n '%%' 'bash -l'"
+  $TMUX bind -n M-W confirm-before -p "close workspace #W? (y/n)" kill-window
+  $TMUX bind -n M-/   display-popup -E -w 64 -h 32 "$HERE/cockpit-help show"
+  $TMUX bind -n M-h   display-popup -E -w 64 -h 32 "$HERE/cockpit-help show"
+  $TMUX bind -n M-?   display-popup -E -w 64 -h 32 "$HERE/cockpit-help show"
 }
 
-# build panes — first session in the new window, rest split then tiled.
+# build the 'work' workspace — first session opens the window, rest split + tile.
 # Capture each pane's stable pane_id (%N) so stamping survives re-layout.
 first=1
 for row in "${CAND[@]}"; do
   IFS=$'\t' read -r id cwd title <<< "$row"
   cmd="cd $(printf %q "$cwd") && exec claude --resume $id"
   if (( first )); then
-    pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
+    pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
     apply_chrome   # server now alive — safe to set globals/keybinds
     first=0
   else
-    pane=$($TMUX split-window -t "$COCKPIT_SESSION:0" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
-    $TMUX select-layout -t "$COCKPIT_SESSION:0" "$COCKPIT_LAYOUT"
+    pane=$($TMUX split-window -t "$COCKPIT_SESSION:work" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
+    $TMUX select-layout -t "$COCKPIT_SESSION:work" "$COCKPIT_LAYOUT"
   fi
   # stamp pane (by stable pane_id) so the poller knows which transcript to watch
   $TMUX set -p -t "$pane" @session_id "$id"
@@ -139,7 +160,12 @@ for row in "${CAND[@]}"; do
   $TMUX set -p -t "$pane" @label "${title:0:32}"
   $TMUX set -p -t "$pane" @badge "starting"
 done
-$TMUX select-layout -t "$COCKPIT_SESSION:0" "$COCKPIT_LAYOUT"
+$TMUX select-layout -t "$COCKPIT_SESSION:work" "$COCKPIT_LAYOUT"
+
+# second workspace: an empty 'scratch' window for quick / transient sessions.
+# (Alt-n to drop a resumed session in, or Alt-N once new-session lands.)
+$TMUX new-window -t "$COCKPIT_SESSION" -n scratch "bash -l"
+$TMUX select-window -t "$COCKPIT_SESSION:work"
 
 # launch the state poller against this server, in the background. Clear any
 # straggler poller first and fully detach (setsid) so exactly one survives —

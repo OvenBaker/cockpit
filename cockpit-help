@@ -12,12 +12,18 @@ if [[ "${1:-popup}" == "show" ]]; then
 
    cockpit — keys  (no prefix needed)
 
+   workspaces (= windows)
+   Alt-← / →     switch workspace
+   Alt-w / W     new / close workspace
+
+   panes
    Alt-1 … 9     jump to pane N
    Alt-Tab       next attention-worthy pane
    Alt-z         zoom / unzoom the active pane
    Alt-i         collapse idle panes / restore
    Alt-r         retarget pane → pick a session (popup)
-   Alt-n         add a pane → pick a session (popup)
+   Alt-n         add a pane → resume a session
+   Alt-N         new session in a chosen directory
    Alt-s         browse santa-claude TUI → resume sends here
    Alt-x         remove the active pane
    Alt-/ h ?     this help
