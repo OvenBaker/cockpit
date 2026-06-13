@@ -18,7 +18,8 @@
 # Frame: titled bordered panes, colored by live state (green=working,
 # blue=just-finished, red=needs-input, dim=idle; active pane = yellow border).
 # Keys (no prefix needed):
-#   Alt-←/→   switch workspace    Alt-w/W  new / close workspace
+#   Alt-←/→   switch workspace    Alt-w  new workspace
+#   Alt-W     close workspace (10s timer)          Alt-u  undo a close
 #   Alt-1..9  jump to pane        Alt-Tab  next attention-worthy pane
 #   Alt-z     zoom toggle         Alt-i    collapse/restore idle panes
 #   Alt-r     retarget pane → pick a dormant session (popup, list refreshed live)
@@ -134,7 +135,11 @@ apply_chrome() {
   $TMUX bind -n M-Left  previous-window
   $TMUX bind -n M-Right next-window
   $TMUX bind -n M-w command-prompt -p "new workspace:" "new-window -n '%%' 'bash -l'"
-  $TMUX bind -n M-W confirm-before -p "close workspace #W? (y/n)" kill-window
+  # close a workspace on a 10s recoverable timer (Alt-u to undo); also reroute
+  # the default prefix kill-window (C-b &) through the same soft-close.
+  $TMUX bind -n M-W run-shell "$HERE/cockpit-ws close"
+  $TMUX bind -n M-u run-shell "$HERE/cockpit-ws undo"
+  $TMUX bind '&'    run-shell "$HERE/cockpit-ws close"
   $TMUX bind -n M-/   display-popup -E -w 64 -h 32 "$HERE/cockpit-help show"
   $TMUX bind -n M-h   display-popup -E -w 64 -h 32 "$HERE/cockpit-help show"
   $TMUX bind -n M-?   display-popup -E -w 64 -h 32 "$HERE/cockpit-help show"

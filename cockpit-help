@@ -14,7 +14,9 @@ if [[ "${1:-popup}" == "show" ]]; then
 
    workspaces (= windows)
    Alt-← / →     switch workspace
-   Alt-w / W     new / close workspace
+   Alt-w         new workspace
+   Alt-W         close workspace (10s timer)
+   Alt-u         undo a close
 
    panes
    Alt-1 … 9     jump to pane N
