@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# cockpit-move — move the active pane to another workspace (window). Per-pane
+# stamps (@session_id, @label, …) travel with the pane, so the poller keeps
+# tracking it; we just re-tile the source and destination. Moving the last pane
+# out of a workspace empties it, and tmux closes the empty window.
+#
+#   cockpit-move next | prev      shove the active pane to the adjacent workspace
+#   cockpit-move pick [src]       popup: choose an existing workspace, or make one
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+retile() { $TMUX select-layout -t "$1" "$COCKPIT_LAYOUT" 2>/dev/null || true; }
+
+# join <src-pane> into <dst-window>, then re-even both windows. -d keeps focus
+# from following the pane, and we re-select the source window so you stay put
+# (unless it emptied and tmux closed it).
+move_to() {
+  local src="$1" dst="$2" srcwin
+  srcwin=$($TMUX display -p -t "$src" '#{window_id}')
+  [[ "$srcwin" == "$dst" ]] && return 1            # already there
+  $TMUX join-pane -d -s "$src" -t "$dst" 2>/dev/null || return 1
+  retile "$dst"; retile "$srcwin"                  # srcwin may have closed; harmless
+  $TMUX select-window -t "$srcwin" 2>/dev/null || true
+}
+
+case "${1:-pick}" in
+  next|prev)
+    src=$($TMUX display -p -t "$COCKPIT_SESSION" '#{pane_id}')
+    srcwin=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_id}')
+    mapfile -t order < <($TMUX list-windows -t "$COCKPIT_SESSION" -F '#{window_id}')
+    (( ${#order[@]} >= 2 )) || { $TMUX display-message "cockpit: only one workspace — Alt-m to make another"; exit 0; }
+    idx=-1; for i in "${!order[@]}"; do [[ "${order[$i]}" == "$srcwin" ]] && idx=$i; done
+    if [[ "$1" == next ]]; then j=$(( (idx + 1) % ${#order[@]} ))
+    else j=$(( (idx - 1 + ${#order[@]}) % ${#order[@]} )); fi
+    dst="${order[$j]}"; dstname=$($TMUX display -p -t "$dst" '#{window_name}')
+    move_to "$src" "$dst" && $TMUX display-message "moved pane → $dstname"
+    ;;
+
+  pick)
+    src="${2:-}"
+    [[ -z "$src" || "$src" == *'#{'* ]] && src=$($TMUX display -p -t "$COCKPIT_SESSION" '#{pane_id}')
+    srcwin=$($TMUX display -p -t "$src" '#{window_id}' 2>/dev/null)
+    say() { printf '%s\n' "$*" >/dev/tty; }
+    mapfile -t WINS < <($TMUX list-windows -t "$COCKPIT_SESSION" -F '#{window_id}	#{window_name}	#{window_panes}')
+
+    say ""; say "  Move pane → which workspace?"; say ""
+    i=0; declare -a WID=()
+    for row in "${WINS[@]}"; do
+      IFS=$'\t' read -r wid wname wpanes <<< "$row"
+      [[ "$wid" == "$srcwin" ]] && continue                 # skip the one it's in
+      i=$((i+1)); WID[$i]="$wid"
+      printf '  %2d  %-22s %s pane(s)\n' "$i" "$wname" "$wpanes" >/dev/tty
+    done
+    newopt=$((i+1)); printf '  %2d  + new workspace…\n' "$newopt" >/dev/tty
+    say ""; printf '  > ' >/dev/tty
+    read -r line </dev/tty || line=""
+    [[ "$line" =~ ^[0-9]+$ ]] || { say "  cancelled."; sleep 0.4; exit 0; }
+
+    if (( line == newopt )); then
+      printf '  name: ' >/dev/tty; read -r nm </dev/tty || nm=""
+      [[ -n "${nm// }" ]] || { say "  cancelled."; sleep 0.4; exit 0; }
+      if $TMUX break-pane -d -s "$src" -n "$nm" 2>/dev/null; then retile "$srcwin"; say "  → new workspace '$nm'"; fi
+    elif (( line >= 1 && line <= i )); then
+      dst="${WID[$line]}"; dstname=$($TMUX display -p -t "$dst" '#{window_name}' 2>/dev/null)
+      move_to "$src" "$dst" && say "  → $dstname"
+    else
+      say "  cancelled."
+    fi
+    sleep 0.4
+    ;;
+
+  *) echo "usage: cockpit-move {next|prev|pick [src]}" >&2; exit 2;;
+esac
