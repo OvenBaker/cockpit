@@ -30,6 +30,7 @@
 #   Alt-n     add a pane: resume a session         Alt-N  new session in a cwd
 #   Alt-m     move pane → workspace (Alt-S-←/→ shove)   Alt-x  remove the active pane
 #   Alt-s     browse santa-claude's TUI; resume there sends the session here
+#   Alt-f     find sessions related to the focused pane → add one to this workspace
 #   Alt-/ , Alt-h , Alt-?     show the key reference popup
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
@@ -146,6 +147,8 @@ apply_chrome() {
   $TMUX bind -n M-r   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick retarget #{pane_id}"
   $TMUX bind -n M-n   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick add"
   $TMUX bind -n M-N   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick new"
+  # find sessions related to the focused pane's session → add a chosen one here
+  $TMUX bind -n M-f   display-popup -E -w 88 -h 22 "$HERE/cockpit-related #{pane_id}"
   # browse in santa-claude's TUI; its resume key drops the session into the grid
   $TMUX bind -n M-s   display-popup -E -w 95% -h 90% \
     "SANTA_RESUME_CMD=$HERE/cockpit-send SANTA_RESUME_LABEL=cockpit PATH=$HERE/shim:\$PATH COCKPIT_SEND=$HERE/cockpit-send COCKPIT_TMUX='$TMUX' santa-claude tui"

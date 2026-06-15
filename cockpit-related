@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# cockpit-related — find sessions related to the focused pane's session (via
+# `santa-claude related`) and drop a chosen one into the current workspace.
+# Bound to Alt-f; runs in a display-popup (real tty for the numbered prompt).
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+SANTA="${COCKPIT_SANTA:-santa-claude}"
+
+say()   { printf '%s\n' "$*" >/dev/tty; }
+pause() { read -rsn1 -p "$1" </dev/tty || true; }
+
+pane="${1:-}"
+[[ -z "$pane" || "$pane" == *'#{'* ]] && pane=$($TMUX display -p -t "$COCKPIT_SESSION" '#{pane_id}' 2>/dev/null)
+sid=$($TMUX show -p -t "$pane" @session_id 2>/dev/null | awk '{print $2}')
+[[ -n "$sid" ]] || { say "  this pane has no tracked session to relate from."; pause "(any key) "; exit 0; }
+
+say ""; say "  finding sessions related to ${sid:0:8} …"
+mapfile -t R < <("$SANTA" related "$sid" --limit 10 --porcelain 2>/dev/null)
+(( ${#R[@]} )) || { say "  no related sessions found."; pause "(any key) "; exit 0; }
+
+say ""; say "  Related sessions — pick one to add to this workspace:"; say ""
+i=0; declare -a RID RCWD
+for row in "${R[@]}"; do
+  IFS=$'\t' read -r rid rcwd rtitle rsame <<< "$row"
+  [[ "$rcwd" == "-" ]] && rcwd=""
+  i=$((i+1)); RID[$i]="$rid"; RCWD[$i]="$rcwd"
+  marker=""; [[ "$rsame" == 1 ]] && marker="  ↳ same repo"
+  printf '  %2d  %-24s %s%s\n' "$i" "${rcwd/#$HOME/\~}" "${rtitle:0:44}" "$marker" >/dev/tty
+done
+say ""; printf '  > ' >/dev/tty
+read -r line </dev/tty || line=""
+[[ "$line" =~ ^[0-9]+$ ]] && (( line >= 1 && line <= i )) || { say "  cancelled."; sleep 0.4; exit 0; }
+
+# hand off to cockpit-send (adds to the current workspace; resolves cwd if blank)
+if [[ -n "${RCWD[$line]}" ]]; then exec "$HERE/cockpit-send" "${RID[$line]}" --cwd "${RCWD[$line]}"
+else exec "$HERE/cockpit-send" "${RID[$line]}"; fi
