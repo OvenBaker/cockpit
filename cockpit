@@ -110,6 +110,8 @@ select_cand() {
 # immediately, so any `set -g`/`bind` issued before the first new-session dies
 # with "no server running" and set -e kills the script.
 apply_chrome() {
+  local i   # MUST be local: restore_grid calls this inside its `for ((i…))` loop,
+            # and the Alt-1..9 bind loop below would otherwise clobber the counter.
   $TMUX set -g pane-border-status top
   $TMUX set -g pane-border-lines heavy
   # State colour lives in the per-pane TOP line (@sc tints label + badge), not in
