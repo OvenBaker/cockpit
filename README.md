@@ -8,15 +8,25 @@ touches your other tmux use.
 ## Usage
 
 ```
-cockpit              pick sessions interactively, build the grid, attach
+cockpit              restore the saved layout if one exists, else pick fresh
+cockpit --fresh      ignore the saved layout; pick sessions fresh
+cockpit --restore    force-restore the saved layout
 cockpit --santa      pick sessions in santa-claude's TUI (resume → cockpit)
 cockpit --rebuild    tear down a running cockpit, then build a fresh one
 cockpit --auto       skip the picker: just open the top -n sessions
 cockpit --list       dry run: show the candidate sessions
-cockpit -n N         default selection / --auto pane count (default 6)
+cockpit -n N         default selection / --auto pane count (default 5)
 cockpit --attach     just attach to an existing cockpit
 cockpit --kill       tear down the cockpit server
 ```
+
+## Persistence
+
+The poller continuously saves the layout (workspaces, panes, and which session
+each holds) to `~/.local/state/cockpit/layout.<session>.tsv` — throttled and
+only on change, so an ungraceful shutdown loses at most a few seconds. A plain
+`cockpit` then rebuilds that layout and resumes every session. `--kill` keeps
+the saved layout; `--fresh` ignores it.
 
 ## Live state
 
