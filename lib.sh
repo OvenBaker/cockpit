@@ -208,18 +208,22 @@ agent_transcript() {
 # Classify a Codex rollout's live state. Last event_msg/task_complete = idle;
 # a response_item/function_call awaiting output that's gone quiet = needs-input;
 # fresh file = working.
+# Codex live state from the most-recent TURN BOUNDARY, not the last raw event.
+# A `task_started` with no following `task_complete` means a turn is in progress
+# — running a tool (even a long `sleep`), searching, or thinking → working.
+# `task_complete` / `turn_aborted` → idle. Codex (auto-approve) emits no
+# "awaiting approval" event, so there's no reliable needs-input signal and we
+# never flag it — a long pending function_call is a running tool, not a block.
 classify_codex() {
-  local j="$1" now mtime age last pt ty
+  local j="$1" now mtime age lt
   [[ -f "$j" ]] || { echo dead; return; }
   now=$(date +%s); mtime=$(stat -c %Y "$j" 2>/dev/null || echo 0); age=$(( now - mtime ))
-  last=$(tail -1 "$j" 2>/dev/null)
-  pt=$(jq -r '.payload.type // ""' <<<"$last" 2>/dev/null)
-  ty=$(jq -r '.type // ""' <<<"$last" 2>/dev/null)
-  [[ "$pt" == "task_complete" ]] && { echo idle; return; }
-  if [[ "$ty" == "response_item" && "$pt" == "function_call" ]]; then    # tool call in flight
-    (( age >= ${COCKPIT_NEEDS_SECS:-25} )) && echo needs-input || echo working; return
-  fi
-  (( age < ${COCKPIT_WORKING_SECS:-12} )) && echo working || echo idle
+  lt=$(tac "$j" 2>/dev/null | grep -m1 -oE '"(task_started|task_complete|turn_aborted)"' | tr -d '"') || true
+  case "$lt" in
+    task_started)               echo working; return;;
+    task_complete|turn_aborted) echo idle; return;;
+  esac
+  (( age < ${COCKPIT_WORKING_SECS:-12} )) && echo working || echo idle   # no turn boundary yet
 }
 
 agent_classify() { case "$1" in codex) classify_codex "$2";; *) classify_state "$2";; esac; }
