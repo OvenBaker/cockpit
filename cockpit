@@ -18,8 +18,9 @@
 # empty 'scratch' for quick/transient ones. The status bar shows them as tabs,
 # tinted by each workspace's most-urgent pane.
 #
-# Frame: titled bordered panes, colored by live state (green=working,
-# blue=just-finished, red=needs-input, dim=idle; active pane = yellow border).
+# Frame: each pane's TOP title is coloured by live state (green=working,
+# blue=just-finished, red=needs-input, dim=idle); box borders are neutral and
+# the active pane's border is yellow.
 # Keys (no prefix needed):
 #   Alt-←/→   switch workspace    Alt-w  new workspace
 #   Alt-W     close workspace (10s timer)          Alt-u  undo a close
@@ -110,12 +111,14 @@ select_cand() {
 apply_chrome() {
   $TMUX set -g pane-border-status top
   $TMUX set -g pane-border-lines heavy
-  # label hugs the left, status+time hug the right; the heavy line fills the gap.
-  # This way a long label only eats into the middle, never the badge.
-  $TMUX set -g pane-border-format '#[align=left] #{?@label,#{@label},#{pane_index}} #[align=right] #{?@badge,#{@badge},…} '
-  $TMUX set -g pane-border-style 'fg=colour240'
-  # active border = yellow, deliberately distinct from the state colours so the
-  # focused pane never looks like "just-finished" (which is blue).
+  # State colour lives in the per-pane TOP line (@sc tints label + badge), not in
+  # the box borders — adjacent columns share vertical borders, so a per-pane
+  # border colour there is ambiguous and visibly cycles. Label left, status+time
+  # right; the heavy line fills the gap. @sc is set per-pane by the poller.
+  $TMUX set -g pane-border-format '#[align=left] #{@sc}#{?@label,#{@label},#{pane_index}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] '
+  # box borders: uniform neutral; only the active pane is highlighted (the one
+  # case with no shared-edge ambiguity).
+  $TMUX set -g pane-border-style 'fg=colour238'
   $TMUX set -g pane-active-border-style 'fg=colour220,bold'
   $TMUX set -g mouse on
   $TMUX set -g status-style 'bg=colour234,fg=colour250'

@@ -55,12 +55,17 @@ STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/layout.${COCKPIT_SESSI
 SAVE_EVERY="${COCKPIT_SAVE_SECS:-5}"; next_save=0; last_snap=""
 mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
 
+# State colour as a FORMAT directive (#[fg=…]) for the per-pane top line (@sc),
+# NOT a pane-border-style: side-by-side panes share their vertical borders, so a
+# per-pane border-style on a shared edge is ambiguous and flips on every redraw
+# (the "all borders cycling" bug). The top status line is per-pane, so colouring
+# it is unambiguous. Box borders stay a uniform neutral grey (set in apply_chrome).
 color() { case "$1" in
-  working)      echo 'fg=colour41';;     # green
-  just-finished)echo 'fg=colour39,bold';; # blue
-  needs-input)  echo 'fg=colour196,bold';;# red
-  idle)         echo 'fg=colour240';;     # dim
-  *)            echo 'fg=colour240';; esac; }
+  working)      echo '#[fg=colour41]';;      # green
+  just-finished)echo '#[fg=colour39,bold]';; # blue
+  needs-input)  echo '#[fg=colour196,bold]';;# red
+  idle)         echo '#[fg=colour245]';;     # dim
+  *)            echo '#[fg=colour245]';; esac; }
 
 # compact duration so long idles roll over instead of reading "180m"/"2880m"
 dur() { local s=$1
@@ -126,12 +131,11 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     [[ "${FIN[$pid]:-}" == "1" ]] && state=just-finished
     PREV[$pid]="$raw"
 
-    # Only write when the value actually changes. Re-setting an option to the
-    # same value still makes tmux redraw the border — a needless flash every
-    # cycle — so memoise what we last wrote and skip no-op writes.
+    # Only write when the value actually changes (re-setting still forces a
+    # redraw). @sc tints this pane's top line; box borders are left uniform.
     nstyle="$(color "$state")"
     if [[ "${LASTSTYLE[$pid]:-}" != "$nstyle" ]]; then
-      $TMUX set -p -t "$pid" pane-border-style "$nstyle"; LASTSTYLE[$pid]="$nstyle"
+      $TMUX set -p -t "$pid" @sc "$nstyle"; LASTSTYLE[$pid]="$nstyle"
     fi
     nbadge="$(badge "$state" "$age")"
     if [[ "${LASTBADGE[$pid]:-}" != "$nbadge" ]]; then

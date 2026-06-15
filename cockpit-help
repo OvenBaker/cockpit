@@ -32,10 +32,10 @@ if [[ "${1:-popup}" == "show" ]]; then
    Alt-x         remove the active pane
    Alt-/ h ?     this help
 
-   border colour
+   title colour (per pane)
      green  working      blue  just-finished
      red    needs-input  dim   idle
-     yellow = the active (focused) pane
+     yellow border = the active (focused) pane
 
    mouse   click = focus · drag border = resize
            right-click (hold) = pane menu
