@@ -148,7 +148,8 @@ cockpit_adopt() {
 
 # --- state classification ---------------------------------------------------
 # Reads a transcript tail + mtime, prints one of: working|idle|needs-input|dead
-# Tunables via env: COCKPIT_WORKING_SECS (default 4), COCKPIT_STALL_SECS (90)
+# Tunables via env: COCKPIT_WORKING_SECS (working window, default 12),
+# COCKPIT_NEEDS_SECS (quiet-on-a-pending-tool before "needs-input", default 25)
 
 # Classify by the LAST transcript event FIRST, using mtime only to distinguish
 # an in-progress turn (file moving) from a stalled one. This ordering matters:
@@ -160,10 +161,9 @@ cockpit_adopt() {
 classify_state() {
   local jsonl="$1"
   [[ -f "$jsonl" ]] || { echo dead; return; }
-  local now mtime age last stop wants_tool has_result fresh=0
+  local now mtime age last stop wants_tool has_result
   now=$(date +%s); mtime=$(stat -c %Y "$jsonl" 2>/dev/null || echo 0)
   age=$(( now - mtime ))
-  (( age < ${COCKPIT_WORKING_SECS:-4} )) && fresh=1
   last=$(tail -1 "$jsonl" 2>/dev/null)
   stop=$(jq -r '.message.stop_reason // ""' <<<"$last" 2>/dev/null)
   wants_tool=$(jq -r '[.message.content[]? | select(.type=="tool_use")] | length>0' <<<"$last" 2>/dev/null)
@@ -172,14 +172,17 @@ classify_state() {
   # finished turn — assistant is done, waiting on the human → idle (even if the
   # mtime is fresh from a resume rewrite).
   if [[ "$stop" == "end_turn" || "$stop" == "stop_sequence" ]]; then echo idle; return; fi
-  # assistant requested a tool / permission with no result yet: file still
-  # moving → working; gone quiet → blocked on the human.
+  # tool/permission requested, no result yet: a turn IS in progress. Stay
+  # 'working' through normal tool runs and thinking pauses; only flag
+  # needs-input once it's been quiet long enough to look genuinely blocked.
   if [[ "$stop" == "tool_use" || "$wants_tool" == "true" ]] && [[ "$has_result" != "true" ]]; then
-    (( fresh )) && echo working || echo needs-input; return
+    (( age >= ${COCKPIT_NEEDS_SECS:-25} )) && echo needs-input || echo working
+    return
   fi
-  # mid-stream (a tool result just landed, or a partial assistant message):
-  # only call it working while the file is actively moving, else settled.
-  (( fresh )) && echo working || echo idle
+  # mid-turn (partial message / tool result just landed): 'working' while
+  # recently written, else settled. The window is wide (COCKPIT_WORKING_SECS)
+  # so streaming/thinking gaps don't flip green↔blue on an active pane.
+  (( age < ${COCKPIT_WORKING_SECS:-12} )) && echo working || echo idle
 }
 
 # Seconds since last transcript activity (for "idle 6m" labels)
@@ -206,18 +209,17 @@ agent_transcript() {
 # a response_item/function_call awaiting output that's gone quiet = needs-input;
 # fresh file = working.
 classify_codex() {
-  local j="$1" now mtime age fresh=0 last pt ty
+  local j="$1" now mtime age last pt ty
   [[ -f "$j" ]] || { echo dead; return; }
   now=$(date +%s); mtime=$(stat -c %Y "$j" 2>/dev/null || echo 0); age=$(( now - mtime ))
-  (( age < ${COCKPIT_WORKING_SECS:-4} )) && fresh=1
   last=$(tail -1 "$j" 2>/dev/null)
   pt=$(jq -r '.payload.type // ""' <<<"$last" 2>/dev/null)
   ty=$(jq -r '.type // ""' <<<"$last" 2>/dev/null)
   [[ "$pt" == "task_complete" ]] && { echo idle; return; }
-  if [[ "$ty" == "response_item" && "$pt" == "function_call" ]]; then
-    (( fresh )) && echo working || echo needs-input; return
+  if [[ "$ty" == "response_item" && "$pt" == "function_call" ]]; then    # tool call in flight
+    (( age >= ${COCKPIT_NEEDS_SECS:-25} )) && echo needs-input || echo working; return
   fi
-  (( fresh )) && echo working || echo idle
+  (( age < ${COCKPIT_WORKING_SECS:-12} )) && echo working || echo idle
 }
 
 agent_classify() { case "$1" in codex) classify_codex "$2";; *) classify_state "$2";; esac; }

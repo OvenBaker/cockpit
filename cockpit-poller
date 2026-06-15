@@ -34,9 +34,11 @@ declare -A FIN        # pane_id -> 1 if in just-finished (cleared when visited)
 declare -A LASTSTYLE  # pane_id -> last border style WE wrote (skip redundant writes)
 declare -A LASTBADGE  # pane_id -> last badge WE wrote
 declare -A LASTLABEL  # pane_id -> last label seen/written (so titles can upgrade)
+declare -A LASTSTATE  # pane_id -> last @state written (setting it repaints the border)
 declare -A PREV_WCOUNT # window_id -> last pane count (re-tile that window on change)
 declare -A LASTWS     # window_id -> last @ws_badge written (workspace tab colour)
 declare -A ADOPTED    # session id -> already claimed by a pane (Alt-N new sessions)
+prev_counts=""        # last @active/@finished/@idle trio written (skip no-op status writes)
 # Labels are stamped once at pane creation, often from a fallback (first prompt)
 # before santa-claude has summarised the session. Re-query the DB occasionally
 # and upgrade the @label when a better title lands — throttled, not every cycle.
@@ -142,7 +144,12 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     if [[ "${LASTBADGE[$pid]:-}" != "$nbadge" ]]; then
       $TMUX set -p -t "$pid" @badge "$nbadge"; LASTBADGE[$pid]="$nbadge"
     fi
-    $TMUX set -p -t "$pid" @state "$state"   # no visual; read by cockpit-next
+    # @state is read by cockpit-next — but writing ANY pane option repaints that
+    # pane's border line, so only write on change (else an idle pane's title
+    # flickers every cycle).
+    if [[ "${LASTSTATE[$pid]:-}" != "$state" ]]; then
+      $TMUX set -p -t "$pid" @state "$state"; LASTSTATE[$pid]="$state"
+    fi
 
     # upgrade the title if santa-claude has since produced a better one
     if (( do_titles )); then
@@ -176,7 +183,10 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     fi
   done
 
-  $TMUX set -g @active_count "$nA"; $TMUX set -g @finished_count "$nF"; $TMUX set -g @idle_count "$nI"
+  if [[ "$nA/$nF/$nI" != "$prev_counts" ]]; then   # only touch the status bar on change
+    $TMUX set -g @active_count "$nA"; $TMUX set -g @finished_count "$nF"; $TMUX set -g @idle_count "$nI"
+    prev_counts="$nA/$nF/$nI"
+  fi
 
   # persist the layout (throttled, only when it changed) so cockpit can restore it
   if (( now >= next_save )); then
