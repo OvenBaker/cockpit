@@ -77,7 +77,7 @@ _claude_rows() {
   while IFS=$'\t' read -r id status title cwd; do
     ST[$id]="$status"; TL[$id]="$title"; CW[$id]="$cwd"
   done < <(sqlite3 -separator $'\t' "$SANTA_DB" \
-    "SELECT id, status, coalesce(nullif(summary_title,''), substr(first_user_text,1,48), ''), coalesce(cwd,'') FROM sessions;")
+    "SELECT id, status, coalesce(nullif(summary_title,''), substr(first_user_text,1,80), ''), coalesce(cwd,'') FROM sessions;")
   while IFS=$'\t' read -r mt jsonl; do
     (( ${mt%.*} < cutoff )) && break                # sorted newest-first → rest are older
     id=$(basename "$jsonl" .jsonl)
@@ -87,7 +87,7 @@ _claude_rows() {
     cwd="${CW[$id]:-}"; [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.cwd)|.cwd' "$jsonl" 2>/dev/null | head -1)
     [[ -z "$cwd" ]] && continue
     title="${TL[$id]:-}"
-    [[ -z "$title" ]] && title=$(jq -r 'select(.type=="user") | (.message.content | if type=="string" then . else (map(select(.type=="text").text)|join(" ")) end)' "$jsonl" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-60 || true)
+    [[ -z "$title" ]] && title=$(jq -r 'select(.type=="user") | (.message.content | if type=="string" then . else (map(select(.type=="text").text)|join(" ")) end)' "$jsonl" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-100 || true)
     [[ "$title" == "<<santa-claude-internal>>"* ]] && continue
     [[ -z "$title" ]] && title="(untitled)"
     printf '%s\tclaude\t%s\t%s\t%s\n' "${mt%.*}" "$id" "$cwd" "$title"
@@ -107,7 +107,7 @@ _codex_rows() {
     session_is_live "$f" && continue
     cwd=$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$f")" 2>/dev/null)
     [[ -n "$cwd" ]] || continue
-    title=$(jq -rc 'select(.payload.type=="user_message")|.payload.message' "$f" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-60)
+    title=$(jq -rc 'select(.payload.type=="user_message")|.payload.message' "$f" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-100)
     [[ -n "$title" ]] || title="(codex ${id:0:8})"
     printf '%s\tcodex\t%s\t%s\t%s\n' "${mt%.*}" "$id" "$cwd" "$title"
     n=$((n+1)); (( n >= limit )) && break

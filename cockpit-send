@@ -27,7 +27,7 @@ log "invoked: id='$id' cwd-arg='$cwd' agent='$agent' COCKPIT_TMUX='${COCKPIT_TMU
 title=""
 if [[ "$agent" != codex ]]; then
   row=$(sqlite3 -separator $'\t' "$SANTA_DB" \
-    "SELECT id, coalesce(cwd,''), coalesce(nullif(summary_title,''), substr(first_user_text,1,48),'') \
+    "SELECT id, coalesce(cwd,''), coalesce(nullif(summary_title,''), substr(first_user_text,1,80),'') \
      FROM sessions WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
   if [[ -n "$row" ]]; then
     IFS=$'\t' read -r fid fcwd ftitle <<< "$row"; id="$fid"; agent=claude
@@ -39,7 +39,7 @@ if [[ -z "$agent" || "$agent" == codex ]]; then
   if [[ -n "$cj" ]]; then
     agent=codex
     [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$cj")" 2>/dev/null)
-    [[ -z "$title" ]] && title=$(jq -rc 'select(.payload.type=="user_message")|.payload.message' "$cj" 2>/dev/null | grep -v '^$' | head -1 | cut -c1-48)
+    [[ -z "$title" ]] && title=$(jq -rc 'select(.payload.type=="user_message")|.payload.message' "$cj" 2>/dev/null | grep -v '^$' | head -1 | cut -c1-100)
   fi
 fi
 [[ -n "$agent" ]] || agent=claude
@@ -71,7 +71,7 @@ else
 fi
 $TMUX set -p -t "$pane" @session_id "$id"
 $TMUX set -p -t "$pane" @cwd "$cwd"
-$TMUX set -p -t "$pane" @label "${title:0:32}"
+$TMUX set -p -t "$pane" @label "$title"      # full; border truncates to width
 $TMUX set -p -t "$pane" @agent "$agent"
 $TMUX set -p -t "$pane" @badge "starting"
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null

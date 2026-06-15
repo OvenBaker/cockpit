@@ -50,7 +50,7 @@ retarget_pane() {
   $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
   $TMUX set -p -t "$pane" @session_id "$id"
   $TMUX set -p -t "$pane" @cwd "$cwd"
-  $TMUX set -p -t "$pane" @label "${title:0:32}"
+  $TMUX set -p -t "$pane" @label "$title"     # full; border truncates to width
   $TMUX set -p -t "$pane" @agent "$agent"
   $TMUX set -p -t "$pane" @badge "starting"
 }

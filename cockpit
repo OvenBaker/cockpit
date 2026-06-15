@@ -116,7 +116,9 @@ apply_chrome() {
   # the box borders — adjacent columns share vertical borders, so a per-pane
   # border colour there is ambiguous and visibly cycles. Label left, status+time
   # right; the heavy line fills the gap. @sc is set per-pane by the poller.
-  $TMUX set -g pane-border-format '#[align=left] #{@sc}#{?@label,#{@label},#{pane_index}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] '
+  # The label is stored full and truncated HERE to pane_width-20 (≈ badge+pad),
+  # so it uses whatever room the pane has — wide panes show more, narrow less.
+  $TMUX set -g pane-border-format '#[align=left] #{@sc}#{=/#{e|-|:#{pane_width},20}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] '
   # box borders: uniform neutral; only the active pane is highlighted (the one
   # case with no shared-edge ambiguity).
   $TMUX set -g pane-border-style 'fg=colour238'
@@ -174,7 +176,7 @@ apply_chrome() {
 stamp_pane() {  # pane-id  session-id  cwd  label  [agent]
   $TMUX set -p -t "$1" @session_id "$2"
   $TMUX set -p -t "$1" @cwd "$3"
-  $TMUX set -p -t "$1" @label "${4:0:32}"
+  $TMUX set -p -t "$1" @label "$4"            # full title; border format truncates to width
   $TMUX set -p -t "$1" @agent "${5:-claude}"
   $TMUX set -p -t "$1" @badge "starting"
 }

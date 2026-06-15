@@ -147,10 +147,9 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     # upgrade the title if santa-claude has since produced a better one
     if (( do_titles )); then
       t=$(sqlite3 "$SANTA_DB" \
-        "SELECT coalesce(nullif(summary_title,''), substr(first_user_text,1,48), '') \
+        "SELECT coalesce(nullif(summary_title,''), substr(first_user_text,1,80), '') \
          FROM sessions WHERE id='$sid' LIMIT 1;" 2>/dev/null)
-      t="${t:0:32}"
-      if [[ -n "$t" && "$t" != "${LASTLABEL[$pid]:-}" ]]; then
+      if [[ -n "$t" && "$t" != "${LASTLABEL[$pid]:-}" ]]; then   # store full; border truncates
         $TMUX set -p -t "$pid" @label "$t"; LASTLABEL[$pid]="$t"
       fi
     fi
