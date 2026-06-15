@@ -4,6 +4,7 @@
 
 SANTA_DB="${SANTA_DB:-$HOME/.local/share/santa-claude/index.db}"
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/.claude/projects}"
+CODEX_SESSIONS="${CODEX_SESSIONS:-$HOME/.codex/sessions}"   # Codex rollout store
 COCKPIT_SESSION="${COCKPIT_SESSION:-cockpit}"
 # Pane arrangement. even-horizontal = tall side-by-side columns (best on wide
 # monitors); tiled = grid; even-vertical = stacked rows. Override via env.
@@ -17,7 +18,7 @@ cockpit_snapshot() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
   printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
   $tmux list-panes -s -t "$COCKPIT_SESSION" \
-    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}" 2>/dev/null
+    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},claude}" 2>/dev/null
 }
 
 # The window the user is currently viewing = the active workspace. Helpers that
@@ -67,41 +68,59 @@ session_is_running() {
   pgrep -f "claude --resume $id" >/dev/null 2>&1
 }
 
-# Emit candidate sessions for the grid: the most-recently-touched transcripts
-# that are dormant (not live) and not marked completed. Recency comes from the
-# filesystem (always current); status + label come from santa-claude's DB.
-# Output TSV: id<TAB>cwd<TAB>title   (limit via $1, default 6)
+# Candidate dormant Claude sessions, newest-first, as: mtime<TAB>claude<TAB>id<TAB>cwd<TAB>title
 COCKPIT_MAX_AGE_DAYS="${COCKPIT_MAX_AGE_DAYS:-30}"
-cockpit_candidates() {
-  local limit="${1:-6}" id title status cwd jsonl n=0
+_claude_rows() {
+  local limit="${1:-16}" id title status cwd jsonl mt n=0
   local now cutoff; now=$(date +%s); cutoff=$(( now - COCKPIT_MAX_AGE_DAYS*86400 ))
-  # one-shot DB snapshot: id -> status / title / cwd
   declare -A ST TL CW
   while IFS=$'\t' read -r id status title cwd; do
     ST[$id]="$status"; TL[$id]="$title"; CW[$id]="$cwd"
   done < <(sqlite3 -separator $'\t' "$SANTA_DB" \
     "SELECT id, status, coalesce(nullif(summary_title,''), substr(first_user_text,1,48), ''), coalesce(cwd,'') FROM sessions;")
-  # walk transcripts newest-first
-  while IFS= read -r jsonl; do
+  while IFS=$'\t' read -r mt jsonl; do
+    (( ${mt%.*} < cutoff )) && break                # sorted newest-first → rest are older
     id=$(basename "$jsonl" .jsonl)
-    (( $(stat -c %Y "$jsonl" 2>/dev/null || echo 0) < cutoff )) && continue   # too old to be worth resuming
     [[ "${ST[$id]:-active}" == "completed" || "${ST[$id]:-}" == "archived" ]] && continue
-    session_is_running "$id" && continue            # already attached elsewhere → skip (don't double-resume)
-    session_is_live "$jsonl" && continue            # recently active → skip
-    cwd="${CW[$id]:-}"
-    [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.cwd)|.cwd' "$jsonl" 2>/dev/null | head -1)
+    session_is_running "$id" && continue
+    session_is_live "$jsonl" && continue
+    cwd="${CW[$id]:-}"; [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.cwd)|.cwd' "$jsonl" 2>/dev/null | head -1)
     [[ -z "$cwd" ]] && continue
     title="${TL[$id]:-}"
-    if [[ -z "$title" ]]; then   # not summarised yet → use the opening user prompt
-      title=$(jq -r 'select(.type=="user") | (.message.content | if type=="string" then . else (map(select(.type=="text").text)|join(" ")) end)' "$jsonl" 2>/dev/null \
-              | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-60 || true)
-    fi
-    [[ "$title" == "<<santa-claude-internal>>"* ]] && continue   # santa's own claude -p runs
+    [[ -z "$title" ]] && title=$(jq -r 'select(.type=="user") | (.message.content | if type=="string" then . else (map(select(.type=="text").text)|join(" ")) end)' "$jsonl" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-60 || true)
+    [[ "$title" == "<<santa-claude-internal>>"* ]] && continue
     [[ -z "$title" ]] && title="(untitled)"
-    printf '%s\t%s\t%s\n' "$id" "$cwd" "$title"
-    n=$((n+1)); [[ $n -ge $limit ]] && break
-  done < <(find "$PROJECTS_DIR" -maxdepth 2 -name '*.jsonl' -printf '%T@\t%p\n' 2>/dev/null \
-            | sort -rn | cut -f2-)
+    printf '%s\tclaude\t%s\t%s\t%s\n' "${mt%.*}" "$id" "$cwd" "$title"
+    n=$((n+1)); (( n >= limit )) && break
+  done < <(find "$PROJECTS_DIR" -maxdepth 2 -name '*.jsonl' -printf '%T@\t%p\n' 2>/dev/null | sort -rn)
+}
+
+# Candidate dormant Codex sessions, newest-first, as: mtime<TAB>codex<TAB>id<TAB>cwd<TAB>title
+_codex_rows() {
+  local limit="${1:-16}" f id cwd title mt n=0
+  local now cutoff; now=$(date +%s); cutoff=$(( now - COCKPIT_MAX_AGE_DAYS*86400 ))
+  [[ -d "$CODEX_SESSIONS" ]] || return 0
+  while IFS=$'\t' read -r mt f; do
+    (( ${mt%.*} < cutoff )) && break
+    id=$(basename "$f" | sed -E 's/.*-([0-9a-f-]{36})\.jsonl$/\1/'); [[ -n "$id" ]] || continue
+    session_is_running_agent codex "$id" && continue
+    session_is_live "$f" && continue
+    cwd=$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$f")" 2>/dev/null)
+    [[ -n "$cwd" ]] || continue
+    title=$(jq -rc 'select(.payload.type=="user_message")|.payload.message' "$f" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-60)
+    [[ -n "$title" ]] || title="(codex ${id:0:8})"
+    printf '%s\tcodex\t%s\t%s\t%s\n' "${mt%.*}" "$id" "$cwd" "$title"
+    n=$((n+1)); (( n >= limit )) && break
+  done < <(find "$CODEX_SESSIONS" -type f -name 'rollout-*.jsonl' -printf '%T@\t%p\n' 2>/dev/null | sort -rn)
+}
+
+# Merged candidate sessions across agents, most-recent first.
+# Output TSV: id<TAB>cwd<TAB>title<TAB>agent   (limit via $1, default 6)
+cockpit_candidates() {
+  local limit="${1:-6}"
+  { _claude_rows $((limit + 12)); _codex_rows $((limit + 12)); } \
+    | sort -t$'\t' -k1,1 -rn | head -n "$limit" \
+    | awk -F'\t' 'BEGIN{OFS="\t"}{print $3,$4,$5,$2}'   # mtime,agent,id,cwd,title → id,cwd,title,agent
 }
 
 # Distinct working directories you've worked in recently, newest first, filtered
@@ -169,4 +188,75 @@ idle_seconds() {
   [[ -f "$jsonl" ]] || { echo 999999; return; }
   now=$(date +%s); mtime=$(stat -c %Y "$jsonl" 2>/dev/null || echo 0)
   echo $(( now - mtime ))
+}
+
+# --- multi-agent provider layer (claude | codex) ----------------------------
+# Each pane carries @agent; these dispatch transcript-location, classification
+# and the resume command per provider so cockpit handles both side by side.
+
+# Codex rollout for a session id: ~/.codex/sessions/YYYY/MM/DD/rollout-…-<uuid>.jsonl
+codex_transcript() { find "$CODEX_SESSIONS" -type f -name "*-$1.jsonl" 2>/dev/null | head -1; }
+
+# Transcript file for (agent, id, cwd).
+agent_transcript() {
+  case "$1" in codex) codex_transcript "$2";; *) session_jsonl "$2" "$3";; esac
+}
+
+# Classify a Codex rollout's live state. Last event_msg/task_complete = idle;
+# a response_item/function_call awaiting output that's gone quiet = needs-input;
+# fresh file = working.
+classify_codex() {
+  local j="$1" now mtime age fresh=0 last pt ty
+  [[ -f "$j" ]] || { echo dead; return; }
+  now=$(date +%s); mtime=$(stat -c %Y "$j" 2>/dev/null || echo 0); age=$(( now - mtime ))
+  (( age < ${COCKPIT_WORKING_SECS:-4} )) && fresh=1
+  last=$(tail -1 "$j" 2>/dev/null)
+  pt=$(jq -r '.payload.type // ""' <<<"$last" 2>/dev/null)
+  ty=$(jq -r '.type // ""' <<<"$last" 2>/dev/null)
+  [[ "$pt" == "task_complete" ]] && { echo idle; return; }
+  if [[ "$ty" == "response_item" && "$pt" == "function_call" ]]; then
+    (( fresh )) && echo working || echo needs-input; return
+  fi
+  (( fresh )) && echo working || echo idle
+}
+
+agent_classify() { case "$1" in codex) classify_codex "$2";; *) classify_state "$2";; esac; }
+
+# Inner shell command to (re)launch a pane for (agent, id, cwd).
+agent_resume_inner() {
+  case "$1" in
+    codex) printf 'cd %q && exec codex resume %s' "$3" "$2";;
+    *)     printf 'cd %q && exec claude --resume %s' "$3" "$2";;
+  esac
+}
+
+# Is a session already running? (don't double-resume). claude has a per-id
+# process; codex's resumed process carries `resume <id>` in its argv too.
+session_is_running_agent() {
+  case "$1" in
+    codex) pgrep -f "resume $2" >/dev/null 2>&1;;
+    *)     session_is_running "$2";;
+  esac
+}
+
+# Which agent owns a given session id? (for cockpit-send / related handoff)
+agent_of_id() {
+  [[ -n "$(codex_transcript "$1")" ]] && { echo codex; return; }
+  echo claude
+}
+
+# Adopt a freshly-started session (no id up front) for a pane, per agent.
+# claude: newest transcript under the cwd's project dir born after the pane.
+# codex:  newest rollout overall born after the pane whose session_meta cwd matches.
+cockpit_adopt_agent() {
+  local agent="$1" cwd="$2" born="$3"
+  if [[ "$agent" == codex ]]; then
+    local f
+    while IFS= read -r f; do
+      [[ "$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$f")" 2>/dev/null)" == "$cwd" ]] || continue
+      basename "$f" | sed -E 's/.*-([0-9a-f-]{36})\.jsonl$/\1/'; return
+    done < <(find "$CODEX_SESSIONS" -type f -name 'rollout-*.jsonl' -newermt "@$born" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-)
+    return 0
+  fi
+  cockpit_adopt "$cwd" "$born"
 }

@@ -16,36 +16,49 @@ PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
 LOG="${TMPDIR:-/tmp}/cockpit-send.log"
 log() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true; }
 
-id=""; cwd=""
+id=""; cwd=""; agent=""
 while [[ $# -gt 0 ]]; do case "$1" in
-  --cwd) cwd="${2:-}"; shift;; *) id="$1";; esac; shift; done
-log "invoked: id='$id' cwd-arg='$cwd' COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}' TMUX-cmd='$TMUX'"
-[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH]" >&2; log "ABORT: no id"; exit 2; }
+  --cwd) cwd="${2:-}"; shift;; --agent) agent="${2:-}"; shift;; *) id="$1";; esac; shift; done
+log "invoked: id='$id' cwd-arg='$cwd' agent='$agent' COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}'"
+[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex]" >&2; log "ABORT: no id"; exit 2; }
 
-# resolve full id + cwd + title from santa-claude's index
+# resolve agent + full id + cwd + title. Claude resolves via santa's DB (handles
+# prefixes); otherwise try a Codex rollout; default claude.
 title=""
-row=$(sqlite3 -separator $'\t' "$SANTA_DB" \
-  "SELECT id, coalesce(cwd,''), coalesce(nullif(summary_title,''), substr(first_user_text,1,48),'') \
-   FROM sessions WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
-if [[ -n "$row" ]]; then
-  IFS=$'\t' read -r fid fcwd ftitle <<< "$row"
-  id="$fid"; [[ -z "$cwd" ]] && cwd="$fcwd"; title="$ftitle"
+if [[ "$agent" != codex ]]; then
+  row=$(sqlite3 -separator $'\t' "$SANTA_DB" \
+    "SELECT id, coalesce(cwd,''), coalesce(nullif(summary_title,''), substr(first_user_text,1,48),'') \
+     FROM sessions WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+  if [[ -n "$row" ]]; then
+    IFS=$'\t' read -r fid fcwd ftitle <<< "$row"; id="$fid"; agent=claude
+    [[ -z "$cwd" ]] && cwd="$fcwd"; title="$ftitle"
+  fi
 fi
-[[ -z "$cwd" ]] && { j=$(session_jsonl "$id" ""); [[ -n "$j" ]] && cwd=$(jq -r 'select(.cwd)|.cwd' "$j" 2>/dev/null | head -1); }
+if [[ -z "$agent" || "$agent" == codex ]]; then
+  cj=$(codex_transcript "$id")
+  if [[ -n "$cj" ]]; then
+    agent=codex
+    [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$cj")" 2>/dev/null)
+    [[ -z "$title" ]] && title=$(jq -rc 'select(.payload.type=="user_message")|.payload.message' "$cj" 2>/dev/null | grep -v '^$' | head -1 | cut -c1-48)
+  fi
+fi
+[[ -n "$agent" ]] || agent=claude
+[[ -z "$cwd" && "$agent" == claude ]] && { j=$(session_jsonl "$id" ""); [[ -n "$j" ]] && cwd=$(jq -r 'select(.cwd)|.cwd' "$j" 2>/dev/null | head -1); }
 [[ -n "$cwd" ]] || cwd="$HOME"
 [[ -n "$title" ]] || title="${id:0:8}"
+log "resolved: agent=$agent id=$id cwd=$cwd"
 
 if ! $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
-  printf '%s\t%s\t%s\n' "$id" "$cwd" "$title" >> "$PENDING"   # queue for cold build
+  printf '%s\t%s\t%s\t%s\n' "$id" "$cwd" "$title" "$agent" >> "$PENDING"   # queue for cold build
   exit 0
 fi
 
-if session_is_running "$id"; then
+if session_is_running_agent "$agent" "$id"; then
   $TMUX display-message "cockpit: ${id:0:8} is already live — not duplicating"
   exit 0
 fi
 
-cmd="cd $(printf %q "$cwd") && exec claude --resume $id"
+cmd=$(agent_resume_inner "$agent" "$id" "$cwd")
 W=$(cockpit_cur_window)   # land in the workspace you're viewing
 # reuse a bare untracked shell (fresh 'scratch') if that's the active pane
 act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
@@ -59,6 +72,7 @@ fi
 $TMUX set -p -t "$pane" @session_id "$id"
 $TMUX set -p -t "$pane" @cwd "$cwd"
 $TMUX set -p -t "$pane" @label "${title:0:32}"
+$TMUX set -p -t "$pane" @agent "$agent"
 $TMUX set -p -t "$pane" @badge "starting"
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 $TMUX display-message "cockpit: + ${title:0:40}"

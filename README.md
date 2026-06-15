@@ -28,12 +28,28 @@ only on change, so an ungraceful shutdown loses at most a few seconds. A plain
 `cockpit` then rebuilds that layout and resumes every session. `--kill` keeps
 the saved layout; `--fresh` ignores it.
 
+## Agents (Claude + Codex)
+
+cockpit tracks both **Claude Code** and **Codex** sessions side by side. Each
+pane carries an `@agent` stamp; classification, the resume command, and session
+discovery dispatch per provider:
+
+| | Claude | Codex |
+|---|---|---|
+| transcripts | `~/.claude/projects/**/<id>.jsonl` | `~/.codex/sessions/**/rollout-*-<id>.jsonl` |
+| done signal | `end_turn` | `event_msg/task_complete` |
+| resume | `claude --resume <id>` | `codex resume <id>` |
+
+The picker, candidates, and restore merge both by recency (tagged `cl`/`cx`);
+`Alt-N` asks which agent to start. Cross-agent search/`related` in santa is a
+follow-on (it indexes Claude transcripts today).
+
 ## Live state
 
-Each pane is framed and coloured by the session's live state, read from its
-JSONL transcript: **green** working · **blue** just-finished · **red**
-needs-input · **dim** idle. The active pane's border is **yellow**. The label
-hugs the left of the border; status + time hug the right.
+Each pane's **top title** is coloured by the session's live state, read from its
+transcript: **green** working · **blue** just-finished · **red** needs-input ·
+**dim** idle. Box borders are neutral; the active pane's border is **yellow**.
+The label hugs the left; status + time hug the right.
 
 ## Keys (no prefix)
 

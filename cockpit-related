@@ -5,7 +5,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
-SANTA="${COCKPIT_SANTA:-santa-claude}"
+SANTA="${COCKPIT_SANTA:-santa}"
 
 say()   { printf '%s\n' "$*" >/dev/tty; }
 pause() { read -rsn1 -p "$1" </dev/tty || true; }
