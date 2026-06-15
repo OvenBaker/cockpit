@@ -54,9 +54,6 @@ PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}$
 STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/layout.${COCKPIT_SESSION}.tsv"
 SAVE_EVERY="${COCKPIT_SAVE_SECS:-5}"; next_save=0; last_snap=""
 mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-# window-grouped, one record per pane; <nil> placeholders keep empty fields from
-# collapsing on read. First line marks the active workspace.
-SNAP_FMT="#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}"
 
 color() { case "$1" in
   working)      echo 'fg=colour41';;     # green
@@ -180,8 +177,7 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
   # persist the layout (throttled, only when it changed) so cockpit can restore it
   if (( now >= next_save )); then
     next_save=$((now + SAVE_EVERY))
-    snap=$( { printf '@active%s%s\n' "$TAB" "$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_name}')";
-              $TMUX list-panes -s -t "$COCKPIT_SESSION" -F "$SNAP_FMT"; } 2>/dev/null )
+    snap=$(cockpit_snapshot)
     if [[ -n "$snap" && "$snap" != "$last_snap" ]]; then
       printf '%s\n' "$snap" > "$STATE_FILE.tmp" 2>/dev/null && mv "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
       last_snap="$snap"

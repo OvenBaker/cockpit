@@ -5,6 +5,7 @@
 #                        (if a cockpit is already running, attaches to it)
 #   cockpit --fresh      ignore the saved layout; pick sessions fresh
 #   cockpit --restore    force-restore the saved layout
+#   cockpit --save       snapshot the running grid's layout to disk now
 #   cockpit --santa      pick sessions in santa-claude's TUI (resume → cockpit)
 #   cockpit --rebuild    tear down a running cockpit, then build a fresh one
 #   cockpit --auto       skip the picker: just open the top -n sessions
@@ -36,7 +37,7 @@ N=5; MODE=build; AUTO=0; REBUILD=0; SANTA=0; RESTORE=0; FRESH=0
 while [[ $# -gt 0 ]]; do case "$1" in
   --list|-l) MODE=list;; --attach|-a) MODE=attach;; --kill) MODE=kill;;
   --rebuild) REBUILD=1;; --auto) AUTO=1;; --santa) SANTA=1;;
-  --restore) RESTORE=1;; --fresh) FRESH=1;; -n) N="$2"; shift;;
+  --restore) RESTORE=1;; --fresh) FRESH=1;; --save) MODE=save;; -n) N="$2"; shift;;
   *) echo "unknown arg: $1" >&2; exit 2;; esac; shift; done
 PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
 # persistent saved layout (written by the poller); survives reboot
@@ -47,6 +48,13 @@ case "$MODE" in
   kill)   pkill -f "$HERE/cockpit-poller" 2>/dev/null || true
           $TMUX kill-server 2>/dev/null && echo "cockpit killed" || echo "no cockpit running"; exit 0;;
   attach) exec $TMUX attach -t "$COCKPIT_SESSION";;
+  save)
+    $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "no cockpit running to save" >&2; exit 1; }
+    mkdir -p "$(dirname "$STATE_FILE")"
+    if cockpit_snapshot > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"; then
+      echo "cockpit: saved $(($(wc -l < "$STATE_FILE") - 1)) pane(s) → $STATE_FILE"
+    else echo "cockpit: save failed" >&2; exit 1; fi
+    exit 0;;
   list)
     printf '%-10s %-30s %s\n' "SESSION" "CWD" "TITLE"
     cockpit_candidates "$N" | while IFS=$'\t' read -r id cwd title; do

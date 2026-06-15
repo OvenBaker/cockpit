@@ -9,6 +9,17 @@ COCKPIT_SESSION="${COCKPIT_SESSION:-cockpit}"
 # monitors); tiled = grid; even-vertical = stacked rows. Override via env.
 COCKPIT_LAYOUT="${COCKPIT_LAYOUT:-even-horizontal}"
 
+# Print a layout snapshot to stdout: an @active line naming the current
+# workspace, then one window-grouped record per pane. <nil> placeholders keep
+# empty fields from collapsing on read. Shared by the poller (autosave) and
+# `cockpit --save`. Requires a running session.
+cockpit_snapshot() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
+  printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
+  $tmux list-panes -s -t "$COCKPIT_SESSION" \
+    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}" 2>/dev/null
+}
+
 # The window the user is currently viewing = the active workspace. Helpers that
 # add/remove/retarget panes act on THIS window, not a hardcoded :0, so they work
 # whichever workspace you're in. Falls back to :0 if nothing's resolvable.
