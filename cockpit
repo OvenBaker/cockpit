@@ -131,7 +131,7 @@ apply_chrome() {
   # workspaces = windows. Each tab is named, and the poller tints the name by the
   # workspace's most-urgent pane (@ws_badge) so a needs-input session glows even
   # when you're looking elsewhere. The current workspace gets a highlighted slab.
-  $TMUX set -g status-justify left
+  $TMUX set -g status-justify centre        # workspace tabs centred on the bottom row
   $TMUX set -g window-status-separator ''
   $TMUX set -g window-status-style 'fg=colour245'
   $TMUX set -g window-status-current-style 'bg=colour238,fg=colour255,bold'
