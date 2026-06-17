@@ -30,7 +30,12 @@ if [[ "$agent" != codex ]]; then
     "SELECT id, coalesce(cwd,''), coalesce(nullif(summary_title,''), substr(first_user_text,1,80),'') \
      FROM sessions WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
   if [[ -n "$row" ]]; then
-    IFS=$'\t' read -r fid fcwd ftitle <<< "$row"; id="$fid"; agent=claude
+    IFS=$'\t' read -r fid fcwd ftitle <<< "$row"; id="$fid"
+    # santa's DB now indexes codex sessions too, so "found in DB" no longer implies
+    # claude. Trust the recorded provider; a pre-migration DB lacks the column, so
+    # the query errors → empty → claude (correct: codex isn't in an old DB anyway).
+    prov=$(sqlite3 "$SANTA_DB" "SELECT coalesce(provider,'claude-code') FROM sessions WHERE id='$fid';" 2>/dev/null)
+    [[ "$prov" == codex ]] && agent=codex || agent=claude
     [[ -z "$cwd" ]] && cwd="$fcwd"; title="$ftitle"
   fi
 fi
