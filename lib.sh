@@ -71,7 +71,7 @@ session_is_running() {
 # Candidate dormant Claude sessions, newest-first, as: mtime<TAB>claude<TAB>id<TAB>cwd<TAB>title
 COCKPIT_MAX_AGE_DAYS="${COCKPIT_MAX_AGE_DAYS:-30}"
 _claude_rows() {
-  local limit="${1:-16}" id title status cwd jsonl mt n=0
+  local limit="${1:-16}" id title status cwd jsonl mt n=0 headblk
   local now cutoff; now=$(date +%s); cutoff=$(( now - COCKPIT_MAX_AGE_DAYS*86400 ))
   declare -A ST TL CW
   while IFS=$'\t' read -r id status title cwd; do
@@ -84,10 +84,18 @@ _claude_rows() {
     [[ "${ST[$id]:-active}" == "completed" || "${ST[$id]:-}" == "archived" ]] && continue
     session_is_running "$id" && continue
     session_is_live "$jsonl" && continue
-    cwd="${CW[$id]:-}"; [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.cwd)|.cwd' "$jsonl" 2>/dev/null | head -1)
+    cwd="${CW[$id]:-}"; title="${TL[$id]:-}"
+    if [[ -z "$cwd" || -z "$title" ]]; then
+      # Not (fully) indexed by santa. Read only the head — cwd is on every event
+      # line and the first user message is near the top — instead of parsing the
+      # whole transcript. santa's own `claude -p` runs flood the recent-by-mtime
+      # list; skip those cheaply here rather than full-file-jq'ing each to find out.
+      headblk=$(head -n 80 "$jsonl" 2>/dev/null)
+      [[ "$headblk" == *'<<santa-claude-internal>>'* ]] && continue
+      [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.cwd)|.cwd' <<<"$headblk" 2>/dev/null | head -1)
+      [[ -z "$title" ]] && title=$(jq -r 'select(.type=="user") | (.message.content | if type=="string" then . else (map(select(.type=="text").text)|join(" ")) end)' <<<"$headblk" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-100 || true)
+    fi
     [[ -z "$cwd" ]] && continue
-    title="${TL[$id]:-}"
-    [[ -z "$title" ]] && title=$(jq -r 'select(.type=="user") | (.message.content | if type=="string" then . else (map(select(.type=="text").text)|join(" ")) end)' "$jsonl" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-100 || true)
     [[ "$title" == "<<santa-claude-internal>>"* ]] && continue
     [[ -z "$title" ]] && title="(untitled)"
     printf '%s\tclaude\t%s\t%s\t%s\n' "${mt%.*}" "$id" "$cwd" "$title"
@@ -100,14 +108,27 @@ _codex_rows() {
   local limit="${1:-16}" f id cwd title mt n=0
   local now cutoff; now=$(date +%s); cutoff=$(( now - COCKPIT_MAX_AGE_DAYS*86400 ))
   [[ -d "$CODEX_SESSIONS" ]] || return 0
+  # santa indexes codex sessions too — pull status/title/cwd from the DB (keyed by id)
+  # so we don't full-file-jq every rollout for its title. No provider filter: keying by
+  # the codex id is enough, and it works on a DB that predates the provider column.
+  declare -A ST TL CW
+  while IFS=$'\t' read -r id status title cwd; do
+    ST[$id]="$status"; TL[$id]="$title"; CW[$id]="$cwd"
+  done < <(sqlite3 -separator $'\t' "$SANTA_DB" \
+    "SELECT id, status, coalesce(nullif(summary_title,''), substr(first_user_text,1,80), ''), coalesce(cwd,'') FROM sessions;")
   while IFS=$'\t' read -r mt f; do
     (( ${mt%.*} < cutoff )) && break
     id=$(basename "$f" | sed -E 's/.*-([0-9a-f-]{36})\.jsonl$/\1/'); [[ -n "$id" ]] || continue
+    [[ "${ST[$id]:-active}" == "completed" || "${ST[$id]:-}" == "archived" ]] && continue
     session_is_running_agent codex "$id" && continue
     session_is_live "$f" && continue
-    cwd=$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$f")" 2>/dev/null)
+    cwd="${CW[$id]:-}"
+    [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$f")" 2>/dev/null)
     [[ -n "$cwd" ]] || continue
-    title=$(jq -rc 'select(.payload.type=="user_message")|.payload.message' "$f" 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-100)
+    title="${TL[$id]:-}"
+    # Fallback only for codex rollouts santa hasn't ingested yet: read the head, not
+    # the whole transcript — the first user_message sits just after session_meta/turn_context.
+    [[ -z "$title" ]] && title=$(head -n 40 "$f" 2>/dev/null | jq -rc 'select(.payload.type=="user_message")|.payload.message' 2>/dev/null | grep -v '^$' | head -1 | tr '\n' ' ' | cut -c1-100)
     [[ -n "$title" ]] || title="(codex ${id:0:8})"
     printf '%s\tcodex\t%s\t%s\t%s\n' "${mt%.*}" "$id" "$cwd" "$title"
     n=$((n+1)); (( n >= limit )) && break
