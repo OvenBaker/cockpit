@@ -27,7 +27,7 @@ case "${1:-close}" in
     $TMUX set -w -t "$win" @origname "$name"
     $TMUX set -w -t "$win" @closing  "$tok"
     $TMUX rename-window -t "$win" "✗ $name"               # visible cue on the tab
-    $TMUX set -g @undo_win "$win"; $TMUX set -g @undo_tok "$tok"
+    $TMUX set -g @undo_kind ws; $TMUX set -g @undo_win "$win"; $TMUX set -g @undo_tok "$tok"
     $TMUX previous-window -t "$COCKPIT_SESSION" 2>/dev/null || true   # get it out of view
     $TMUX display-message "closing '$name' in ${GRACE}s — Alt-u to undo"
     setsid nohup "$HERE/cockpit-ws" reap "$win" "$tok" >/dev/null 2>&1 &

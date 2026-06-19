@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# cockpit-undo — undo the most recent recoverable action, whichever it was:
+# a workspace soft-close (cockpit-ws) or a pane soft-kill (cockpit-pane).
+# Bound to Alt-u. @undo_kind is set by whichever ran last, so most-recent wins.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+case "$($TMUX show -gqv @undo_kind 2>/dev/null)" in
+  pane) exec "$HERE/cockpit-pane" undo;;
+  ws)   exec "$HERE/cockpit-ws"   undo;;
+  *)    $TMUX display-message "cockpit: nothing to undo";;
+esac

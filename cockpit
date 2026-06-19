@@ -157,6 +157,15 @@ apply_chrome() {
   $TMUX bind -n M-s   display-popup -E -w 95% -h 90% \
     "SANTA_RESUME_CMD=$HERE/cockpit-send SANTA_RESUME_LABEL=cockpit PATH=$HERE/shim:\$PATH COCKPIT_SEND=$HERE/cockpit-send COCKPIT_TMUX='$TMUX' santa tui"
   $TMUX bind -n M-x   run-shell "$HERE/cockpit-pane remove"
+  $TMUX bind    x     run-shell "$HERE/cockpit-pane remove"   # C-b x → same recoverable kill
+  # Right-click pane menu: replace tmux's built-in (whose Kill is an unrecoverable
+  # kill-pane) with our own, routing Kill through the soft-kill so Alt-u can undo it.
+  $TMUX bind -n MouseDown3Pane select-pane -t = '\;' display-menu -T "#[align=centre] pane #{pane_index} " -x M -y M \
+    "Zoom"            z "resize-pane -Z" \
+    "Kill (undoable)" k "run-shell \"$HERE/cockpit-pane remove\"" \
+    "Move to next ws" m "run-shell \"$HERE/cockpit-move next\"" \
+    "Swap up"         u "swap-pane -U" \
+    "Swap down"       d "swap-pane -D"
   # move the active pane to another workspace: Alt-m to pick/create, Alt-Shift-←/→ to shove
   $TMUX bind -n M-m       display-popup -E -w 70 -h 24 "$HERE/cockpit-move pick #{pane_id}"
   $TMUX bind -n M-S-Left  run-shell "$HERE/cockpit-move prev"
@@ -168,7 +177,7 @@ apply_chrome() {
   # close a workspace on a 10s recoverable timer (Alt-u to undo); also reroute
   # the default prefix kill-window (C-b &) through the same soft-close.
   $TMUX bind -n M-W run-shell "$HERE/cockpit-ws close"
-  $TMUX bind -n M-u run-shell "$HERE/cockpit-ws undo"
+  $TMUX bind -n M-u run-shell "$HERE/cockpit-undo"     # undo last ws-close OR pane-kill
   $TMUX bind '&'    run-shell "$HERE/cockpit-ws close"
   $TMUX bind -n M-/   display-popup -E -w 64 -h 42 "$HERE/cockpit-help show"
   $TMUX bind -n M-h   display-popup -E -w 64 -h 42 "$HERE/cockpit-help show"

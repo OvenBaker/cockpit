@@ -1,27 +1,72 @@
 #!/usr/bin/env bash
-# cockpit-pane — grow or shrink the grid. Bound to Alt-n (add) by the launcher.
+# cockpit-pane — pane operations with a RECOVERABLE soft-kill.
 #
-#   cockpit-pane remove   kill the active pane, re-tile (refuses the last pane).
+#   cockpit-pane remove [pane]    "kill" a pane recoverably: break it (process
+#                                 intact) into a detached holding window, re-tile,
+#                                 and reap it after a grace period. Alt-u brings it
+#                                 back. Refuses the last pane in a workspace.
+#   cockpit-pane undo             join the most-recent soft-killed pane back
+#   cockpit-pane reap <win> <tok> (internal) hard-kill the holding window after grace
+#   cockpit-pane add              (back-compat) → `cockpit-pick add` in a popup
 #
-# Adding a pane is handled by `cockpit-pick add` (Alt-n), which must run in a
-# popup (it picks a session) — a popup needs a client, which run-shell lacks.
-# Removing is a pure server op, so it stays here on run-shell.
-#
-# Reducing via C-b x / the right-click Kill menu also works — the poller
-# re-tiles on any pane-count change, so the grid re-evens itself either way.
+# Killing a pane also kills its Claude/Codex session, so we don't do it outright.
+# break-pane moves the still-running pane to a detached window we kill after GRACE
+# unless undone; undo join-panes it back where it came from — same recoverable
+# model as cockpit-ws, but per-pane and with the live process preserved.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
-W=$(cockpit_cur_window)   # act on the workspace you're viewing
+GRACE="${COCKPIT_CLOSE_GRACE:-10}"
+wopt() { $TMUX show -wqv -t "$1" "$2" 2>/dev/null; }   # window option (quiet, value-only)
 
 case "${1:-remove}" in
   add)   # kept for back-compat; the real path is `cockpit-pick add` in a popup
     exec "$HERE/cockpit-pick" add;;
+
   remove)
+    W=$(cockpit_cur_window)
     n=$($TMUX list-panes -t "$W" -F x | wc -l)
     (( n <= 1 )) && { $TMUX display-message "cockpit: can't remove the last pane"; exit 0; }
-    $TMUX kill-pane
-    $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT"
+    pane="${2:-}"; [[ -z "$pane" || "$pane" == *'#{'* ]] && pane=$($TMUX display -p -t "$W" '#{pane_id}')
+    label=$($TMUX show -pqv -t "$pane" @label 2>/dev/null)
+    tok="$(date +%s)-$$"
+    # Break the (still-running) pane out to a detached holding window.
+    held=$($TMUX break-pane -d -s "$pane" -P -F '#{pane_id}') \
+      || { $TMUX display-message "cockpit: couldn't remove pane"; exit 0; }
+    hold=$($TMUX display -p -t "$held" '#{window_id}')
+    $TMUX set -w -t "$hold" @graveyard "$tok"
+    $TMUX set -w -t "$hold" @from_win  "$W"
+    $TMUX set -w -t "$hold" @held_pane "$held"
+    $TMUX set -w -t "$hold" @held_label "${label:-pane}"
+    $TMUX rename-window -t "$hold" "✗ ${label:-pane}"            # visible cue on the tab
+    $TMUX set -g @undo_kind pane; $TMUX set -g @undo_pane "$hold"; $TMUX set -g @undo_pane_tok "$tok"
+    $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null || true
+    $TMUX display-message "killed ${label:-pane} — Alt-u to undo (${GRACE}s)"
+    setsid nohup "$HERE/cockpit-pane" reap "$hold" "$tok" >/dev/null 2>&1 &
     ;;
-  *) echo "usage: cockpit-pane {add|remove}" >&2; exit 2;;
+
+  reap)
+    hold="${2:-}"; tok="${3:-}"
+    sleep "$GRACE"
+    # only kill if it's STILL the same pending kill (not undone, not superseded)
+    [[ -n "$tok" && "$(wopt "$hold" @graveyard)" == "$tok" ]] && $TMUX kill-window -t "$hold" 2>/dev/null
+    ;;
+
+  undo)
+    hold=$($TMUX show -gqv @undo_pane 2>/dev/null); tok=$($TMUX show -gqv @undo_pane_tok 2>/dev/null)
+    if [[ -z "$hold" || "$(wopt "$hold" @graveyard)" != "$tok" ]]; then
+      $TMUX display-message "cockpit: nothing to undo"; exit 0
+    fi
+    held=$(wopt "$hold" @held_pane); from=$(wopt "$hold" @from_win); label=$(wopt "$hold" @held_label)
+    # the original workspace may itself have been closed → land in the current one
+    $TMUX list-windows -t "$COCKPIT_SESSION" -F '#{window_id}' 2>/dev/null | grep -qx "$from" || from=$(cockpit_cur_window)
+    $TMUX set -w -t "$hold" @graveyard ""
+    $TMUX join-pane -s "$held" -t "$from" 2>/dev/null \
+      || { $TMUX display-message "cockpit: couldn't rejoin pane"; exit 0; }
+    $TMUX select-layout -t "$from" "$COCKPIT_LAYOUT" 2>/dev/null || true
+    $TMUX select-window -t "$from" 2>/dev/null || true
+    $TMUX display-message "recovered ${label:-pane}"
+    ;;
+
+  *) echo "usage: cockpit-pane {remove [pane]|undo}" >&2; exit 2;;
 esac

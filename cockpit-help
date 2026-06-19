@@ -16,7 +16,7 @@ if [[ "${1:-popup}" == "show" ]]; then
    Alt-← / →     switch workspace
    Alt-w         new workspace
    Alt-W         close workspace (10s timer)
-   Alt-u         undo a close
+   Alt-u         undo last close / pane-kill
 
    panes
    Alt-1 … 9     jump to pane N
@@ -30,7 +30,7 @@ if [[ "${1:-popup}" == "show" ]]; then
    Alt-f         find related sessions → add one here
    Alt-m         move pane → another workspace
    Alt-S-← / →   shove pane to prev / next workspace
-   Alt-x         remove the active pane
+   Alt-x         kill the active pane (10s undo)
    Alt-/ h ?     this help
 
    title colour (per pane)
@@ -39,10 +39,10 @@ if [[ "${1:-popup}" == "show" ]]; then
      yellow border = the active (focused) pane
 
    mouse   click = focus · drag border = resize
-           right-click (hold) = pane menu
+           right-click = pane menu (Kill is undoable)
 
    tmux    C-b d detach   (cockpit --attach to return)
-           C-b x kill pane · C-b { } swap panes
+           C-b x kill pane (undoable) · C-b { } swap panes
 
    press any key to close
 EOF
