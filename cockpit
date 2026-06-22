@@ -112,6 +112,10 @@ select_cand() {
 apply_chrome() {
   local i   # MUST be local: restore_grid calls this inside its `for ((i…))` loop,
             # and the Alt-1..9 bind loop below would otherwise clobber the counter.
+  # Point panes at the stable agent socket (kept current by ssh-up.sh/.bashrc),
+  # not whatever ephemeral SSH_AUTH_SOCK this long-lived server happened to freeze.
+  # ssh's IdentityAgent also covers this, but env-based agent clients (ssh-add) need it.
+  [ -e "$HOME/.ssh/agent.sock" ] && $TMUX set-environment -g SSH_AUTH_SOCK "$HOME/.ssh/agent.sock"
   $TMUX set -g pane-border-status top
   $TMUX set -g pane-border-lines heavy
   # State colour lives in the per-pane TOP line (@sc tints label + badge), not in
