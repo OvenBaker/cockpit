@@ -31,6 +31,7 @@ if [[ "${1:-popup}" == "show" ]]; then
    Alt-m         move pane → another workspace
    Alt-S-← / →   shove pane to prev / next workspace
    Alt-x         kill the active pane (10s undo)
+   Ctrl-z        no-op — won't suspend the agent; un-sticks a stopped pane
    Alt-/ h ?     this help
 
    title colour (per pane)

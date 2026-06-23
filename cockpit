@@ -162,6 +162,11 @@ apply_chrome() {
     "SANTA_RESUME_CMD=$HERE/cockpit-send SANTA_RESUME_LABEL=cockpit PATH=$HERE/shim:\$PATH COCKPIT_SEND=$HERE/cockpit-send COCKPIT_TMUX='$TMUX' santa tui"
   $TMUX bind -n M-x   run-shell "$HERE/cockpit-pane remove"
   $TMUX bind    x     run-shell "$HERE/cockpit-pane remove"   # C-b x → same recoverable kill
+  # Swallow C-z: panes are `exec claude`, so an accidental Ctrl+Z suspends the agent
+  # with no shell to `fg` from. Binding it here means tmux intercepts the key (the
+  # agent never sees ^Z → can't be suspended), and cockpit-cont resumes anything
+  # already stopped (no-op otherwise). C-b C-z still suspends the whole tmux client.
+  $TMUX bind -n C-z   run-shell "$HERE/cockpit-cont #{pane_id}"
   # Right-click pane menu: replace tmux's built-in (whose Kill is an unrecoverable
   # kill-pane) with our own, routing Kill through the soft-kill so Alt-u can undo it.
   $TMUX bind -n MouseDown3Pane select-pane -t = '\;' display-menu -T "#[align=centre] pane #{pane_index} " -x M -y M \

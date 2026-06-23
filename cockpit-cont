@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# cockpit-cont — un-stop a pane. Bound to C-z so an accidental Ctrl+Z can't
+# strand a session.
+#
+# Panes run `exec claude`/`exec codex`, so the pane process IS the agent with no
+# parent job-control shell — once SIGTSTP suspends it there's nothing to `fg`
+# from and the pane is stuck. We bind C-z in tmux's root table: tmux then
+# *intercepts* the keystroke (the agent never receives ^Z, so it can't be
+# suspended in the first place), and we SIGCONT anything in the pane that is
+# already stopped. No-op when nothing is stopped — so an accidental C-z is inert.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+pane="${1:-}"; [[ -z "$pane" || "$pane" == *'#{'* ]] && pane=$($TMUX display -p '#{pane_id}' 2>/dev/null)
+ppid=$($TMUX display -p -t "$pane" '#{pane_pid}' 2>/dev/null) || exit 0
+[[ -n "$ppid" ]] || exit 0
+
+# SIGCONT the pane's process and every descendant. CONT to a non-stopped process
+# is harmless, so we don't bother checking state — just resume the whole tree.
+resumed=0
+cont_tree() {
+  local p="$1" kid
+  kill -CONT "$p" 2>/dev/null && resumed=$((resumed+1))
+  for kid in $(pgrep -P "$p" 2>/dev/null); do cont_tree "$kid"; done
+}
+cont_tree "$ppid"
+exit 0
