@@ -50,7 +50,12 @@ next_titles=0
 # can't pass through -F. Fix: tab-separate but emit a <nil> token for any blank
 # field so nothing is ever empty (→ no collapse), then restore "" after reading.
 TAB=$'\t'; NIL='<nil>'
-PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@born,#{@born},$NIL}${TAB}#{?@agent,#{@agent},claude}"
+PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@born,#{@born},$NIL}${TAB}#{?@agent,#{@agent},claude}${TAB}#{?@hook_state,#{@hook_state},$NIL}${TAB}#{?@hook_at,#{@hook_at},$NIL}"
+# How long an event-driven hook state (set by cockpit-hook) is trusted before we
+# fall back to tail-parsing the transcript. Active sessions refresh @hook_at on
+# every event, so this only bounds how long a stale state lingers after a missed
+# edge / crash. Generous enough not to second-guess a quietly-idle session.
+HOOK_TTL="${COCKPIT_HOOK_TTL:-900}"
 # Persistent layout snapshot so a closed/crashed cockpit can be restored. MUST
 # be outside /tmp to survive a reboot. Written throttled + only-on-change.
 STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/layout.${COCKPIT_SESSION}.tsv"
@@ -105,10 +110,11 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
   # per-cycle, per-window tallies (workspaces = windows)
   declare -A WCOUNT=() WSTATE=()
   nA=0; nF=0; nI=0
-  while IFS="$TAB" read -r win pid sid cwd curlabel born agent; do
+  while IFS="$TAB" read -r win pid sid cwd curlabel born agent hookstate hookat; do
     [[ -n "$win" ]] || continue
     [[ "$sid" == "$NIL" ]] && sid=""; [[ "$cwd" == "$NIL" ]] && cwd=""
     [[ "$curlabel" == "$NIL" ]] && curlabel=""; [[ "$born" == "$NIL" ]] && born=""
+    [[ "$hookstate" == "$NIL" ]] && hookstate=""; [[ "$hookat" == "$NIL" ]] && hookat=""
     [[ -n "$agent" ]] || agent=claude
     WCOUNT[$win]=$(( ${WCOUNT[$win]:-0} + 1 ))
     if [[ -z "$sid" ]]; then
@@ -123,8 +129,15 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
       [[ -n "$sid" ]] || continue        # still pending, or a bare scratch shell — skip
     fi
     [[ -n "${LASTLABEL[$pid]:-}" ]] || LASTLABEL[$pid]="$curlabel"   # seed from what's on the border
-    jsonl=$(agent_transcript "$agent" "$sid" "$cwd")
-    raw=$(agent_classify "$agent" "$jsonl"); age=$(idle_seconds "$jsonl")
+    # Event-driven state (cockpit-hook) is authoritative when fresh; otherwise
+    # fall back to tail-parsing the transcript (covers codex, pre-hook sessions,
+    # and any missed edge once the hook state goes stale).
+    if [[ -n "$hookstate" ]] && (( now - ${hookat:-0} <= HOOK_TTL )); then
+      raw="$hookstate"; age=$(( now - ${hookat:-now} ))
+    else
+      jsonl=$(agent_transcript "$agent" "$sid" "$cwd")
+      raw=$(agent_classify "$agent" "$jsonl"); age=$(idle_seconds "$jsonl")
+    fi
 
     state="$raw"
     # working -> idle edge = just-finished (your priority signal); sticky until visited

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# cockpit-hook — stamp a cockpit pane's live state from an agent lifecycle event,
+# so the poller can use authoritative event-driven state instead of (racily)
+# tail-parsing the transcript. Writes @hook_state + @hook_at on the pane the
+# event fired in; the poller prefers a fresh @hook_state over its own classify.
+#
+# No-op unless running inside a cockpit pane (the Claude hooks are configured
+# globally in ~/.claude/settings.json and fire for EVERY session on the box).
+#
+# Wired from ~/.claude/settings.json. Invoked as:
+#   cockpit-hook working          # UserPromptSubmit
+#   cockpit-hook idle             # Stop (main turn ended)
+#   cockpit-hook needs-input      # (direct)
+#   cockpit-hook notification     # Notification — reads stdin JSON for the type
+#   cockpit-hook session-start    # SessionStart
+#   cockpit-hook session-end      # SessionEnd (clears hook state → poller reclassifies)
+#   cockpit-hook codex-notify [json]   # Codex `notify` program (future; arg/stdin = JSON)
+set -uo pipefail
+
+# Which tmux -L socket is cockpit's. Overridable so tests can run on a throwaway
+# server (e.g. COCKPIT_SOCKET_NAME=cockpittest) without colliding with the real one.
+SOCK="${COCKPIT_SOCKET_NAME:-cockpit}"
+
+# Only act inside a cockpit pane. $TMUX = "<socket-path>,<pid>,<session>"; cockpit's
+# socket path ends in /<SOCK>. Sessions in other tmux servers (or none) are untouched.
+[[ -n "${TMUX_PANE:-}" && "${TMUX%%,*}" == */"$SOCK" ]] || exit 0
+T=(tmux -L "$SOCK")
+
+stamp() {  # $1 = state (empty clears → poller falls back to classify)
+  "${T[@]}" set -p -t "$TMUX_PANE" @hook_state "$1" 2>/dev/null || true
+  "${T[@]}" set -p -t "$TMUX_PANE" @hook_at "$(date +%s)" 2>/dev/null || true
+  exit 0
+}
+
+case "${1:-}" in
+  working)        stamp working;;
+  idle|stop)      stamp idle;;
+  needs-input)    stamp needs-input;;
+  session-start)  stamp idle;;       # fresh/resumed session waiting for a prompt
+  session-end)    stamp "";;          # clear → poller reclassifies (pane likely a shell now)
+  notification)
+    # Only permission/idle-style notifications mean "waiting on the human"; ignore
+    # informational ones (auth_success, etc.). Read the JSON Claude pipes on stdin.
+    input=$(cat 2>/dev/null || true)
+    nt=""; command -v jq >/dev/null 2>&1 && nt=$(printf '%s' "$input" | jq -r '.notification_type // .type // empty' 2>/dev/null || true)
+    case "$nt" in
+      *permission*|*idle*|"") stamp needs-input;;   # unknown type → assume attention (conservative)
+      *) exit 0;;
+    esac;;
+  codex-notify)
+    # Codex notify program (not wired yet — Codex stays on rollout classify because
+    # its only event is turn-complete, which alone would read as idle mid-turn).
+    j="${2:-}"; [[ -z "$j" ]] && j=$(cat 2>/dev/null || true)
+    ty=""; command -v jq >/dev/null 2>&1 && ty=$(printf '%s' "$j" | jq -r '.type // empty' 2>/dev/null || true)
+    case "$ty" in agent-turn-complete) stamp idle;; *) exit 0;; esac;;
+  *) exit 0;;
+esac
