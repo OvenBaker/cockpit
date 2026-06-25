@@ -26,13 +26,45 @@ SOCK="${COCKPIT_SOCKET_NAME:-cockpit}"
 [[ -n "${TMUX_PANE:-}" && "${TMUX%%,*}" == */"$SOCK" ]] || exit 0
 T=(tmux -L "$SOCK")
 
+ev="${1:-}"
+
+# Read the JSON payload Claude pipes on stdin for every hook event (codex passes
+# its own JSON as $2 instead, so skip it there). Never block on a tty, so a manual
+# `cockpit-hook working` for testing still works; under tmux run-shell / a real
+# hook, stdin is a pipe and we get the payload.
+INPUT=""
+if [[ "$ev" != codex-notify && ! -t 0 ]]; then INPUT=$(cat 2>/dev/null || true); fi
+
+# Keep @session_id pointing at the conversation Claude is ACTUALLY in. The id a
+# pane was spawned with goes stale the instant you /clear or start a new chat —
+# that forks a new session file — and a stale pin makes the poller classify, and
+# (worse) makes restore resume, the wrong/older thread, silently dropping days of
+# history. Every Claude hook payload carries the live session_id, so re-stamp it
+# from the events that mean "THIS session is the live one in this pane":
+# session-start and working (UserPromptSubmit). We deliberately do NOT stamp on
+# idle/notification/session-end — a session being torn down (e.g. respawn-pane -k
+# on retarget/restore) fires its Stop/SessionEnd hooks in the same pane and would
+# otherwise clobber the pane back onto the id that's going away. transcript_path's
+# basename is the fallback when session_id is absent.
+if [[ "$ev" == session-start || "$ev" == working ]] && [[ -n "$INPUT" ]] && command -v jq >/dev/null 2>&1; then
+  sid=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+  if [[ -z "$sid" ]]; then
+    tp=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+    [[ -n "$tp" ]] && sid=$(basename "$tp" .jsonl)
+  fi
+  if [[ "$sid" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    cur=$("${T[@]}" display -p -t "$TMUX_PANE" '#{@session_id}' 2>/dev/null || true)
+    [[ "$sid" != "$cur" ]] && { "${T[@]}" set -p -t "$TMUX_PANE" @session_id "$sid" 2>/dev/null || true; }
+  fi
+fi
+
 stamp() {  # $1 = state (empty clears → poller falls back to classify)
   "${T[@]}" set -p -t "$TMUX_PANE" @hook_state "$1" 2>/dev/null || true
   "${T[@]}" set -p -t "$TMUX_PANE" @hook_at "$(date +%s)" 2>/dev/null || true
   exit 0
 }
 
-case "${1:-}" in
+case "$ev" in
   working)        stamp working;;
   idle|stop)      stamp idle;;
   needs-input)    stamp needs-input;;
@@ -40,9 +72,8 @@ case "${1:-}" in
   session-end)    stamp "";;          # clear → poller reclassifies (pane likely a shell now)
   notification)
     # Only permission/idle-style notifications mean "waiting on the human"; ignore
-    # informational ones (auth_success, etc.). Read the JSON Claude pipes on stdin.
-    input=$(cat 2>/dev/null || true)
-    nt=""; command -v jq >/dev/null 2>&1 && nt=$(printf '%s' "$input" | jq -r '.notification_type // .type // empty' 2>/dev/null || true)
+    # informational ones (auth_success, etc.). Reuse the stdin JSON read above.
+    nt=""; command -v jq >/dev/null 2>&1 && nt=$(printf '%s' "$INPUT" | jq -r '.notification_type // .type // empty' 2>/dev/null || true)
     case "$nt" in
       *permission*|*idle*|"") stamp needs-input;;   # unknown type → assume attention (conservative)
       *) exit 0;;
