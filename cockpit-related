@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cockpit-related — find sessions related to the focused pane's session (via
-# `santa-claude related`) and drop a chosen one into the current workspace.
+# `santa related`) and drop a chosen one into the current workspace.
 # Bound to Alt-f; runs in a display-popup (real tty for the numbered prompt).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"

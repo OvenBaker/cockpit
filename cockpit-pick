@@ -109,7 +109,20 @@ if [[ "$MODE" == new ]]; then
     target="${line/#\~/$HOME}"
   fi
   [[ -d "$target" ]] || { say "  not a directory: $target"; sleep 1; exit 0; }
-  spawn_new "$W" "$target" "$agent" && { say "  → new $what in ${target/#$HOME/\~}"; sleep 0.5; }
+  # placement: drop it in the workspace you're viewing (Enter) or spin up a brand
+  # new one (type its name). W defaults to the current window (set above).
+  say ""
+  say "  workspace?  [Enter = this one · or type a name for a NEW workspace]"
+  printf '  > ' >/dev/tty
+  read -r wsname </dev/tty || wsname=""
+  wsname="${wsname#"${wsname%%[![:space:]]*}"}"; wsname="${wsname%"${wsname##*[![:space:]]}"}"  # trim
+  placement="this workspace"
+  if [[ -n "$wsname" ]]; then
+    W=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{window_id}' -n "$wsname" "bash -l" 2>/dev/null) \
+      || { say "  couldn't create workspace '$wsname'."; sleep 1; exit 0; }
+    placement="new workspace '$wsname'"
+  fi
+  spawn_new "$W" "$target" "$agent" && { say "  → new $what in ${target/#$HOME/\~} · $placement"; sleep 0.5; }
   exit 0
 fi
 
@@ -170,7 +183,7 @@ case "$MODE" in
 
   add)
     W=$(cockpit_cur_window)   # add to the workspace you're viewing
-    # If the active pane is a bare untracked shell (e.g. a fresh 'scratch'
+    # If the active pane is a bare untracked shell (e.g. a freshly-created
     # workspace's placeholder), reuse it instead of splitting — otherwise split.
     act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
     actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')

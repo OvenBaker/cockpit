@@ -1,8 +1,8 @@
 # cockpit/lib.sh — shared helpers. Source this; don't execute.
-# Three concerns: (1) pick sessions from santa-claude's DB, (2) map a session
+# Three concerns: (1) pick sessions from santa's DB, (2) map a session
 # to its live JSONL transcript, (3) classify that transcript's current state.
 
-SANTA_DB="${SANTA_DB:-$HOME/.local/share/santa-claude/index.db}"
+SANTA_DB="${SANTA_DB:-$HOME/.local/share/santa/index.db}"
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/.claude/projects}"
 CODEX_SESSIONS="${CODEX_SESSIONS:-$HOME/.codex/sessions}"   # Codex rollout store
 COCKPIT_SESSION="${COCKPIT_SESSION:-cockpit}"

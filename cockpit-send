@@ -7,7 +7,7 @@
 # the poller tracks it, and re-tile. If not: append it to a pending queue that
 # `cockpit --santa` drains into a fresh grid when the picker TUI exits.
 #
-# This is the bridge that lets santa-claude's TUI "resume" feed cockpit instead
+# This is the bridge that lets santa's TUI "resume" feed cockpit instead
 # of opening a wt.exe tab — see shim/wt.exe.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
@@ -65,7 +65,7 @@ fi
 
 cmd=$(agent_resume_inner "$agent" "$id" "$cwd")
 W=$(cockpit_cur_window)   # land in the workspace you're viewing
-# reuse a bare untracked shell (fresh 'scratch') if that's the active pane
+# reuse a bare untracked shell (e.g. a freshly-created workspace) if it's active
 act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
 actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
 if [[ -z "$actsid" && -n "$act" ]]; then

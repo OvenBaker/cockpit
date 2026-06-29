@@ -11,7 +11,7 @@ touches your other tmux use.
 cockpit              restore the saved layout if one exists, else pick fresh
 cockpit --fresh      ignore the saved layout; pick sessions fresh
 cockpit --restore    force-restore the saved layout
-cockpit --santa      pick sessions in santa-claude's TUI (resume → cockpit)
+cockpit --santa      pick sessions in santa's TUI (resume → cockpit)
 cockpit --rebuild    tear down a running cockpit, then build a fresh one
 cockpit --auto       skip the picker: just open the top -n sessions
 cockpit --list       dry run: show the candidate sessions
@@ -61,7 +61,7 @@ The label hugs the left; status + time hug the right.
 | `Alt-i` | collapse idle panes / restore |
 | `Alt-r` | retarget pane → pick a dormant session |
 | `Alt-n` | add a pane → pick a session |
-| `Alt-s` | browse santa-claude's TUI; resume there sends the session here |
+| `Alt-s` | browse santa's TUI; resume there sends the session here |
 | `Alt-x` | remove the active pane |
 | `Alt-/` (or `Alt-h` / `Alt-?`) | key reference popup |
 
@@ -72,11 +72,18 @@ The label hugs the left; status + time hug the right.
 - `cockpit-poller` — background daemon (singleton) painting live state onto borders.
 - `cockpit-pick` — numbered chooser (startup multi-select / retarget / add).
 - `cockpit-send` — resume a given session as a pane (or queue if no grid).
-- `shim/wt.exe` — stand-in so santa-claude's resume can target cockpit.
+- `shim/wt.exe` — stand-in so santa's resume can target cockpit.
 - `cockpit-next`, `cockpit-toggle-idle`, `cockpit-pane`, `cockpit-help`.
 
 ## Dependencies
 
 `tmux` (≥3.4), `bash`, `jq`, `sqlite3`, and
-[santa-claude / claude-search](https://github.com/) for session metadata and the
+[santa](https://github.com/OvenBaker/santa) for session metadata and the
 `--santa` picker. Designed for WSL + Windows Terminal.
+
+---
+
+Part of a trio: **[santa](https://github.com/OvenBaker/santa)** (search & resume your
+Claude + Codex history) and **[agent-fusion](https://github.com/OvenBaker/agent-fusion)**
+(run Claude + Codex on one task and fuse the output). See
+**[agent-tooling](https://github.com/OvenBaker/agent-tooling)** for how they fit together.

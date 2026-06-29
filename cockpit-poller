@@ -40,7 +40,7 @@ declare -A LASTWS     # window_id -> last @ws_badge written (workspace tab colou
 declare -A ADOPTED    # session id -> already claimed by a pane (Alt-N new sessions)
 prev_counts=""        # last @active/@finished/@idle trio written (skip no-op status writes)
 # Labels are stamped once at pane creation, often from a fallback (first prompt)
-# before santa-claude has summarised the session. Re-query the DB occasionally
+# before santa has summarised the session. Re-query the DB occasionally
 # and upgrade the @label when a better title lands — throttled, not every cycle.
 TITLE_REFRESH="${COCKPIT_TITLE_REFRESH:-15}"
 next_titles=0
@@ -164,7 +164,7 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
       $TMUX set -p -t "$pid" @state "$state"; LASTSTATE[$pid]="$state"
     fi
 
-    # upgrade the title if santa-claude has since produced a better one
+    # upgrade the title if santa has since produced a better one
     if (( do_titles )); then
       t=$(sqlite3 "$SANTA_DB" \
         "SELECT coalesce(nullif(summary_title,''), substr(first_user_text,1,80), '') \
