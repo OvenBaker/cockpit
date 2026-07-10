@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# cockpit-search — search (santa) OR browse-recent past sessions as JSON, for the
+# web surface's resume flow.
+#
+#   cockpit-search "<query>" [--limit N]   # hybrid search — santa ranks
+#   cockpit-search --recent [--limit N]    # most-recent DORMANT sessions
+#
+# Recent mode is the reliable way to find "the thing I was working on today":
+# semantic search misses a session whose auto-title is a junk blob (a
+# <local-command-caveat>/slash-command first message with no summary), and the
+# most-recent sessions are often exactly those. It reuses cockpit_candidates, so
+# it excludes sessions currently live in a pane (you can't resume those anyway).
+#
+# Titles fall back summary_title → cleaned first/last user text → cwd·branch, so
+# a session is recognizable even without a summary. `live` guards double-resume.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+SANTA="${SANTA:-$HOME/.local/bin/santa}"
+
+q=""; limit=12; recent=0
+while [[ $# -gt 0 ]]; do case "$1" in
+  --limit)  limit="${2:-12}"; shift;;
+  --recent) recent=1;;
+  *) q="$1";;
+esac; shift; done
+(( recent )) || [[ -n "$q" ]] || { echo '{"error":"query or --recent required","results":[]}'; exit 0; }
+[[ "$limit" =~ ^[0-9]+$ ]] || limit=12; (( limit>=1 && limit<=25 )) || limit=12
+
+# A first/last-user-text snippet is unusable as a title when it's a caveat blob,
+# a slash-command, a bash-input, or santa's own internal run → return empty so the
+# caller falls through to the next source.
+clean_snip() {
+  case "$1" in
+    '<local-command-caveat>'*|'<command-'*|'Caveat:'*|'<bash-'*|'<<santa-claude-internal>>'*|'[Request interrupted'*) echo ''; return;;
+  esac
+  local s; s=$(ck_clean_label "$1"); echo "${s:0:80}"
+}
+
+# id (or 8-char prefix) -> output TSV: id cwd title agent when turns live
+emit_id() {
+  local key="$1" row id cwd branch sumt fut lut when status prov turns agent title jsonl live
+  # Free-text fields (summary/first/last user text) can hold tabs+newlines that
+  # would shift the TSV read (empty `when`, 0 turns) — flatten each to a single-line
+  # snippet IN SQL (newline/CR/tab -> space, first 120 chars) so every column stays
+  # on its own tab-field.
+  # Use \x1f (unit separator) not tab: tab is IFS-whitespace, so `read` would
+  # COLLAPSE an empty field (e.g. a session with no summary_title) and shift every
+  # later column left — the reason `when`/`turns` came out wrong. \x1f never appears
+  # in the data and isn't whitespace, so empty fields are preserved. Newlines are
+  # still flattened out of the free-text fields (read is line-based).
+  row=$(sqlite3 -separator $'\x1f' "$SANTA_DB" \
+    "SELECT id, coalesce(cwd,''), coalesce(git_branch,''), \
+            substr(replace(replace(replace(coalesce(summary_title,''),char(10),' '),char(13),' '),char(9),' '),1,120), \
+            substr(replace(replace(replace(coalesce(first_user_text,''),char(10),' '),char(13),' '),char(9),' '),1,120), \
+            substr(replace(replace(replace(coalesce(last_user_text,''),char(10),' '),char(13),' '),char(9),' '),1,120), \
+            coalesce(last_active_at,ended_at,started_at,''), coalesce(status,''), \
+            coalesce(provider,'claude-code'), coalesce(turn_count,0) \
+     FROM sessions WHERE id LIKE '${key}%' LIMIT 1;" 2>/dev/null)
+  [[ -n "$row" ]] || return
+  IFS=$'\x1f' read -r id cwd branch sumt fut lut when status prov turns <<< "$row"
+  [[ "$prov" == codex ]] && agent=codex || agent=claude
+  title="$sumt"
+  [[ -n "$title" ]] || title=$(clean_snip "$fut")
+  [[ -n "$title" ]] || title=$(clean_snip "$lut")
+  [[ -n "$title" ]] || title="$(basename "$cwd")${branch:+ · $branch}"
+  jsonl=$(agent_transcript "$agent" "$id" "$cwd")
+  if session_is_running_agent "$agent" "$id" || session_is_live "$jsonl"; then live=1; else live=0; fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$cwd" "$(ck_clean_label "$title")" "$agent" "$when" "$turns" "$live"
+}
+
+{
+  if (( recent )); then
+    # newest-first by last activity, resolve each, then DROP live ones (can't resume
+    # those) and cap at limit. Pull a wide pool because your live panes sit at the
+    # top of "most recent" — we want the dormant sessions underneath them.
+    # Exclude ephemeral scratch/sub-agent sessions (/tmp + ~/tmp) — deep-research /
+    # fusion gatherers & verifiers run there and would bury real ~/repos work.
+    sqlite3 "$SANTA_DB" \
+      "SELECT id FROM sessions \
+       WHERE coalesce(status,'') NOT IN ('completed','archived') AND coalesce(cwd,'')<>'' \
+         AND cwd NOT LIKE '/tmp/%' AND cwd NOT LIKE '$HOME/tmp/%' \
+       ORDER BY coalesce(last_active_at, ended_at, started_at) DESC LIMIT 60;" 2>/dev/null \
+      | while IFS= read -r id; do emit_id "$id"; done \
+      | awk -F'\t' '$7=="0"' | head -n "$limit"
+  else
+    # query mode = reliable keyword (direct substring on cwd/title/user-text,
+    # recency-ordered) MERGED with santa's semantic ranking, keyword-first. So
+    # "touchstone" always surfaces your touchstone sessions even when their
+    # auto-title is junk and semantic ranks them low; semantic adds conceptual
+    # matches below. Dedupe by 8-char id prefix, keyword order first.
+    esc_q=${q//\'/\'\'}   # escape single quotes for the SQL LIKE
+    {
+      sqlite3 "$SANTA_DB" \
+        "SELECT id FROM sessions \
+         WHERE (cwd LIKE '%${esc_q}%' OR summary_title LIKE '%${esc_q}%' \
+                OR first_user_text LIKE '%${esc_q}%' OR last_user_text LIKE '%${esc_q}%') \
+           AND coalesce(status,'') NOT IN ('completed','archived') \
+           AND cwd NOT LIKE '/tmp/%' AND cwd NOT LIKE '$HOME/tmp/%' \
+         ORDER BY coalesce(last_active_at, ended_at, started_at) DESC LIMIT $limit;" 2>/dev/null
+      "$SANTA" query "$q" --limit "$limit" 2>/dev/null \
+        | grep -oE '^\[[0-9]+\] [0-9a-f]{8}' | awk '{print $2}'
+    } | awk '!seen[substr($0,1,8)]++' | head -n "$limit" \
+      | while IFS= read -r k; do emit_id "$k"; done
+  fi
+} | jq -Rn '
+  [ inputs | select(length>0) | split("\t") | {
+      id:.[0], cwd:.[1], title:.[2], agent:.[3], when:.[4], turns:(.[5]|tonumber? // 0), live:(.[6]=="1")
+    } ] | {results: .}'

@@ -32,19 +32,9 @@ case "$agent" in claude|codex|shell) ;; *) echo "cockpit-spawn: --agent must be 
 $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "cockpit-spawn: no cockpit grid running" >&2; exit 1; }
 [[ -n "$name" ]] || name="$(basename "$cwd")"
 
-# Resolve the target workspace window: a named one is reused if it already
-# exists, created if not; otherwise land in the workspace currently in view.
-W=""
-if [[ -n "$ws" ]]; then
-  W=$($TMUX list-windows -t "$COCKPIT_SESSION" -F '#{window_id}	#{window_name}' 2>/dev/null \
-        | awk -F'\t' -v n="$ws" '$2==n{print $1; exit}')
-  if [[ -z "$W" ]]; then
-    W=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{window_id}' -n "$ws" "bash -l" 2>/dev/null) \
-      || { echo "cockpit-spawn: could not create workspace '$ws'" >&2; exit 1; }
-  fi
-else
-  W=$(cockpit_cur_window)
-fi
+# Land in the target workspace (named → reuse/create; empty → current view).
+W=$(cockpit_resolve_workspace "$ws")
+[[ -n "$W" ]] || { echo "cockpit-spawn: could not resolve/create workspace '${ws:-<current>}'" >&2; exit 1; }
 
 # Build the launch. claude/codex are tracked (poller adopts via @born); a bare
 # shell is not. Mirrors cockpit-pick spawn_new, kept in sync via cockpit_rc_args.

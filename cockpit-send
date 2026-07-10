@@ -16,11 +16,11 @@ PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
 LOG="${TMPDIR:-/tmp}/cockpit-send.log"
 log() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true; }
 
-id=""; cwd=""; agent=""
+id=""; cwd=""; agent=""; ws=""
 while [[ $# -gt 0 ]]; do case "$1" in
-  --cwd) cwd="${2:-}"; shift;; --agent) agent="${2:-}"; shift;; *) id="$1";; esac; shift; done
+  --cwd) cwd="${2:-}"; shift;; --agent) agent="${2:-}"; shift;; --workspace) ws="${2:-}"; shift;; *) id="$1";; esac; shift; done
 log "invoked: id='$id' cwd-arg='$cwd' agent='$agent' COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}'"
-[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex]" >&2; log "ABORT: no id"; exit 2; }
+[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME]" >&2; log "ABORT: no id"; exit 2; }
 
 # resolve agent + full id + cwd + title. Claude resolves via santa's DB (handles
 # prefixes); otherwise try a Codex rollout; default claude.
@@ -60,11 +60,12 @@ fi
 
 if session_is_running_agent "$agent" "$id"; then
   $TMUX display-message "cockpit: ${id:0:8} is already live — not duplicating"
+  echo "already-live ${id:0:8}"
   exit 0
 fi
 
 cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
-W=$(cockpit_cur_window)   # land in the workspace you're viewing
+W=$(cockpit_resolve_workspace "$ws")   # named → reuse/create; empty → workspace you're viewing
 # reuse a bare untracked shell (e.g. a freshly-created workspace) if it's active
 act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
 actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
@@ -81,3 +82,4 @@ $TMUX set -p -t "$pane" @agent "$agent"
 $TMUX set -p -t "$pane" @badge "starting"
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 $TMUX display-message "cockpit: + ${title:0:40}"
+echo "resumed ${id:0:8} → ${title:0:60}"

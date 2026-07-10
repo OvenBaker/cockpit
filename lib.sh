@@ -72,6 +72,17 @@ cockpit_cur_window() {
   echo "${w:-$COCKPIT_SESSION:0}"
 }
 
+# Resolve a target workspace WINDOW id by name: reuse if it exists, else create
+# one (as a bare shell). Empty name → the workspace currently in view. Shared by
+# cockpit-spawn and cockpit-send so remote/scripted placement matches the picker.
+cockpit_resolve_workspace() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} name="$1" w
+  [[ -n "$name" ]] || { cockpit_cur_window; return; }
+  w=$($tmux list-windows -t "$COCKPIT_SESSION" -f "#{==:#{window_name},$name}" -F '#{window_id}' 2>/dev/null | head -1)
+  [[ -n "$w" ]] || w=$($tmux new-window -t "$COCKPIT_SESSION" -P -F '#{window_id}' -n "$name" "bash -l" 2>/dev/null)
+  echo "$w"
+}
+
 # --- session selection ------------------------------------------------------
 
 # Encode a cwd to its ~/.claude/projects directory name (Claude replaces / and . with -)

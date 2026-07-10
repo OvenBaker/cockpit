@@ -126,6 +126,46 @@ const server = http.createServer((req, res) => {
     });
   }
 
+  if (req.method === 'GET' && p === '/api/search') {
+    const q = clean(url.searchParams.get('q') || '', 200);
+    let limit = parseInt(url.searchParams.get('limit') || '8', 10);
+    if (!Number.isFinite(limit) || limit < 1 || limit > 20) limit = 8;
+    if (!q) return sendJSON(res, 400, { error: 'q required' });
+    return run('cockpit-search', [q, '--limit', String(limit)], (err, out) => {
+      if (err && !out) return sendJSON(res, 500, { error: 'search failed', detail: String(err) });
+      try { return sendJSON(res, 200, JSON.parse(out)); }
+      catch (e2) { return sendJSON(res, 500, { error: 'bad search json', detail: out.slice(0, 200) }); }
+    });
+  }
+
+  if (req.method === 'GET' && p === '/api/recent') {
+    let limit = parseInt(url.searchParams.get('limit') || '12', 10);
+    if (!Number.isFinite(limit) || limit < 1 || limit > 25) limit = 12;
+    return run('cockpit-search', ['--recent', '--limit', String(limit)], (err, out) => {
+      if (err && !out) return sendJSON(res, 500, { error: 'recent failed', detail: String(err) });
+      try { return sendJSON(res, 200, JSON.parse(out)); }
+      catch (e2) { return sendJSON(res, 500, { error: 'bad recent json', detail: out.slice(0, 200) }); }
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/resume') {
+    return readBody(req, (e, body) => {
+      if (e) return sendJSON(res, 400, { error: 'bad body' });
+      const id = clean(body.id, 64);
+      const ws = clean(body.workspace, 64);
+      // ids come from search results; restrict to a session-id shape so nothing
+      // odd reaches cockpit-send's sqlite lookup.
+      if (!/^[0-9a-fA-F][0-9a-fA-F-]{5,63}$/.test(id)) return sendJSON(res, 400, { error: 'bad id' });
+      const args = [id];
+      if (ws) args.push('--workspace', ws);
+      run('cockpit-send', args, (err, out, se) => {
+        const text = (out + se).trim();
+        if (err) return sendJSON(res, 200, { ok: false, error: text || 'resume failed' });
+        sendJSON(res, 200, { ok: true, live: /already-live/.test(out), output: text });
+      });
+    });
+  }
+
   sendJSON(res, 404, { error: 'not found' });
 });
 

@@ -113,6 +113,20 @@
 
   .empty { color: var(--ink-dim); text-align: center; padding: 26px 10px; font-size: 13.5px; }
 
+  .searchrow { display: flex; gap: 8px; }
+  .searchrow input { flex: 1; }
+  #searchResults { margin-top: 12px; }
+  #searchResults:empty { display: none; }
+  .searching { color: var(--ink-dim); font-size: 12.5px; padding: 14px 4px; text-align: center; }
+  .sresult { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); margin-bottom: 7px; }
+  .sresult .pmeta { flex: 1; min-width: 0; }
+  .sresult .slabel { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sresult .ssub { font-size: 11px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .sresult .resume { appearance: none; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--accent-ink); border-radius: 9px; padding: 7px 12px; flex: none; }
+  .sresult .resume:active { transform: translateY(1px); }
+  .sresult .resume[disabled] { opacity: .55; cursor: default; border-color: var(--line); background: var(--panel); color: var(--ink-dim); }
+  .sresult .resume.recon { border-color: var(--blue); background: color-mix(in srgb, var(--blue) 12%, var(--panel)); color: var(--blue); }
+
   #toast {
     position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%) translateY(20px);
     background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 12px; font-size: 13px; font-weight: 600;
@@ -156,6 +170,18 @@
     <button class="btn" id="launchBtn">Launch session</button>
   </div>
 
+  <h2>Resume a past session</h2>
+  <div class="card">
+    <div class="searchrow">
+      <input type="text" id="searchInput" placeholder="search your history…" enterkeyhint="search" autocapitalize="off" autocomplete="off">
+      <button class="btn mini" id="searchBtn">Search</button>
+    </div>
+    <label class="f">Resume into</label>
+    <select id="wsSelResume"></select>
+    <input type="text" id="wsCustomResume" placeholder="new workspace name" style="display:none;margin-top:8px">
+    <div id="searchResults"></div>
+  </div>
+
   <div class="rowhead">
     <h2>Sessions</h2>
     <button class="btn mini ghost" id="rebootIdleBtn">Reboot all idle</button>
@@ -168,7 +194,7 @@
 <script>
 (function () {
   var $ = function (s) { return document.querySelector(s); };
-  var state = { data: null, agent: 'claude', dirOther: false, wsNew: false };
+  var state = { data: null, agent: 'claude', dirOther: false, wsNew: false, wsNewResume: false };
 
   // ---- theme ----
   $('#themeBtn').addEventListener('click', function () {
@@ -206,31 +232,23 @@
     $('#wsCustom').style.display = state.wsNew ? 'block' : 'none';
     if (state.wsNew) $('#wsCustom').focus();
   });
+  $('#wsSelResume').addEventListener('change', function () {
+    state.wsNewResume = this.value === '__new';
+    $('#wsCustomResume').style.display = state.wsNewResume ? 'block' : 'none';
+    if (state.wsNewResume) $('#wsCustomResume').focus();
+  });
 
-  function fillSelects(data) {
-    // directory list is stable — fill once so we don't clobber a choice each poll
-    var dir = $('#dirSel');
-    if (!dir.dataset.filled) {
-      dir.innerHTML = '';
-      (data.recent_cwds || []).forEach(function (c) {
-        var o = document.createElement('option'); o.value = c; o.textContent = c.replace(/^\/home\/[^/]+/, '~'); dir.appendChild(o);
-      });
-      var oo = document.createElement('option'); oo.value = '__other'; oo.textContent = 'Other path…'; dir.appendChild(oo);
-      dir.dataset.filled = '1';
-    }
-
-    // workspace list refreshes live so pane counts + which one "current" resolves
-    // to stay accurate — but preserve the user's pick, skip while they're typing a
-    // new name (state.wsNew) or have the picker open (focused).
-    var ws = $('#wsSel');
-    if (state.wsNew || document.activeElement === ws) return;
+  // Populate a workspace <select> live: pane counts + what "current" resolves to,
+  // preserving the pick and skipping while the user types a new name or has it open.
+  function fillWs(selId, isNew, data) {
+    var ws = document.getElementById(selId);
+    if (isNew || document.activeElement === ws) return;
     var keep = ws.value;
     var counts = {};
     (data.panes || []).forEach(function (p) { counts[p.window] = (counts[p.window] || 0) + 1; });
     var active = data.active || '';
     var plural = function (n) { return n + ' pane' + (n === 1 ? '' : 's'); };
     ws.innerHTML = '';
-    // "current" spells out what it resolves to right now (you may not be looking at cockpit)
     var cur = document.createElement('option'); cur.value = '';
     cur.textContent = active ? ('▸ current: ' + active + ' · ' + plural(counts[active] || 0)) : '(current workspace)';
     ws.appendChild(cur);
@@ -244,6 +262,21 @@
     var nw = document.createElement('option'); nw.value = '__new'; nw.textContent = 'New workspace…'; ws.appendChild(nw);
     ws.value = keep;                       // restore selection
     if (ws.value !== keep) ws.value = '';  // vanished → fall back to current
+  }
+
+  function fillSelects(data) {
+    // directory list is stable — fill once so we don't clobber a choice each poll
+    var dir = $('#dirSel');
+    if (!dir.dataset.filled) {
+      dir.innerHTML = '';
+      (data.recent_cwds || []).forEach(function (c) {
+        var o = document.createElement('option'); o.value = c; o.textContent = c.replace(/^\/home\/[^/]+/, '~'); dir.appendChild(o);
+      });
+      var oo = document.createElement('option'); oo.value = '__other'; oo.textContent = 'Other path…'; dir.appendChild(oo);
+      dir.dataset.filled = '1';
+    }
+    fillWs('wsSel', state.wsNew, data);            // new-session target
+    fillWs('wsSelResume', state.wsNewResume, data); // resume target
   }
 
   // ---- render sessions ----
@@ -336,8 +369,76 @@
       .catch(function () { toast('network error', true); });
   }
 
+  // ---- search + resume a closed/past session ----
+  function runSearch() {
+    var q = $('#searchInput').value.trim();
+    if (!q) return loadRecent();       // empty query → recent dormant sessions
+    fetchResults('/api/search?limit=10&q=' + encodeURIComponent(q), 'searching your history…');
+  }
+  function loadRecent() { fetchResults('/api/recent?limit=12', 'loading recent sessions…'); }
+  function fetchResults(url, msg) {
+    $('#searchResults').innerHTML = '<div class="searching">' + msg + '</div>';
+    var btn = $('#searchBtn'); btn.disabled = true;
+    fetch(url, { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { renderResults(j.results || [], j.error); })
+      .catch(function () { $('#searchResults').innerHTML = '<div class="searching">request failed</div>'; })
+      .finally(function () { btn.disabled = false; });
+  }
+  function renderResults(rows, err) {
+    var host = $('#searchResults');
+    if (err) { host.innerHTML = '<div class="searching">' + esc(err) + '</div>'; return; }
+    if (!rows.length) { host.innerHTML = '<div class="searching">no matches</div>'; return; }
+    host.innerHTML = rows.map(function (r) {
+      var when = (r.when || '').slice(0, 10);
+      var cwd = (r.cwd || '').replace(/^\/home\/[^/]+/, '~');
+      var sub = [cwd, when].filter(Boolean).join(' · ');
+      var tag = r.agent === 'codex' ? '<span class="tag cx">codex</span> ' : '';
+      var turns = r.turns ? (' · ' + r.turns + 't') : '';
+      var title = r.title || r.id.slice(0, 8);
+      return '<div class="sresult"><div class="pmeta">' +
+        '<div class="slabel">' + tag + esc(title) + '</div>' +
+        '<div class="ssub">' + esc(sub) + esc(turns) + '</div></div>' +
+        (r.live
+          ? '<button class="resume recon" data-id="' + esc(r.id) + '" data-title="' + esc(title) + '" title="live in the grid — reconnect it to the app">reconnect</button>'
+          : '<button class="resume" data-id="' + esc(r.id) + '" data-title="' + esc(title) + '">resume</button>') +
+        '</div>';
+    }).join('');
+    [].forEach.call(host.querySelectorAll('.resume:not(.recon)[data-id]'), function (b) {
+      b.addEventListener('click', function () { resumeOne(b.dataset.id, b.dataset.title); });
+    });
+    [].forEach.call(host.querySelectorAll('.recon[data-id]'), function (b) {
+      b.addEventListener('click', function () { reconnectOne(b.dataset.id, b.dataset.title); });
+    });
+  }
+  function resumeOne(id, title) {
+    var ws = state.wsNewResume ? $('#wsCustomResume').value.trim() : $('#wsSelResume').value;
+    if (!confirm('Resume “' + (title || id.slice(0, 8)) + '” into ' + (ws || 'the current workspace') +
+      '?\nIt comes back with remote control, ready to steer from the app.')) return;
+    fetch('/api/resume', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: id, workspace: ws }) })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.error) return toast(j.error, true);
+        toast(j.live ? 'Already open in the grid' : 'Resumed — open the Claude app to steer it');
+        setTimeout(getState, 800);
+      })
+      .catch(function () { toast('network error', true); });
+  }
+  // a LIVE result is open in the grid but off the app — reboot it to reconnect RC
+  function reconnectOne(id, title) {
+    if (!confirm('“' + (title || id.slice(0, 8)) + '” is live in the grid but not on the app.\nReboot it to reconnect remote control? It reloads from disk — nothing is lost.')) return;
+    fetch('/api/reboot', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target: id }) })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (j.error) return toast(j.error, true); toast('Reconnecting — open the Claude app to steer it'); setTimeout(getState, 900); })
+      .catch(function () { toast('network error', true); });
+  }
+  $('#searchBtn').addEventListener('click', runSearch);
+  $('#searchInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') runSearch(); });
+
   // ---- boot + poll ----
   getState();
+  loadRecent();
   setInterval(getState, 4000);
 })();
 </script>
