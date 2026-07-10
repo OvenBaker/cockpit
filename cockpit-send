@@ -59,7 +59,17 @@ if ! $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
 fi
 
 if session_is_running_agent "$agent" "$id"; then
-  $TMUX display-message "cockpit: ${id:0:8} is already live — not duplicating"
+  # Already open — don't double-attach (that corrupts the shared transcript).
+  # Jump focus to the existing pane instead of no-op'ing: this is the Alt+s
+  # "go to it if it's open, else resume it" behaviour. Falls back to a plain
+  # notice if it's running outside the grid (no pane carries this @session_id).
+  epane=$($TMUX list-panes -s -t "$COCKPIT_SESSION" -f "#{==:#{@session_id},$id}" -F '#{pane_id}' 2>/dev/null | head -1)
+  if [[ -n "$epane" ]]; then
+    $TMUX select-window -t "$epane" 2>/dev/null; $TMUX select-pane -t "$epane" 2>/dev/null
+    $TMUX display-message "cockpit: → ${title:0:40} — jumped to the open pane"
+  else
+    $TMUX display-message "cockpit: ${id:0:8} is already live (not in the grid)"
+  fi
   echo "already-live ${id:0:8}"
   exit 0
 fi

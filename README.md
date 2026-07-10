@@ -61,7 +61,7 @@ The label hugs the left; status + time hug the right.
 | `Alt-i` | collapse idle panes / restore |
 | `Alt-r` | retarget pane → pick a dormant session |
 | `Alt-n` | add a pane → pick a session |
-| `Alt-s` | browse santa's TUI; resume there sends the session here |
+| `Alt-s` | browse santa's TUI; resume sends the session here, or jumps to it if already open |
 | `Alt-x` | remove the active pane |
 | `Alt-/` (or `Alt-h` / `Alt-?`) | key reference popup |
 

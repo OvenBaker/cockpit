@@ -26,7 +26,7 @@ if [[ "${1:-popup}" == "show" ]]; then
    Alt-r         retarget pane → pick a session (popup)
    Alt-n         add a pane → resume a session
    Alt-N         new claude/codex/bash → this or a new workspace
-   Alt-s         browse santa TUI → resume sends here
+   Alt-s         browse santa TUI → resume here, or jump to it if open
    Alt-f         find related sessions → add one here
    Alt-m         move pane → another workspace
    Alt-S-← / →   shove pane to prev / next workspace

@@ -29,7 +29,7 @@
 #   Alt-r     retarget pane → pick a dormant session (popup, list refreshed live)
 #   Alt-n     add a pane: resume a session         Alt-N  new claude/codex/bash in a cwd
 #   Alt-m     move pane → workspace (Alt-S-←/→ shove)   Alt-x  remove the active pane
-#   Alt-s     browse santa's TUI; resume there sends the session here
+#   Alt-s     browse santa's TUI; resume sends the session here (or jumps to it if already open)
 #   Alt-f     find sessions related to the focused pane → add one to this workspace
 #   Alt-/ , Alt-h , Alt-?     show the key reference popup
 set -euo pipefail
