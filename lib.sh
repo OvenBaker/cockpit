@@ -127,10 +127,15 @@ _claude_rows() {
   local limit="${1:-16}" id title status cwd jsonl mt n=0 headblk
   local now cutoff; now=$(date +%s); cutoff=$(( now - COCKPIT_MAX_AGE_DAYS*86400 ))
   declare -A ST TL CW
-  while IFS=$'\t' read -r id status title cwd; do
+  # Read with \x1f, not tab: tab is IFS-whitespace, so an empty title field would
+  # collapse and shift cwd into title. And flatten newlines/tabs out of the title
+  # IN SQL — read is line-based, so a title with an embedded newline used to split
+  # the row and leave an empty id → `ST[$id]: bad array subscript` crash.
+  while IFS=$'\x1f' read -r id status title cwd; do
+    [[ -n "$id" ]] || continue
     ST[$id]="$status"; TL[$id]="$title"; CW[$id]="$cwd"
-  done < <(sqlite3 -separator $'\t' "$SANTA_DB" \
-    "SELECT id, status, coalesce(nullif(summary_title,''), substr(first_user_text,1,80), ''), coalesce(cwd,'') FROM sessions;")
+  done < <(sqlite3 -separator $'\x1f' "$SANTA_DB" \
+    "SELECT id, status, replace(replace(replace(coalesce(nullif(summary_title,''), substr(first_user_text,1,80), ''),char(10),' '),char(13),' '),char(9),' '), coalesce(cwd,'') FROM sessions;")
   while IFS=$'\t' read -r mt jsonl; do
     (( ${mt%.*} < cutoff )) && break                # sorted newest-first → rest are older
     id=$(basename "$jsonl" .jsonl)
@@ -165,10 +170,15 @@ _codex_rows() {
   # so we don't full-file-jq every rollout for its title. No provider filter: keying by
   # the codex id is enough, and it works on a DB that predates the provider column.
   declare -A ST TL CW
-  while IFS=$'\t' read -r id status title cwd; do
+  # Read with \x1f, not tab: tab is IFS-whitespace, so an empty title field would
+  # collapse and shift cwd into title. And flatten newlines/tabs out of the title
+  # IN SQL — read is line-based, so a title with an embedded newline used to split
+  # the row and leave an empty id → `ST[$id]: bad array subscript` crash.
+  while IFS=$'\x1f' read -r id status title cwd; do
+    [[ -n "$id" ]] || continue
     ST[$id]="$status"; TL[$id]="$title"; CW[$id]="$cwd"
-  done < <(sqlite3 -separator $'\t' "$SANTA_DB" \
-    "SELECT id, status, coalesce(nullif(summary_title,''), substr(first_user_text,1,80), ''), coalesce(cwd,'') FROM sessions;")
+  done < <(sqlite3 -separator $'\x1f' "$SANTA_DB" \
+    "SELECT id, status, replace(replace(replace(coalesce(nullif(summary_title,''), substr(first_user_text,1,80), ''),char(10),' '),char(13),' '),char(9),' '), coalesce(cwd,'') FROM sessions;")
   while IFS=$'\t' read -r mt f; do
     (( ${mt%.*} < cutoff )) && break
     id=$(basename "$f" | sed -E 's/.*-([0-9a-f-]{36})\.jsonl$/\1/'); [[ -n "$id" ]] || continue
