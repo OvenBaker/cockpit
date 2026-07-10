@@ -46,11 +46,11 @@ retarget_pane() {
   if session_is_running_agent "$agent" "$id"; then   # re-check at action time
     say "cockpit: $id is live elsewhere — not retargeting"; sleep 1; return 0
   fi
-  local cmd; cmd=$(agent_resume_inner "$agent" "$id" "$cwd")
+  local cmd; cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
   $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
   $TMUX set -p -t "$pane" @session_id "$id"
   $TMUX set -p -t "$pane" @cwd "$cwd"
-  $TMUX set -p -t "$pane" @label "$title"     # full; border truncates to width
+  $TMUX set -p -t "$pane" @label "$(ck_clean_label "$title")"   # one line; border truncates to width
   $TMUX set -p -t "$pane" @agent "$agent"
   $TMUX set -p -t "$pane" @badge "starting"
 }
@@ -59,8 +59,12 @@ retarget_pane() {
 # shell if the active pane is one, else splitting. No @session_id — the poller
 # adopts the transcript once the agent writes it (cockpit_adopt_agent), via @born.
 spawn_new() {
-  local W="$1" cwd="$2" agent="${3:-claude}" cmd act actsid pane launch
-  case "$agent" in codex) launch="exec codex";; shell) launch="exec bash -l";; *) launch="exec claude";; esac
+  local W="$1" cwd="$2" agent="${3:-claude}" name="${4:-}" cmd act actsid pane launch
+  case "$agent" in
+    codex) launch="exec codex";;
+    shell) launch="exec bash -l";;
+    *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;   # RC on: steerable from the app
+  esac
   cmd="cd $(printf %q "$cwd") && $launch"
   act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
   actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')

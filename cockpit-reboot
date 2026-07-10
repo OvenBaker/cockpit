@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# cockpit-reboot — relaunch a claude pane's session WITH remote control, in place.
+#
+#   cockpit-reboot <pane-id|session-id>   reboot one pane (%3, or a session uuid/prefix)
+#   cockpit-reboot --idle-all             reboot every idle claude pane
+#   cockpit-reboot --all                  reboot every claude pane (skips busy ones)
+#     add --force                         also reboot working/needs-input panes
+#
+# Why this exists: a resumed session can come back without a working Remote
+# Control connection (it "resumes fine" but isn't steerable from the app). Since
+# there's no reliable way to detect that on a live pane, this is the lever: a
+# respawn onto `claude --resume <id> --remote-control` reloads the exact
+# conversation from its transcript (no history lost) and re-establishes RC.
+# Idle/just-finished panes are safe to reboot; working/needs-input are skipped
+# unless --force, so we never interrupt a turn in flight.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+TAB=$'\t'; NIL='<nil>'
+# The whole point of a reboot is to (re)establish Remote Control, so force it on
+# even if the global default is off (that flag only gates bulk resume/restore).
+export COCKPIT_REMOTE_CONTROL=1
+
+target=""; mode="one"; force=0; dry=0
+while [[ $# -gt 0 ]]; do case "$1" in
+  --idle-all) mode="idle";; --all) mode="all";; --force) force=1;; --dry-run|-n) dry=1;;
+  --*) echo "cockpit-reboot: unknown flag: $1" >&2; exit 2;;
+  *) target="$1";;
+esac; shift; done
+
+$TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "cockpit-reboot: no cockpit grid running" >&2; exit 1; }
+[[ "$mode" != "one" || -n "$target" ]] || { echo "usage: cockpit-reboot <pane-id|session-id> | --idle-all | --all [--force]" >&2; exit 2; }
+
+# Reboot a single pane given its resolved fields. Returns 0 if it acted.
+reboot_pane() {
+  local pid="$1" sid="$2" cwd="$3" label="$4" agent="$5" state="$6" orderly="$7"
+  [[ -z "$orderly" ]] || { echo "skip $pid: orderly '$orderly' (managed by the aide fleet, not cockpit)" >&2; return 1; }
+  [[ "$agent" == claude ]] || { echo "skip $pid: $agent has no remote control" >&2; return 1; }
+  [[ -n "$sid" ]] || { echo "skip $pid: no session id (unadopted/new)" >&2; return 1; }
+  if (( ! force )) && [[ "$state" == "working" || "$state" == "needs-input" ]]; then
+    echo "skip $pid: $state (use --force to reboot anyway)" >&2; return 1
+  fi
+  local cmd; cmd=$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")
+  if (( dry )); then echo "would reboot $pid  ${sid:0:8}  [$state]  ${label:0:40}"; return 0; fi
+  $TMUX respawn-pane -k -t "$pid" "bash -lc $(printf %q "$cmd")" 2>/dev/null || { echo "skip $pid: respawn failed" >&2; return 1; }
+  $TMUX set -p -t "$pid" @session_id "$sid"
+  $TMUX set -p -t "$pid" @badge "rebooting"
+  echo "rebooted $pid  ${sid:0:8}  ${label:0:40}"
+  return 0
+}
+
+# Walk every pane once; act on those matching the mode/target.
+n=0
+while IFS="$TAB" read -r pid sid cwd label agent state orderly; do
+  [[ -n "$pid" ]] || continue
+  [[ "$sid" == "$NIL" ]] && sid=""; [[ "$cwd" == "$NIL" ]] && cwd=""
+  [[ "$label" == "$NIL" ]] && label=""; [[ "$state" == "$NIL" ]] && state=""
+  [[ "$orderly" == "$NIL" ]] && orderly=""
+  [[ -n "$agent" ]] || agent=claude
+  case "$mode" in
+    idle) [[ "$state" == "idle" || "$state" == "just-finished" ]] || continue;;
+    all)  ;;
+    one)  [[ "$pid" == "$target" || ( -n "$sid" && "$sid" == "$target"* ) ]] || continue;;
+  esac
+  reboot_pane "$pid" "$sid" "$cwd" "$label" "$agent" "$state" "$orderly" && n=$((n+1))
+done < <($TMUX list-panes -s -t "$COCKPIT_SESSION" \
+  -F "#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},claude}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@orderly,#{@orderly},$NIL}" 2>/dev/null)
+
+echo "cockpit-reboot: rebooted $n pane(s)"
+[[ "$mode" == "one" && "$n" == 0 ]] && { echo "cockpit-reboot: no pane matched '$target'" >&2; exit 1; }
+exit 0

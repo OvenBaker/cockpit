@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# cockpit-state — emit the live grid as JSON for the web control surface.
+#
+#   { active, workspaces:[{window_id,name,active}], recent_cwds:[…],
+#     panes:[{pane_id,window_id,window,session_id,cwd,label,agent,state,badge,orderly}] }
+#
+# state/badge are what the poller last painted (@state/@badge); orderly marks
+# aide-de-camp panes (brief/alpha/bravo) so the UI can show them read-only.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+TAB=$'\t'; NIL='<nil>'
+
+if ! $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
+  echo '{"running":false,"active":null,"workspaces":[],"panes":[],"recent_cwds":[]}'
+  exit 0
+fi
+
+active=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)
+
+panes_tsv=$($TMUX list-panes -s -t "$COCKPIT_SESSION" \
+  -F "#{pane_id}${TAB}#{window_id}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},claude}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@badge,#{@badge},$NIL}${TAB}#{?@orderly,#{@orderly},$NIL}" 2>/dev/null)
+
+wins_tsv=$($TMUX list-windows -t "$COCKPIT_SESSION" \
+  -F "#{window_id}${TAB}#{window_name}${TAB}#{?window_active,1,0}" 2>/dev/null)
+
+panes=$(printf '%s\n' "$panes_tsv" | jq -Rn '
+  def nn: if . == "<nil>" then "" else . end;
+  [ inputs | select(length>0) | split("\t") | {
+      pane_id:    .[0],
+      window_id:  .[1],
+      window:     .[2],
+      session_id: (.[3]|nn),
+      cwd:        (.[4]|nn),
+      label:      (.[5]|nn),
+      agent:      (.[6]),
+      state:      (.[7]|nn),
+      badge:      (.[8]|nn),
+      orderly:    (.[9]|nn)
+    } ]')
+
+workspaces=$(printf '%s\n' "$wins_tsv" | jq -Rn '
+  [ inputs | select(length>0) | split("\t") | {
+      window_id: .[0], name: .[1], active: (.[2]=="1")
+    } ]')
+
+cwds=$(cockpit_recent_cwds 20 | jq -Rn '[ inputs | select(length>0) ]')
+
+jq -n \
+  --arg active "$active" \
+  --argjson workspaces "${workspaces:-[]}" \
+  --argjson panes "${panes:-[]}" \
+  --argjson cwds "${cwds:-[]}" \
+  '{running:true, active:$active, workspaces:$workspaces, panes:$panes, recent_cwds:$cwds}'

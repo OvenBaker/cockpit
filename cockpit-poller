@@ -169,6 +169,7 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
       t=$(sqlite3 "$SANTA_DB" \
         "SELECT coalesce(nullif(summary_title,''), substr(first_user_text,1,80), '') \
          FROM sessions WHERE id='$sid' LIMIT 1;" 2>/dev/null)
+      t=$(ck_clean_label "$t")    # first_user_text carries newlines/tabs — must be one line
       if [[ -n "$t" && "$t" != "${LASTLABEL[$pid]:-}" ]]; then   # store full; border truncates
         $TMUX set -p -t "$pid" @label "$t"; LASTLABEL[$pid]="$t"
       fi

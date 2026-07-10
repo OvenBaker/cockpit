@@ -1,0 +1,35 @@
+# cockpit web control surface — systemd USER service.
+#   install:  cp web/cockpit-webd.service ~/.config/systemd/user/
+#             systemctl --user daemon-reload
+#             systemctl --user enable --now cockpit-webd
+#   linger (survive logout / run at boot; already on for orderlies):
+#             loginctl enable-linger "$USER"
+#   logs:     journalctl --user -u cockpit-webd -f
+#
+# Binds 127.0.0.1 only — reachable solely through the Cloudflare Tunnel, which
+# terminates at Access. COCKPIT_WEB_ALLOW_EMAIL is the second gate: the app also
+# checks the Cf-Access-Authenticated-User-Email header Access injects.
+[Unit]
+Description=cockpit web control surface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Load nvm explicitly (a login shell doesn't init it — ~/.bashrc returns early
+# for non-interactive shells). Version-stable: follows whatever nvm's default is.
+ExecStart=/bin/bash -c 'export NVM_DIR=%h/.nvm; . "$NVM_DIR/nvm.sh"; exec node %h/repos/cockpit/cockpit-webd'
+Environment=COCKPIT_WEB_PORT=8838
+# EDIT THIS: every identity you may log in as via Access (comma-separated). Must
+# match, or Access lets you in and the app then 403s you.
+Environment=COCKPIT_WEB_ALLOW_EMAIL=you@example.com
+# match the running cockpit's socket/session. QUOTE the whole assignment —
+# systemd splits Environment= on whitespace, so an unquoted "tmux -L cockpit"
+# would set COCKPIT_TMUX=tmux and drop the socket args.
+Environment="COCKPIT_TMUX=tmux -L cockpit"
+Environment=COCKPIT_SESSION=cockpit
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# cockpit-spawn — start a BRAND-NEW agent pane, non-interactively, in a chosen
+# (or new) workspace. The scriptable sibling of cockpit-pick's Alt-N flow, so a
+# web/remote surface can open a session without driving the interactive picker.
+#
+#   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME]
+#
+# claude panes come up with Remote Control on (via lib.sh), so the session shows
+# in the Claude app under NAME and you can steer it from your phone. No id is
+# stamped — the poller adopts the transcript once the agent writes it (@born).
+# Prints the new pane id on success.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+# Spawning from here is an explicit "I want to steer this from the app" action,
+# so force Remote Control on regardless of the global COCKPIT_REMOTE_CONTROL
+# default (which only governs the bulk resume/restore path).
+export COCKPIT_REMOTE_CONTROL=1
+
+cwd=""; ws=""; agent="claude"; name=""
+while [[ $# -gt 0 ]]; do case "$1" in
+  --cwd)       cwd="${2:-}"; shift;;
+  --workspace) ws="${2:-}"; shift;;
+  --agent)     agent="${2:-claude}"; shift;;
+  --name)      name="${2:-}"; shift;;
+  *) echo "cockpit-spawn: unknown arg: $1" >&2; exit 2;;
+esac; shift; done
+
+cwd="${cwd/#\~/$HOME}"
+[[ -n "$cwd" && -d "$cwd" ]] || { echo "cockpit-spawn: --cwd must be an existing directory (got '${cwd:-<empty>}')" >&2; exit 2; }
+case "$agent" in claude|codex|shell) ;; *) echo "cockpit-spawn: --agent must be claude|codex|shell" >&2; exit 2;; esac
+$TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "cockpit-spawn: no cockpit grid running" >&2; exit 1; }
+[[ -n "$name" ]] || name="$(basename "$cwd")"
+
+# Resolve the target workspace window: a named one is reused if it already
+# exists, created if not; otherwise land in the workspace currently in view.
+W=""
+if [[ -n "$ws" ]]; then
+  W=$($TMUX list-windows -t "$COCKPIT_SESSION" -F '#{window_id}	#{window_name}' 2>/dev/null \
+        | awk -F'\t' -v n="$ws" '$2==n{print $1; exit}')
+  if [[ -z "$W" ]]; then
+    W=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{window_id}' -n "$ws" "bash -l" 2>/dev/null) \
+      || { echo "cockpit-spawn: could not create workspace '$ws'" >&2; exit 1; }
+  fi
+else
+  W=$(cockpit_cur_window)
+fi
+
+# Build the launch. claude/codex are tracked (poller adopts via @born); a bare
+# shell is not. Mirrors cockpit-pick spawn_new, kept in sync via cockpit_rc_args.
+case "$agent" in
+  codex) launch="exec codex";;
+  shell) launch="exec bash -l";;
+  *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;
+esac
+cmd="cd $(printf %q "$cwd") && $launch"
+
+# Reuse a bare untracked shell if the workspace's active pane is one (e.g. a
+# freshly-created workspace's placeholder), else split a new pane.
+act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
+actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
+if [[ -z "$actsid" && -n "$act" ]]; then
+  pane="$act"; $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
+else
+  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+    || { echo "cockpit-spawn: no room for another pane in this workspace" >&2; exit 1; }
+fi
+
+$TMUX set -p -t "$pane" @session_id ""
+$TMUX set -p -t "$pane" @cwd "$cwd"
+$TMUX set -p -t "$pane" @agent "$agent"
+if [[ "$agent" == shell ]]; then
+  $TMUX set -p -t "$pane" @born ""            # no @born → poller won't chase a transcript
+  $TMUX set -p -t "$pane" @label "$(basename "$cwd") · bash"
+  $TMUX set -p -t "$pane" @badge "shell"
+else
+  $TMUX set -p -t "$pane" @born "$(date +%s)" # poller adopts the fresh transcript
+  $TMUX set -p -t "$pane" @label "$name"
+  $TMUX set -p -t "$pane" @badge "starting"
+fi
+$TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
+echo "$pane"

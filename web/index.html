@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f4f1ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16150f" media="(prefers-color-scheme: dark)">
+<title>cockpit</title>
+<script>
+  // Set theme before first paint to avoid a flash. Default light (persisted).
+  (function () {
+    try {
+      var t = localStorage.getItem('cockpit-theme');
+      if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) { document.documentElement.setAttribute('data-theme', 'light'); }
+  })();
+</script>
+<style>
+  :root {
+    --bg: #f4f1ea; --panel: #fbfaf6; --panel-2: #f0ece1; --ink: #2b2820; --ink-dim: #6b6553;
+    --line: #ddd6c6; --accent: #9a6b1f; --accent-ink: #7c5416;
+    --green: #3f8f3f; --blue: #2f6fd0; --red: #c23a2f; --idle: #9a9282;
+    --shadow: 0 1px 2px rgba(40,35,20,.06), 0 4px 14px rgba(40,35,20,.05);
+  }
+  :root[data-theme="dark"] {
+    --bg: #16150f; --panel: #201e16; --panel-2: #292619; --ink: #ece7d6; --ink-dim: #9a927d;
+    --line: #35311f; --accent: #e0b25a; --accent-ink: #e8be6d;
+    --green: #5fce6a; --blue: #6db0ff; --red: #ff6b5e; --idle: #7d766180;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; padding: 0 0 40px;
+    padding-top: env(safe-area-inset-top);
+  }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 0 14px; }
+  header {
+    position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: saturate(140%) blur(8px); border-bottom: 1px solid var(--line);
+    padding-top: env(safe-area-inset-top);
+  }
+  .hbar { display: flex; align-items: center; gap: 10px; max-width: 640px; margin: 0 auto; padding: 11px 14px; }
+  .brand { font-weight: 700; letter-spacing: .2px; font-size: 17px; }
+  .brand .dot { color: var(--accent); }
+  .status { font-size: 12.5px; color: var(--ink-dim); display: flex; align-items: center; gap: 5px; }
+  .status .led { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
+  .status.on .led { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 22%, transparent); }
+  .status.off .led { background: var(--red); }
+  .spacer { flex: 1; }
+  .iconbtn {
+    appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    width: 36px; height: 36px; border-radius: 10px; font-size: 16px; cursor: pointer; line-height: 1;
+    display: grid; place-items: center;
+  }
+  .iconbtn:active { transform: translateY(1px); }
+
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .12em; color: var(--ink-dim); margin: 22px 4px 9px; font-weight: 700; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 14px; }
+
+  label.f { display: block; font-size: 12.5px; color: var(--ink-dim); margin: 12px 2px 6px; font-weight: 600; }
+  label.f:first-child { margin-top: 2px; }
+  select, input[type=text] {
+    width: 100%; appearance: none; font: inherit; color: var(--ink); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 11px; padding: 12px 12px; outline: none;
+  }
+  input[type=text]::placeholder { color: color-mix(in srgb, var(--ink-dim) 80%, transparent); }
+  select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+  .hint { font-size: 11.5px; color: var(--ink-dim); margin: 5px 2px 0; }
+
+  .seg { display: flex; gap: 6px; }
+  .seg button {
+    flex: 1; appearance: none; font: inherit; font-weight: 600; padding: 10px 4px; cursor: pointer;
+    background: var(--panel-2); color: var(--ink-dim); border: 1px solid var(--line); border-radius: 11px;
+  }
+  .seg button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, var(--panel)); color: var(--accent-ink); border-color: var(--accent); }
+
+  .btn {
+    appearance: none; font: inherit; font-weight: 700; cursor: pointer; border-radius: 12px; padding: 13px 14px;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff; width: 100%; margin-top: 16px;
+  }
+  :root[data-theme="dark"] .btn { color: #16150f; }
+  .btn:active { transform: translateY(1px); }
+  .btn.ghost { background: var(--panel); color: var(--accent-ink); }
+  .btn[disabled] { opacity: .55; cursor: default; transform: none; }
+
+  .rowhead { display: flex; align-items: center; gap: 8px; margin: 22px 4px 9px; }
+  .rowhead h2 { margin: 0; flex: 1; }
+  .btn.mini { width: auto; margin: 0; padding: 8px 12px; font-size: 12.5px; border-radius: 10px; }
+
+  .ws { margin-bottom: 14px; }
+  .ws-name { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 13.5px; margin: 0 4px 7px; }
+  .ws-name .tab { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .ws-name .cur { font-size: 10.5px; font-weight: 700; color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 16%, transparent); padding: 2px 7px; border-radius: 999px; }
+
+  .pane { display: flex; align-items: center; gap: 11px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); margin-bottom: 7px; }
+  .pane.orderly { opacity: .62; }
+  .pdot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--idle); }
+  .pdot.working { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent); }
+  .pdot.just-finished { background: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 20%, transparent); }
+  .pdot.needs-input { background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 22%, transparent); }
+  .pmeta { flex: 1; min-width: 0; }
+  .plabel { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .psub { font-size: 11.5px; color: var(--ink-dim); display: flex; gap: 7px; margin-top: 2px; }
+  .tag { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); color: var(--ink-dim); }
+  .tag.cx { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); }
+  .tag.aide { color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .reboot { appearance: none; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); border-radius: 9px; padding: 7px 11px; flex: none; }
+  .reboot:active { transform: translateY(1px); }
+
+  .empty { color: var(--ink-dim); text-align: center; padding: 26px 10px; font-size: 13.5px; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%) translateY(20px);
+    background: var(--ink); color: var(--bg); padding: 11px 16px; border-radius: 12px; font-size: 13px; font-weight: 600;
+    max-width: 90vw; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s; z-index: 20;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.err { background: var(--red); color: #fff; }
+</style>
+</head>
+<body>
+<header>
+  <div class="hbar">
+    <div class="brand"><span class="dot">◐</span> cockpit</div>
+    <div class="spacer"></div>
+    <div id="status" class="status off"><span class="led"></span><span id="statusText">connecting…</span></div>
+    <button class="iconbtn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">◑</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <h2>New session</h2>
+  <div class="card">
+    <label class="f">Agent</label>
+    <div class="seg" id="agentSeg">
+      <button data-agent="claude" aria-pressed="true">claude</button>
+      <button data-agent="codex" aria-pressed="false">codex</button>
+      <button data-agent="shell" aria-pressed="false">shell</button>
+    </div>
+
+    <label class="f">Directory</label>
+    <select id="dirSel"></select>
+    <input type="text" id="dirCustom" placeholder="~/repos/…" style="display:none;margin-top:8px">
+
+    <label class="f">Workspace</label>
+    <select id="wsSel"></select>
+    <input type="text" id="wsCustom" placeholder="new workspace name" style="display:none;margin-top:8px">
+
+    <label class="f" id="nameLabel">Session name <span style="font-weight:400">— shown in the Claude app</span></label>
+    <input type="text" id="nameInput" placeholder="(defaults to the folder name)">
+
+    <button class="btn" id="launchBtn">Launch session</button>
+  </div>
+
+  <div class="rowhead">
+    <h2>Sessions</h2>
+    <button class="btn mini ghost" id="rebootIdleBtn">Reboot all idle</button>
+  </div>
+  <div id="sessions"><div class="empty">loading…</div></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  var $ = function (s) { return document.querySelector(s); };
+  var state = { data: null, agent: 'claude', dirOther: false, wsNew: false };
+
+  // ---- theme ----
+  $('#themeBtn').addEventListener('click', function () {
+    var cur = document.documentElement.getAttribute('data-theme');
+    var next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('cockpit-theme', next); } catch (e) {}
+  });
+
+  // ---- toast ----
+  var toastT;
+  function toast(msg, isErr) {
+    var el = $('#toast'); el.textContent = msg; el.className = 'show' + (isErr ? ' err' : '');
+    clearTimeout(toastT); toastT = setTimeout(function () { el.className = ''; }, isErr ? 4200 : 2800);
+  }
+
+  // ---- agent segmented ----
+  $('#agentSeg').addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    state.agent = b.dataset.agent;
+    [].forEach.call(this.children, function (c) { c.setAttribute('aria-pressed', c === b ? 'true' : 'false'); });
+    var isClaude = state.agent === 'claude';
+    $('#nameLabel').style.opacity = isClaude ? '1' : '.5';
+    $('#nameInput').disabled = !isClaude;
+  });
+
+  // ---- dir / ws selects toggle custom inputs ----
+  $('#dirSel').addEventListener('change', function () {
+    state.dirOther = this.value === '__other';
+    $('#dirCustom').style.display = state.dirOther ? 'block' : 'none';
+    if (state.dirOther) $('#dirCustom').focus();
+  });
+  $('#wsSel').addEventListener('change', function () {
+    state.wsNew = this.value === '__new';
+    $('#wsCustom').style.display = state.wsNew ? 'block' : 'none';
+    if (state.wsNew) $('#wsCustom').focus();
+  });
+
+  function fillSelects(data) {
+    // directory list is stable — fill once so we don't clobber a choice each poll
+    var dir = $('#dirSel');
+    if (!dir.dataset.filled) {
+      dir.innerHTML = '';
+      (data.recent_cwds || []).forEach(function (c) {
+        var o = document.createElement('option'); o.value = c; o.textContent = c.replace(/^\/home\/[^/]+/, '~'); dir.appendChild(o);
+      });
+      var oo = document.createElement('option'); oo.value = '__other'; oo.textContent = 'Other path…'; dir.appendChild(oo);
+      dir.dataset.filled = '1';
+    }
+
+    // workspace list refreshes live so pane counts + which one "current" resolves
+    // to stay accurate — but preserve the user's pick, skip while they're typing a
+    // new name (state.wsNew) or have the picker open (focused).
+    var ws = $('#wsSel');
+    if (state.wsNew || document.activeElement === ws) return;
+    var keep = ws.value;
+    var counts = {};
+    (data.panes || []).forEach(function (p) { counts[p.window] = (counts[p.window] || 0) + 1; });
+    var active = data.active || '';
+    var plural = function (n) { return n + ' pane' + (n === 1 ? '' : 's'); };
+    ws.innerHTML = '';
+    // "current" spells out what it resolves to right now (you may not be looking at cockpit)
+    var cur = document.createElement('option'); cur.value = '';
+    cur.textContent = active ? ('▸ current: ' + active + ' · ' + plural(counts[active] || 0)) : '(current workspace)';
+    ws.appendChild(cur);
+    var seen = {};
+    (data.workspaces || []).forEach(function (w) {
+      if (seen[w.name]) return; seen[w.name] = 1;
+      var o = document.createElement('option'); o.value = w.name;
+      o.textContent = w.name + ' · ' + plural(counts[w.name] || 0) + (w.active ? ' · current' : '');
+      ws.appendChild(o);
+    });
+    var nw = document.createElement('option'); nw.value = '__new'; nw.textContent = 'New workspace…'; ws.appendChild(nw);
+    ws.value = keep;                       // restore selection
+    if (ws.value !== keep) ws.value = '';  // vanished → fall back to current
+  }
+
+  // ---- render sessions ----
+  var order = { 'needs-input': 0, 'just-finished': 1, working: 2, idle: 3 };
+  function render(data) {
+    var st = $('#status');
+    if (data.running) { st.className = 'status on'; $('#statusText').textContent = (data.panes.length) + ' panes · ' + data.workspaces.length + ' workspaces'; }
+    else { st.className = 'status off'; $('#statusText').textContent = 'grid offline'; }
+
+    var host = $('#sessions');
+    if (!data.running) { host.innerHTML = '<div class="empty">cockpit isn\'t running on the box.</div>'; return; }
+
+    // group panes by workspace, ordering workspaces active-first then as listed
+    var byWin = {};
+    data.panes.forEach(function (p) { (byWin[p.window] = byWin[p.window] || []).push(p); });
+    var wsList = data.workspaces.slice().sort(function (a, b) { return (b.active ? 1 : 0) - (a.active ? 1 : 0); });
+
+    var html = '';
+    wsList.forEach(function (w) {
+      var panes = (byWin[w.name] || []).slice().sort(function (a, b) {
+        return (order[a.state] == null ? 4 : order[a.state]) - (order[b.state] == null ? 4 : order[b.state]);
+      });
+      if (!panes.length) return;
+      html += '<div class="ws"><div class="ws-name"><span class="tab">' + esc(w.name) + '</span>' + (w.active ? '<span class="cur">viewing</span>' : '') + '</div>';
+      panes.forEach(function (p) { html += paneRow(p); });
+      html += '</div>';
+    });
+    host.innerHTML = html || '<div class="empty">no panes yet.</div>';
+
+    [].forEach.call(host.querySelectorAll('.reboot'), function (b) {
+      b.addEventListener('click', function () { rebootOne(b.dataset.sid, b.dataset.label); });
+    });
+  }
+
+  function paneRow(p) {
+    var isOrderly = !!p.orderly, isClaude = p.agent === 'claude';
+    var canReboot = isClaude && !isOrderly && p.session_id && (p.state === 'idle' || p.state === 'just-finished');
+    var badge = p.badge || p.state || '…';
+    var tag = isOrderly ? '<span class="tag aide">' + esc(p.orderly) + '</span>' : (p.agent === 'codex' ? '<span class="tag cx">codex</span>' : '');
+    var label = p.label || (p.session_id ? p.session_id.slice(0, 8) : '(new)');
+    return '<div class="pane' + (isOrderly ? ' orderly' : '') + '">' +
+      '<span class="pdot ' + esc(p.state || '') + '"></span>' +
+      '<div class="pmeta"><div class="plabel">' + esc(label) + '</div>' +
+      '<div class="psub">' + tag + '<span>' + esc(badge) + '</span></div></div>' +
+      (canReboot ? '<button class="reboot" data-sid="' + esc(p.session_id) + '" data-label="' + esc(label) + '">reboot</button>' : '') +
+      '</div>';
+  }
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  // ---- api ----
+  function getState(cb) {
+    fetch('/api/state', { cache: 'no-store' }).then(function (r) { return r.json(); })
+      .then(function (d) { state.data = d; fillSelects(d); render(d); if (cb) cb(d); })
+      .catch(function () { $('#status').className = 'status off'; $('#statusText').textContent = 'unreachable'; });
+  }
+
+  $('#launchBtn').addEventListener('click', function () {
+    var dir = state.dirOther ? $('#dirCustom').value.trim() : $('#dirSel').value;
+    if (!dir || dir === '__other') return toast('pick a directory', true);
+    var ws = state.wsNew ? $('#wsCustom').value.trim() : $('#wsSel').value;
+    var name = $('#nameInput').value.trim();
+    var btn = this; btn.disabled = true; btn.textContent = 'Launching…';
+    fetch('/api/new', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: dir, workspace: ws, name: name, agent: state.agent }) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok || res.j.error) return toast(res.j.error || 'launch failed', true);
+        var where = res.j.workspace && res.j.workspace !== '(current)' ? (' in ' + res.j.workspace) : '';
+        toast('Launched “' + (res.j.name || 'session') + '”' + where + ' — open the Claude app to steer it');
+        $('#nameInput').value = '';
+        getState();
+      })
+      .catch(function () { toast('network error', true); })
+      .finally(function () { btn.disabled = false; btn.textContent = 'Launch session'; });
+  });
+
+  function rebootOne(sid, label) {
+    if (!confirm('Reboot “' + (label || sid) + '” with remote control?\nIts conversation reloads from disk — nothing is lost.')) return;
+    doReboot({ target: sid }, 'Rebooted — reconnecting to the app');
+  }
+  $('#rebootIdleBtn').addEventListener('click', function () {
+    if (!confirm('Reboot every idle session with remote control?\nBusy sessions are left alone; no history is lost.')) return;
+    doReboot({ all: 'idle' }, 'Rebooting idle sessions');
+  });
+  function doReboot(body, okMsg) {
+    fetch('/api/reboot', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (j.error) return toast(j.error, true); toast(okMsg); setTimeout(getState, 700); })
+      .catch(function () { toast('network error', true); });
+  }
+
+  // ---- boot + poll ----
+  getState();
+  setInterval(getState, 4000);
+})();
+</script>
+</body>
+</html>

@@ -35,6 +35,9 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX="tmux -L cockpit"
+# aide-de-camp: ensure the orderlies workspace exists in the grid (idempotent; backgrounded so it never
+# delays attach; bails cleanly if cockpit isn't up). Additive — no existing path changes.
+ensure_orderlies() { [[ -x "$HOME/tools/orderlies/orderlies-up" ]] && ( "$HOME/tools/orderlies/orderlies-up" >/dev/null 2>&1 & ) || true; }
 N=5; MODE=build; AUTO=0; REBUILD=0; SANTA=0; RESTORE=0; FRESH=0
 while [[ $# -gt 0 ]]; do case "$1" in
   --list|-l) MODE=list;; --attach|-a) MODE=attach;; --kill) MODE=kill;;
@@ -81,6 +84,7 @@ if $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
     exec $TMUX attach -t "$COCKPIT_SESSION"
   fi
   echo "cockpit already running — attaching. ( --rebuild to re-pick · --santa to browse · --kill to tear down )" >&2
+  ensure_orderlies
   exec $TMUX attach -t "$COCKPIT_SESSION"
 fi
 
@@ -196,7 +200,7 @@ apply_chrome() {
 stamp_pane() {  # pane-id  session-id  cwd  label  [agent]
   $TMUX set -p -t "$1" @session_id "$2"
   $TMUX set -p -t "$1" @cwd "$3"
-  $TMUX set -p -t "$1" @label "$4"            # full title; border format truncates to width
+  $TMUX set -p -t "$1" @label "$(ck_clean_label "$4")"   # full title (one line); border truncates to width
   $TMUX set -p -t "$1" @agent "${5:-claude}"
   $TMUX set -p -t "$1" @badge "starting"
 }
@@ -205,6 +209,7 @@ stamp_pane() {  # pane-id  session-id  cwd  label  [agent]
 launch_and_attach() {
   pkill -f "$HERE/cockpit-poller" 2>/dev/null || true
   COCKPIT_TMUX="$TMUX" setsid nohup "$HERE/cockpit-poller" >/tmp/cockpit-poller.log 2>&1 &
+  ensure_orderlies
   exec $TMUX attach -t "$COCKPIT_SESSION"
 }
 
@@ -214,7 +219,7 @@ build_from_cand() {
   local first=1 row id cwd title agent cmd pane
   for row in "${CAND[@]}"; do
     IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
-    cmd=$(agent_resume_inner "$agent" "$id" "$cwd")
+    cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
     if (( first )); then
       pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
       apply_chrome; first=0
@@ -232,10 +237,15 @@ build_from_cand() {
 # nothing resumable (caller then falls back to a fresh pick).
 restore_grid() {
   [[ -s "$STATE_FILE" ]] || return 1
-  local active="" first=1 curw=$'\001' curwin="" awin="" i n resumable=0
+  local active="" first=1 curwin="" awin="" i n resumable=0
   declare -a W S C L A; local f1 f2 f3 f4 f5 f6
   while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
+    # Guard against a malformed layout file: a pane row's f1 is a window index
+    # and f2 a workspace name. Skip anything else (blank lines, or continuation
+    # fragments from a label that pre-fix corruption split across rows) so a bad
+    # file degrades to fewer panes instead of `NAMEWIN[""]` "bad array subscript".
+    [[ "$f1" =~ ^[0-9]+$ && -n "$f2" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""; [[ "$f5" == "$NIL" ]] && f5=""
     [[ -z "$f6" || "$f6" == "$NIL" ]] && f6=claude
     W+=("$f2"); S+=("$f3"); C+=("$f4"); L+=("$f5"); A+=("$f6")
@@ -246,25 +256,31 @@ restore_grid() {
   done
   (( resumable > 0 )) || return 1
   echo "cockpit: restoring $resumable session(s) from saved layout…" >&2
-  declare -A SEENW
+  # Group rows into windows by workspace NAME (NAMEWIN: name → window_id), NOT by
+  # adjacency. The saved rows are in window-index order, so two windows that share a
+  # name but are separated by a differently-named window (e.g. banktech … codex …
+  # banktech) used to rebuild as TWO "banktech" tabs. Keying on the name collapses
+  # them into one; recording each name's FIRST appearance preserves the tab ORDER the
+  # user is used to (sorting the rows instead would alphabetise the whole grid).
+  declare -A SEENW NAMEWIN
   for ((i=0;i<n;i++)); do
     local wname="${W[$i]}" sid="${S[$i]}" cwd="${C[$i]}" label="${L[$i]}" agent="${A[$i]}" issess=0 cmd pane
     [[ -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
-    if [[ "$wname" != "$curw" ]]; then           # new workspace window
-      curw="$wname"
-      if (( issess )); then cmd=$(agent_resume_inner "$agent" "$sid" "$cwd"); else cmd="bash -l"; fi
+    if [[ -z "${NAMEWIN[$wname]:-}" ]]; then      # first sighting of this workspace → open its window
+      if (( issess )); then cmd=$(agent_resume_inner "$agent" "$sid" "$cwd" "$label"); else cmd="bash -l"; fi
       if (( first )); then
         pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
         apply_chrome; first=0
       else
         pane=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{pane_id}' -n "$wname" "bash -lc $(printf %q "$cmd")")
       fi
-      curwin=$($TMUX display -p -t "$pane" '#{window_id}'); SEENW[$curwin]=1
+      curwin=$($TMUX display -p -t "$pane" '#{window_id}'); SEENW[$curwin]=1; NAMEWIN[$wname]="$curwin"
       [[ "$wname" == "$active" ]] && awin="$curwin"
       (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
-    else                                          # extra pane in the current window
+    else                                          # workspace already open → add this pane to its window
+      curwin="${NAMEWIN[$wname]}"
       (( issess )) || continue                    # don't recreate stray bare shells
-      cmd=$(agent_resume_inner "$agent" "$sid" "$cwd")
+      cmd=$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")
       pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
       stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
     fi

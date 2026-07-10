@@ -1,0 +1,20 @@
+# Dedicated cloudflared tunnel for your cockpit hostname — systemd USER service.
+# Runs alongside (does NOT touch) the existing system cloudflared.service.
+#   install:  cp web/cloudflared-cockpit.service ~/.config/systemd/user/
+#             systemctl --user daemon-reload
+#             systemctl --user enable --now cloudflared-cockpit
+#   needs:    ~/.cloudflared/config.yml (from cloudflared-config.yml.example)
+#             and the tunnel credentials json (from `cloudflared tunnel create cockpit`)
+[Unit]
+Description=cloudflared tunnel for cockpit web surface
+After=network-online.target cockpit-webd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --config %h/.cloudflared/config.yml run cockpit
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

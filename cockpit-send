@@ -63,7 +63,7 @@ if session_is_running_agent "$agent" "$id"; then
   exit 0
 fi
 
-cmd=$(agent_resume_inner "$agent" "$id" "$cwd")
+cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
 W=$(cockpit_cur_window)   # land in the workspace you're viewing
 # reuse a bare untracked shell (e.g. a freshly-created workspace) if it's active
 act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
@@ -76,7 +76,7 @@ else
 fi
 $TMUX set -p -t "$pane" @session_id "$id"
 $TMUX set -p -t "$pane" @cwd "$cwd"
-$TMUX set -p -t "$pane" @label "$title"      # full; border truncates to width
+$TMUX set -p -t "$pane" @label "$(ck_clean_label "$title")"   # one line; border truncates to width
 $TMUX set -p -t "$pane" @agent "$agent"
 $TMUX set -p -t "$pane" @badge "starting"
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null

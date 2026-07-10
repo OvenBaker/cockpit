@@ -1,0 +1,134 @@
+#!/usr/bin/env node
+// cockpit-webd — a tiny control surface for cockpit, reachable from your phone.
+//
+// Binds 127.0.0.1 only: it is meant to sit behind a Cloudflare Tunnel + Access
+// (or Tailscale), never exposed directly. Everything it does is shell out to the
+// existing cockpit CLIs (cockpit-state / cockpit-spawn / cockpit-reboot) via
+// execFile with argv arrays — no shell, so user input can't be injected.
+//
+//   env:
+//     COCKPIT_WEB_PORT        listen port (default 8838)
+//     COCKPIT_WEB_HOST        listen host (default 127.0.0.1)
+//     COCKPIT_WEB_ALLOW_EMAIL if set, require CF Access to assert this email
+//                             (header Cf-Access-Authenticated-User-Email) — a
+//                             second gate on top of the tunnel.
+'use strict';
+const http = require('http');
+const { execFile } = require('child_process');
+const { readFile } = require('fs');
+const path = require('path');
+
+const HERE = __dirname;
+const PORT = parseInt(process.env.COCKPIT_WEB_PORT || '8838', 10);
+const HOST = process.env.COCKPIT_WEB_HOST || '127.0.0.1';
+// One or more allowed identities (comma/space separated) — the app re-checks the
+// email Access asserts. Must include EVERY identity you might log in as, or Access
+// lets you in and the app then 403s you.
+const ALLOW_EMAILS = (process.env.COCKPIT_WEB_ALLOW_EMAIL || '')
+  .split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+const INDEX = path.join(HERE, 'web', 'index.html');
+
+// Run a cockpit CLI with an argv array. Never uses a shell. 15s cap.
+function run(cmd, args, cb) {
+  execFile(path.join(HERE, cmd), args, { timeout: 15000, maxBuffer: 4 << 20, cwd: HERE },
+    (err, stdout, stderr) => cb(err, stdout || '', stderr || ''));
+}
+
+function sendJSON(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(body);
+}
+
+function readBody(req, cb) {
+  let data = ''; let tooBig = false;
+  req.on('data', (c) => { data += c; if (data.length > 1 << 20) { tooBig = true; req.destroy(); } });
+  req.on('end', () => {
+    if (tooBig) return cb(new Error('body too large'));
+    if (!data) return cb(null, {});
+    try { cb(null, JSON.parse(data)); } catch (e) { cb(e); }
+  });
+}
+
+// A field is a plain, single-line string with no control chars. Paths/names/ids
+// go straight to execFile as argv, so this is belt-and-braces, not the only gate.
+function clean(v, max = 512) {
+  if (typeof v !== 'string') return '';
+  const s = v.trim();
+  if (!s || s.length > max || /[\x00-\x1f]/.test(s)) return '';
+  return s;
+}
+
+const server = http.createServer((req, res) => {
+  // Optional Access identity check (defence in depth behind the tunnel).
+  if (ALLOW_EMAILS.length) {
+    const who = (req.headers['cf-access-authenticated-user-email'] || '').toLowerCase();
+    if (!ALLOW_EMAILS.includes(who)) return sendJSON(res, 403, { error: 'forbidden' });
+  }
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const p = url.pathname;
+
+  if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
+    return readFile(INDEX, (e, buf) => {
+      if (e) { res.writeHead(500); return res.end('index.html missing'); }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(buf);
+    });
+  }
+
+  if (req.method === 'GET' && p === '/api/state') {
+    return run('cockpit-state', [], (err, out) => {
+      if (err && !out) return sendJSON(res, 500, { error: 'cockpit-state failed', detail: String(err) });
+      try { return sendJSON(res, 200, JSON.parse(out)); }
+      catch (e) { return sendJSON(res, 500, { error: 'bad state json', detail: out.slice(0, 200) }); }
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/new') {
+    return readBody(req, (e, body) => {
+      if (e) return sendJSON(res, 400, { error: 'bad body' });
+      const cwd = clean(body.cwd, 4096);
+      const ws = clean(body.workspace, 64);
+      const name = clean(body.name, 80);
+      const agent = clean(body.agent, 8) || 'claude';
+      if (!cwd) return sendJSON(res, 400, { error: 'cwd required' });
+      if (!['claude', 'codex', 'shell'].includes(agent)) return sendJSON(res, 400, { error: 'bad agent' });
+      const args = ['--cwd', cwd, '--agent', agent];
+      if (ws) args.push('--workspace', ws);
+      if (name) args.push('--name', name);
+      run('cockpit-spawn', args, (err, out, se) => {
+        if (err) return sendJSON(res, 500, { error: 'spawn failed', detail: (se || String(err)).trim() });
+        sendJSON(res, 200, { ok: true, pane: out.trim(), workspace: ws || '(current)', name: name || cwd.split('/').pop() });
+      });
+    });
+  }
+
+  if (req.method === 'POST' && p === '/api/reboot') {
+    return readBody(req, (e, body) => {
+      if (e) return sendJSON(res, 400, { error: 'bad body' });
+      const args = [];
+      if (body.all === 'idle') args.push('--idle-all');
+      else {
+        const t = clean(body.target, 64);
+        if (!t) return sendJSON(res, 400, { error: 'target or all:"idle" required' });
+        args.push(t);
+      }
+      if (body.force) args.push('--force');
+      if (body.dryRun) args.push('--dry-run');
+      run('cockpit-reboot', args, (err, out, se) => {
+        // Non-zero exit means a single target matched nothing (or the grid is
+        // gone) — surface it as an error so the UI toasts it. --idle-all/--all
+        // exit 0 even when they reboot nothing, which is not an error.
+        const text = (out + se).trim();
+        if (err) return sendJSON(res, 200, { ok: false, error: text || 'reboot failed' });
+        sendJSON(res, 200, { ok: true, output: text });
+      });
+    });
+  }
+
+  sendJSON(res, 404, { error: 'not found' });
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`cockpit-webd on http://${HOST}:${PORT}  (allow-emails: ${ALLOW_EMAILS.join(',') || 'off'})`);
+});

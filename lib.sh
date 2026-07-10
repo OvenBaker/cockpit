@@ -10,14 +10,56 @@ COCKPIT_SESSION="${COCKPIT_SESSION:-cockpit}"
 # monitors); tiled = grid; even-vertical = stacked rows. Override via env.
 COCKPIT_LAYOUT="${COCKPIT_LAYOUT:-even-horizontal}"
 
+# Remote Control: launch claude panes with `--remote-control` so they can be
+# driven from the Claude app (claude.ai / mobile) — the whole point of steering
+# cockpit away from the desk. On by default; set COCKPIT_REMOTE_CONTROL=0 for
+# plain interactive panes. Codex has no remote-control equivalent, so this only
+# affects claude launches.
+COCKPIT_REMOTE_CONTROL="${COCKPIT_REMOTE_CONTROL:-1}"
+
+# Emit the ` --remote-control <name>` fragment for a claude launch — leading
+# space, empty string when RC is off. <name> is what the Claude app shows in its
+# session list; defaults to the cwd basename (trimmed) when a caller has no nicer
+# label. %q-quoted so it survives intact through the `bash -lc "$(printf %q …)"`
+# wrapper every launcher builds around the resume/spawn command (one unquote by
+# that inner bash restores the literal name — same proven path as `cd %q`).
+cockpit_rc_args() {
+  [[ "${COCKPIT_REMOTE_CONTROL:-1}" == 1 ]] || return 0
+  local name="${1:-}" cwd="${2:-}"
+  [[ -n "$name" ]] || name=$(basename "${cwd:-$HOME}")
+  printf ' --remote-control %q' "${name:0:48}"
+}
+
+# Labels come from arbitrary user text (santa's first_user_text = a session's
+# first prompt), which routinely contains newlines and tabs. Stored raw in
+# @label those break two things: the single-line pane border, and — worse — the
+# TAB-separated layout snapshot, where one embedded newline splits a pane across
+# several physical rows. On restore that yields a row with an empty workspace
+# name, and `NAMEWIN[""]` is a "bad array subscript" crash. Collapse every
+# whitespace run to one space and trim, so a stored @label is always one clean
+# line. Call this at EVERY @label setter.
+ck_clean_label() {
+  local s="$1"
+  s="${s//$'\t'/ }"; s="${s//$'\r'/ }"; s="${s//$'\n'/ }"
+  while [[ "$s" == *"  "* ]]; do s="${s//  / }"; done   # squeeze (≤80 chars, cheap)
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"   # trim ends
+  printf '%s' "$s"
+}
+
 # Print a layout snapshot to stdout: an @active line naming the current
 # workspace, then one window-grouped record per pane. <nil> placeholders keep
 # empty fields from collapsing on read. Shared by the poller (autosave) and
 # `cockpit --save`. Requires a running session.
+#
+# The `-f` filter EXCLUDES orderly panes (@orderly set: brief/alpha/bravo). Those
+# belong to orderlies-up, which owns the "aide" workspace's lifecycle and recreates
+# it on cockpit attach. If we saved them, restore would rebuild a bare "aide" window
+# (orderly panes carry no @session_id, so they resume as a plain shell), and then
+# orderlies-up would open a SECOND "aide" — splitting the fleet across two tabs.
 cockpit_snapshot() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
   printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
-  $tmux list-panes -s -t "$COCKPIT_SESSION" \
+  $tmux list-panes -s -t "$COCKPIT_SESSION" -f '#{==:#{@orderly},}' \
     -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},claude}" 2>/dev/null
 }
 
@@ -249,11 +291,15 @@ classify_codex() {
 
 agent_classify() { case "$1" in codex) classify_codex "$2";; *) classify_state "$2";; esac; }
 
-# Inner shell command to (re)launch a pane for (agent, id, cwd).
+# Inner shell command to (re)launch a pane for (agent, id, cwd[, rc-name]).
+# claude panes come up with `--remote-control` (see cockpit_rc_args); the optional
+# 4th arg is the name shown in the Claude app — pass the session's title where you
+# have it, else it falls back to the cwd basename. Codex is unaffected.
 agent_resume_inner() {
-  case "$1" in
-    codex) printf 'cd %q && exec codex resume %s' "$3" "$2";;
-    *)     printf 'cd %q && exec claude --resume %s' "$3" "$2";;
+  local agent="$1" id="$2" cwd="$3" name="${4:-}"
+  case "$agent" in
+    codex) printf 'cd %q && exec codex resume %s' "$cwd" "$id";;
+    *)     printf 'cd %q && exec claude --resume %s%s' "$cwd" "$id" "$(cockpit_rc_args "$name" "$cwd")";;
   esac
 }
 

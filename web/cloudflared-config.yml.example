@@ -1,0 +1,9 @@
+# ~/.cloudflared/config.yml  — route the cockpit hostname to the local webd.
+# Replace <TUNNEL_UUID> (from `cloudflared tunnel create cockpit`) and <DOMAIN>.
+tunnel: <TUNNEL_UUID>
+credentials-file: /home/YOU/.cloudflared/<TUNNEL_UUID>.json   # absolute path; ~ is not expanded
+
+ingress:
+  - hostname: cockpit.<DOMAIN>
+    service: http://127.0.0.1:8838
+  - service: http_status:404
