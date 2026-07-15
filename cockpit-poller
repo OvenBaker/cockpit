@@ -56,9 +56,12 @@ PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}$
 # every event, so this only bounds how long a stale state lingers after a missed
 # edge / crash. Generous enough not to second-guess a quietly-idle session.
 HOOK_TTL="${COCKPIT_HOOK_TTL:-900}"
+# How long a lean-runner gate badge is trusted (guards against a crashed runner
+# leaving a stale waiting-gate badge). Generous — a review can take minutes.
+BADGE_TTL="${COCKPIT_BADGE_TTL:-3600}"
 # Persistent layout snapshot so a closed/crashed cockpit can be restored. MUST
 # be outside /tmp to survive a reboot. Written throttled + only-on-change.
-STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/layout.${COCKPIT_SESSION}.tsv"
+STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/layout.${COCKPIT_SESSION}.json"
 SAVE_EVERY="${COCKPIT_SAVE_SECS:-5}"; next_save=0; last_snap=""
 mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
 
@@ -71,6 +74,7 @@ color() { case "$1" in
   working)      echo '#[fg=colour41]';;      # green
   just-finished)echo '#[fg=colour39,bold]';; # blue
   needs-input)  echo '#[fg=colour196,bold]';;# red
+  waiting-gate) echo '#[fg=colour214,bold]';;# amber — a lean-runner run is at a gate
   idle)         echo '#[fg=colour245]';;     # dim
   *)            echo '#[fg=colour245]';; esac; }
 
@@ -86,18 +90,35 @@ badge() { local s="$1" t; t=$(dur "$2")
     working)      echo "⠿ working";;
     just-finished)echo "✓ done $t";;
     needs-input)  echo "◉ NEEDS INPUT";;
+    waiting-gate) echo "⏸ gate";;
     idle)         echo "○ idle $t";;
     *)            echo "…";; esac; }
 
 # attention priority for a workspace tab: needs-input > just-finished > working > idle
-rank() { case "$1" in needs-input) echo 3;; just-finished) echo 2;; working) echo 1;; *) echo 0;; esac; }
+rank() { case "$1" in needs-input) echo 3;; just-finished) echo 2;; waiting-gate) echo 2;; working) echo 1;; *) echo 0;; esac; }
 worst() { (( $(rank "$1") >= $(rank "$2") )) && echo "$1" || echo "$2"; }
 # colour the workspace NAME by its worst pane state (a #[fg=…] directive)
 ws_color() { case "$1" in
   needs-input)  echo '#[fg=colour196,bold]';;
   just-finished)echo '#[fg=colour39,bold]';;
+  waiting-gate) echo '#[fg=colour214,bold]';;
   working)      echo '#[fg=colour41]';;
   *)            echo '#[fg=colour245]';; esac; }
+
+# U7 (lean-runner integration): if a lean-runner run is parked at a gate for this
+# cwd, return "waiting-gate" so the poller badges the pane for the review window.
+# The badge is a cwd-keyed JSON projection the runner writes atomically to
+# $XDG_STATE/lean-runner/badges/<cwd with [/.]→->.json (the encode_project_dir
+# scheme both sides share). A pane with no badge is untouched — this override is
+# purely additive; a stale badge (crashed runner) is ignored after BADGE_TTL.
+gate_badge_state() {
+  local cwd="$1" bfile
+  [[ -n "$cwd" ]] || return 0
+  bfile="${LEAN_BADGE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/lean-runner/badges}/$(printf '%s' "$cwd" | sed 's#[/.]#-#g').json"
+  [[ -f "$bfile" ]] || return 0
+  (( $(date +%s) - $(stat -c %Y "$bfile" 2>/dev/null || echo 0) <= BADGE_TTL )) || return 0
+  [[ "$(jq -r '.status // empty' "$bfile" 2>/dev/null)" == "waiting-gate" ]] && echo waiting-gate
+}
 
 while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
   # the pane/window the user is actually looking at
@@ -146,6 +167,10 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     [[ "$pid" == "$active_pane" ]] && FIN[$pid]=""                          # acknowledged by visiting
     [[ "${FIN[$pid]:-}" == "1" ]] && state=just-finished
     PREV[$pid]="$raw"
+    # U7: a lean-runner run parked at a gate overrides the derived state so the
+    # poller badges the pane (purely additive — no badge for this cwd ⇒ no change).
+    gbs=$(gate_badge_state "$cwd")
+    [[ -n "$gbs" ]] && { state=waiting-gate; FIN[$pid]=""; }
 
     # Only write when the value actually changes (re-setting still forces a
     # redraw). @sc tints this pane's top line; box borders are left uniform.
@@ -206,9 +231,11 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
   if (( now >= next_save )); then
     next_save=$((now + SAVE_EVERY))
     snap=$(cockpit_snapshot)
-    if [[ -n "$snap" && "$snap" != "$last_snap" ]]; then
-      printf '%s\n' "$snap" > "$STATE_FILE.tmp" 2>/dev/null && mv "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
-      last_snap="$snap"
+    # Persist only a changed, pane-ful snapshot: never clobber a good layout with an
+    # empty grid (teardown/rebuild / all real panes closed), and don't churn on no-op
+    # saves. cockpit_persist_layout writes atomically + rotates a spaced restore point.
+    if [[ "$snap" != "$last_snap" ]] && jq -e '.panes|length>0' <<<"$snap" >/dev/null 2>&1; then
+      cockpit_persist_layout "$STATE_FILE" "$snap" && last_snap="$snap"
     fi
   fi
   sleep "$INTERVAL"
