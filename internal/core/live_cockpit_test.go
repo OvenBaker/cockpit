@@ -113,6 +113,25 @@ func TestLiveCockpitAdmissionParityOnEquivalentSocket(t *testing.T) {
 		t.Fatalf("wait parity lost stable pane result: %#v", wait)
 	}
 
+	// A resident controller must inventory panes created after startup without
+	// a restart. This is the same live-mode discovery path, on a random socket.
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-window", "-d", "-t", "live-equivalent", "-n", "later", "sleep 600")
+	list = call("state.snapshot", map[string]any{}).(map[string]any)
+	panes = list["panes"].([]any)
+	if len(panes) != 2 {
+		t.Fatalf("dynamic list parity expected two stamped panes: %#v", list)
+	}
+	seenLater := false
+	for _, raw := range panes {
+		candidate := raw.(map[string]any)
+		if candidate["locator"].(map[string]any)["windowId"] != p.WindowID && candidate["paneRef"] != "" && candidate["generation"].(int64) >= 1 && candidate["resourceVersion"].(int64) >= 1 {
+			seenLater = true
+		}
+	}
+	if !seenLater {
+		t.Fatalf("dynamic pane did not receive a stable identity: %#v", list)
+	}
+
 	interact := func(action, state, text string, n int) {
 		t.Helper()
 		p, err = d.st.pane(p.Ref)

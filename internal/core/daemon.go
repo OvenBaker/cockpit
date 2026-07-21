@@ -33,6 +33,7 @@ type daemon struct {
 	lifeMu               sync.Mutex
 	closeMu              sync.Mutex
 	closed               bool
+	reconcileMu          sync.Mutex
 	mu                   sync.Mutex
 	paneLocks            map[string]*sync.Mutex
 	watchers             map[string]*watcher
@@ -278,6 +279,8 @@ func (d *daemon) Serve() error {
 	}
 }
 func (d *daemon) reconcile() error {
+	d.reconcileMu.Lock()
+	defer d.reconcileMu.Unlock()
 	fp, e := d.st.meta("fingerprint")
 	if e == sql.ErrNoRows {
 		if existing, ge := d.tm.globalOption("@cockpit_server_fingerprint"); ge != nil || existing != "" {
@@ -757,6 +760,13 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, capabilit
 		var p struct{}
 		if e := strict(r.Params, &p); e != nil {
 			return nil, rpcStandard(-32602, "invalid params")
+		}
+		// Pane identity is controller-owned but Cockpit topology can change
+		// after the resident daemon starts. Refresh here so list_panes is a
+		// live inventory rather than a startup snapshot. reconcile serializes
+		// the controlled stamp writes across concurrent clients.
+		if e := d.reconcile(); e != nil {
+			return nil, e
 		}
 		ps, e := d.st.panes()
 		if e != nil {
