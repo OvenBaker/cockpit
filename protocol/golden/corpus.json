@@ -1,0 +1,21 @@
+[
+  {"name":"session.open","valid":true,"request":{"jsonrpc":"2.0","id":"open","method":"session.open","params":{"protocol":"1.0","clientId":"it","claimedProfile":"local-operator","credential":"test-local"}}},
+  {"name":"controller.health","valid":true,"request":{"jsonrpc":"2.0","id":1,"method":"controller.health","params":{}}},
+  {"name":"state.snapshot","valid":true,"request":{"jsonrpc":"2.0","id":2,"method":"state.snapshot","params":{}}},
+  {"name":"capabilities.get","valid":true,"request":{"jsonrpc":"2.0","id":3,"method":"capabilities.get","params":{}}},
+  {"name":"pane.inspect","valid":true,"request":{"jsonrpc":"2.0","id":4,"method":"pane.inspect","params":{"paneRef":"cpp_0123456789abcdef0123456789abcdef"}}},
+  {"name":"operation.get","valid":true,"request":{"jsonrpc":"2.0","id":5,"method":"operation.get","params":{"operationRef":"cpo_0123456789abcdef0123456789abcdef"}}},
+  {"name":"metadata.set_display","valid":true,"request":{"jsonrpc":"2.0","id":6,"method":"metadata.set_display","params":{"protocol":"1.0","deadline":"2099-01-01T00:00:00Z","idempotencyKey":"ik_2000000000_0123456789abcdef0123456789abcdef","paneRef":"cpp_0123456789abcdef0123456789abcdef","badge":"ready","expectations":[{"kind":"pane","paneRef":"cpp_0123456789abcdef0123456789abcdef","generation":1,"resourceVersion":1,"material":{"lifecycle":"active"}}]}}},
+  {"name":"events.subscribe","valid":true,"request":{"jsonrpc":"2.0","id":7,"method":"events.subscribe","params":{"controllerEpoch":"cpe_0123456789abcdef0123456789abcdef","afterEventSeq":0,"paneRef":"cpp_0123456789abcdef0123456789abcdef"}}},
+  {"name":"events.unsubscribe","valid":true,"request":{"jsonrpc":"2.0","id":8,"method":"events.unsubscribe","params":{"subscriptionRef":"cps_0123456789abcdef0123456789abcdef"}}},
+  {"name":"wait.for_change","valid":true,"request":{"jsonrpc":"2.0","id":9,"method":"wait.for_change","params":{"paneRef":"cpp_0123456789abcdef0123456789abcdef","afterVersion":0,"deadline":"2099-01-01T00:00:00Z"}}},
+  {"name":"wait.operation_terminal","valid":true,"request":{"jsonrpc":"2.0","id":91,"method":"wait.for_change","params":{"operationRef":"cpo_0123456789abcdef0123456789abcdef","afterVersion":0,"deadline":"2099-01-01T00:00:00Z"}}},
+  {"name":"rpc.cancel","valid":true,"request":{"jsonrpc":"2.0","id":10,"method":"rpc.cancel","params":{"requestId":"wait-1"}}},
+  {"name":"unknown envelope field","valid":false,"request":{"jsonrpc":"2.0","id":11,"method":"controller.health","params":{},"forbidden":true},"error":"INVALID_REQUEST"},
+  {"name":"unknown query field","valid":false,"request":{"jsonrpc":"2.0","id":12,"method":"pane.inspect","params":{"paneRef":"cpp_0123456789abcdef0123456789abcdef","forbidden":true}},"error":"INVALID_REQUEST"},
+  {"name":"unknown mutation field","valid":false,"request":{"jsonrpc":"2.0","id":13,"method":"metadata.set_display","params":{"protocol":"1.0","deadline":"2099-01-01T00:00:00Z","idempotencyKey":"ik_2000000000_0123456789abcdef0123456789abcdef","paneRef":"cpp_0123456789abcdef0123456789abcdef","badge":"ready","expectations":[{"kind":"pane","paneRef":"cpp_0123456789abcdef0123456789abcdef","generation":1,"resourceVersion":1,"material":{"lifecycle":"active"}}],"forbidden":true}},"error":"INVALID_REQUEST"},
+  {"name":"bad expectation","valid":false,"request":{"jsonrpc":"2.0","id":14,"method":"metadata.set_display","params":{"protocol":"1.0","deadline":"2099-01-01T00:00:00Z","idempotencyKey":"ik_2000000000_0123456789abcdef0123456789abcdef","paneRef":"cpp_0123456789abcdef0123456789abcdef","badge":"ready","expectations":[]}},"error":"INVALID_REQUEST"},
+  {"name":"wrong protocol","valid":false,"request":{"jsonrpc":"2.0","id":15,"method":"session.open","params":{"protocol":"9.0","clientId":"it","claimedProfile":"local-operator","credential":"test-local"}},"error":"UNSUPPORTED_PROTOCOL"},
+  {"name":"wait missing predicate","valid":false,"request":{"jsonrpc":"2.0","id":16,"method":"wait.for_change","params":{"afterVersion":0,"deadline":"2099-01-01T00:00:00Z"}},"error":"INVALID_REQUEST"},
+  {"name":"subscription unknown filter","valid":false,"request":{"jsonrpc":"2.0","id":17,"method":"events.subscribe","params":{"afterEventSeq":0,"forbidden":true}},"error":"INVALID_REQUEST"}
+]

@@ -35,9 +35,9 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX="tmux -L cockpit"
-# aide-de-camp: ensure the orderlies workspace exists in the grid (idempotent; backgrounded so it never
-# delays attach; bails cleanly if cockpit isn't up). Additive — no existing path changes.
-ensure_orderlies() { [[ -x "$HOME/tools/orderlies/orderlies-up" ]] && ( "$HOME/tools/orderlies/orderlies-up" >/dev/null 2>&1 & ) || true; }
+# Orderlies are a separate controller domain.  They must never join or mutate
+# Cockpit's dedicated server: pass only validated controller-domain scalars.
+ensure_orderlies() { [[ -x "$HOME/tools/orderlies/orderlies-up" ]] && ( ORDERLIES_TMUX_SOCKET=orderlies ORDERLIES_SESSION=orderlies "$HOME/tools/orderlies/orderlies-up" >/dev/null 2>&1 & ) || true; }
 N=5; MODE=build; AUTO=0; REBUILD=0; SANTA=0; RESTORE=0; FRESH=0
 while [[ $# -gt 0 ]]; do case "$1" in
   --list|-l) MODE=list;; --attach|-a) MODE=attach;; --kill) MODE=kill;;

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cockpit.local/protocol/v1.schema.json",
+  "title": "Cockpit Control Protocol v1 — executable Slice 0/1 contract",
+  "description": "Strict request envelopes for every Slice 1 method. Domain authorization, idempotency age and CAS remain Go checks.",
+  "type": "object",
+  "required": ["jsonrpc", "id", "method", "params"],
+  "additionalProperties": false,
+  "properties": {
+    "jsonrpc": {"const": "2.0"},
+    "id": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "integer"}]},
+    "method": {"enum": ["session.open", "controller.health", "state.snapshot", "pane.inspect", "capabilities.get", "operation.get", "metadata.set_display", "events.subscribe", "events.unsubscribe", "wait.for_change", "rpc.cancel"]},
+    "params": {"type": "object"}
+  },
+  "oneOf": [
+    {"properties": {"method": {"const": "session.open"}, "params": {"$ref": "#/$defs/sessionOpen"}}},
+    {"properties": {"method": {"const": "controller.health"}, "params": {"$ref": "#/$defs/empty"}}},
+    {"properties": {"method": {"const": "state.snapshot"}, "params": {"$ref": "#/$defs/empty"}}},
+    {"properties": {"method": {"const": "capabilities.get"}, "params": {"$ref": "#/$defs/empty"}}},
+    {"properties": {"method": {"const": "pane.inspect"}, "params": {"$ref": "#/$defs/paneInspect"}}},
+    {"properties": {"method": {"const": "operation.get"}, "params": {"$ref": "#/$defs/operationGet"}}},
+    {"properties": {"method": {"const": "metadata.set_display"}, "params": {"$ref": "#/$defs/badgeMutation"}}},
+    {"properties": {"method": {"const": "events.subscribe"}, "params": {"$ref": "#/$defs/eventSubscribe"}}},
+    {"properties": {"method": {"const": "events.unsubscribe"}, "params": {"$ref": "#/$defs/eventUnsubscribe"}}},
+    {"properties": {"method": {"const": "wait.for_change"}, "params": {"$ref": "#/$defs/waitForChange"}}},
+    {"properties": {"method": {"const": "rpc.cancel"}, "params": {"$ref": "#/$defs/rpcCancel"}}}
+  ],
+  "$defs": {
+    "empty": {"type": "object", "additionalProperties": false},
+    "paneRef": {"type": "string", "pattern": "^cpp_[a-f0-9]{32}$"},
+    "operationRef": {"type": "string", "pattern": "^cpo_[a-f0-9]{32}$"},
+    "deadline": {"type": "string", "format": "date-time"},
+    "sessionOpen": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "clientId", "claimedProfile", "credential"],
+      "properties": {
+        "protocol": {"const": "1.0"}, "clientId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "claimedProfile": {"enum": ["local-operator", "read-only", "tmux-binding", "mcp-local", "web-gateway", "orbital", "hook-producer"]},
+        "credential": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "paneInspect": {
+      "type": "object", "additionalProperties": false, "required": ["paneRef"],
+      "properties": {"paneRef": {"$ref": "#/$defs/paneRef"}}
+    },
+    "operationGet": {
+      "type": "object", "additionalProperties": false, "required": ["operationRef"],
+      "properties": {"operationRef": {"$ref": "#/$defs/operationRef"}}
+    },
+    "paneExpectation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "paneRef", "generation", "resourceVersion", "material"],
+      "properties": {
+        "kind": {"const": "pane"}, "paneRef": {"$ref": "#/$defs/paneRef"},
+        "generation": {"type": "integer", "minimum": 1}, "resourceVersion": {"type": "integer", "minimum": 1},
+        "material": {
+          "type": "object", "additionalProperties": false, "required": ["lifecycle"],
+          "properties": {"lifecycle": {"const": "active"}}
+        }
+      }
+    },
+    "badgeMutation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "deadline", "idempotencyKey", "paneRef", "badge", "expectations"],
+      "properties": {
+        "protocol": {"const": "1.0"}, "deadline": {"$ref": "#/$defs/deadline"},
+        "idempotencyKey": {"type": "string", "pattern": "^ik_[0-9]{1,12}_[a-f0-9]{32}$"},
+        "paneRef": {"$ref": "#/$defs/paneRef"}, "badge": {"type": "string", "maxLength": 48, "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$"},
+        "expectations": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/paneExpectation"}}
+      }
+    },
+    "eventSubscribe": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"controllerEpoch": {"type": "string", "pattern": "^cpe_[a-f0-9]{32}$"}, "afterEventSeq": {"type":"integer", "minimum":0}, "paneRef":{"$ref":"#/$defs/paneRef"}, "operationRef":{"$ref":"#/$defs/operationRef"}}
+    },
+    "eventUnsubscribe": {
+      "type": "object", "additionalProperties": false, "required": ["subscriptionRef"],
+      "properties": {"subscriptionRef": {"type": "string", "pattern": "^cps_[a-f0-9]{32}$"}}
+    },
+    "waitForChange": {
+      "type": "object", "additionalProperties": false, "required": ["afterVersion", "deadline"], "oneOf":[{"required":["paneRef"]},{"required":["operationRef"]}],
+      "properties": {"paneRef": {"$ref": "#/$defs/paneRef"}, "operationRef":{"$ref":"#/$defs/operationRef"}, "afterVersion": {"type": "integer", "minimum": 0}, "deadline": {"$ref": "#/$defs/deadline"}}
+    },
+    "rpcCancel": {
+      "type": "object", "additionalProperties": false, "required": ["requestId"],
+      "properties": {"requestId": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "integer"}]}}
+    },
+    "errorResponse": {
+      "type": "object", "additionalProperties": false, "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": {"const": "2.0"}, "id": {"type": ["string", "integer", "null"]},
+        "error": {"type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": {"code": {"enum": [-32700,-32600,-32601,-32602,-32001]}, "message": {"type": "string"}, "data": {"type": "object", "additionalProperties": false, "required": ["code"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}}}
+      }
+    }
+  }
+}
