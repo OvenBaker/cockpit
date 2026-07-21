@@ -783,7 +783,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		if !has(caps(profile), "capture:sanitized") {
 			return nil, derr("PERMISSION_DENIED", "capture capability absent")
 		}
-		return d.capture(p.PaneRef, p.Lines)
+		return d.capture(ctx, p.PaneRef, p.Lines)
 	case "operation.get":
 		var p struct {
 			OperationRef string `json:"operationRef"`
@@ -1093,7 +1093,7 @@ func (d *daemon) setBadgeLocked(caller string, p badgeParams, deadline time.Time
 	return op, nil
 }
 
-func (d *daemon) capture(ref string, lines int) (any, error) {
+func (d *daemon) capture(ctx context.Context, ref string, lines int) (any, error) {
 	p, err := d.st.pane(ref)
 	if err == sql.ErrNoRows {
 		return nil, derr("TARGET_NOT_FOUND", "pane not found")
@@ -1110,7 +1110,7 @@ func (d *daemon) capture(ref string, lines int) (any, error) {
 	if err != nil || stamp != p.Ref {
 		return nil, derr("CONFLICT_GENERATION", "pane locator or stable stamp changed")
 	}
-	b, err := d.tm.capturePane(p.PaneID, lines)
+	b, err := d.tm.capturePane(ctx, p.PaneID, lines)
 	if err != nil {
 		return nil, err
 	}

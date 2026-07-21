@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -59,9 +60,30 @@ func (t tmux) paneOption(pane, key string) (string, error) {
 	b, e := t.run("display-message", "-p", "-t", pane, "#{"+key+"}")
 	return strings.TrimSpace(string(b)), e
 }
-func (t tmux) capturePane(pane string, lines int) ([]byte, error) {
+func (t tmux) capturePane(ctx context.Context, pane string, lines int) ([]byte, error) {
 	// The caller validates the exact stable target and the finite line bound.
-	return t.run("capture-pane", "-p", "-e", "-t", pane, "-S", fmt.Sprint(-lines+1))
+	args := []string{"capture-pane", "-p", "-e", "-t", pane, "-S", fmt.Sprint(-lines + 1)}
+	argv := append([]string{"-L", t.socket}, args...)
+	if t.socket == "cockpit" {
+		return nil, derr("INTERNAL", "live cockpit socket refused")
+	}
+	if t.trace != "" {
+		if f, e := os.OpenFile(t.trace, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); e == nil {
+			_, _ = fmt.Fprintf(f, "tmux %s\n", strings.Join(argv, " "))
+			_ = f.Close()
+		}
+	}
+	c := exec.CommandContext(ctx, "tmux", argv...)
+	var stderr bytes.Buffer
+	c.Stderr = &stderr
+	out, e := c.Output()
+	if e != nil {
+		if ctx.Err() != nil {
+			return nil, derr("CANCELLED", "capture cancelled")
+		}
+		return nil, fmt.Errorf("tmux %q: %w: %s", args, e, strings.TrimSpace(stderr.String()))
+	}
+	return out, nil
 }
 
 // interact is intentionally not a general send-keys wrapper.  The only
