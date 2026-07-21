@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
+	"sync"
 
 	"github.com/gareth/cockpit-core/internal/core"
 )
@@ -55,8 +57,52 @@ func mcpStdio(args []string) {
 		fatal(err.Error())
 	}
 	out := bufio.NewWriter(os.Stdout)
-	defer out.Flush()
-	write := func(v any) { b, _ := json.Marshal(v); _, _ = out.Write(append(b, '\n')); _ = out.Flush() }
+	var outMu, connMu, pendingMu sync.Mutex
+	write := func(v any) {
+		outMu.Lock()
+		defer outMu.Unlock()
+		b, _ := json.Marshal(v)
+		_, _ = out.Write(append(b, '\n'))
+		_ = out.Flush()
+	}
+	pending, byMCP := map[string]json.RawMessage{}, map[string]string{}
+	seq := 0
+	// A dedicated reader keeps a long wait from blocking stdin. Cancellation is
+	// consequently sent on the same controller connection and reaches its
+	// request context, rather than being a best-effort process kill.
+	go func() {
+		for {
+			b, e := readFrame(c)
+			if e != nil {
+				return
+			}
+			var response struct {
+				ID     json.RawMessage `json:"id"`
+				Result any             `json:"result"`
+				Error  any             `json:"error"`
+			}
+			if json.Unmarshal(b, &response) != nil {
+				continue
+			}
+			var controllerID string
+			_ = json.Unmarshal(response.ID, &controllerID)
+			pendingMu.Lock()
+			mcpID, ok := pending[controllerID]
+			if ok {
+				delete(pending, controllerID)
+				delete(byMCP, string(mcpID))
+			}
+			pendingMu.Unlock()
+			if !ok {
+				continue
+			} // cancellation acknowledgements are transport-internal.
+			payload, _ := json.Marshal(response.Result)
+			if response.Error != nil {
+				payload, _ = json.Marshal(response.Error)
+			}
+			write(map[string]any{"jsonrpc": "2.0", "id": mcpID, "result": map[string]any{"content": []map[string]string{{"type": "text", "text": string(payload)}}, "structuredContent": response.Result, "isError": response.Error != nil}})
+		}
+	}()
 	resolve := func(args map[string]any) (map[string]any, error) {
 		if ref, ok := args["paneRef"].(string); ok && ref != "" {
 			return map[string]any{"paneRef": ref}, nil
@@ -65,26 +111,7 @@ func mcpStdio(args []string) {
 		if !ok || loc == "" {
 			return nil, errors.New("paneRef or canonical locator is required")
 		}
-		if err := writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "resolve", "method": "pane.resolve", "params": map[string]any{"canonical": loc}}); err != nil {
-			return nil, err
-		}
-		b, err := readFrame(c)
-		if err != nil {
-			return nil, err
-		}
-		var r map[string]any
-		if json.Unmarshal(b, &r) != nil {
-			return nil, errors.New("invalid controller response")
-		}
-		if r["error"] != nil {
-			return nil, fmt.Errorf("%v", r["error"])
-		}
-		result, _ := r["result"].(map[string]any)
-		ref, _ := result["paneRef"].(string)
-		if ref == "" {
-			return nil, errors.New("resolution failed")
-		}
-		return map[string]any{"paneRef": ref}, nil
+		return resolvePane(*socket, *credential, loc)
 	}
 	s := bufio.NewScanner(os.Stdin)
 	s.Buffer(make([]byte, 4096), maxFrame)
@@ -100,6 +127,22 @@ func mcpStdio(args []string) {
 			continue
 		}
 		if req.Method == "notifications/initialized" {
+			continue
+		}
+		if req.Method == "notifications/cancelled" {
+			var cancel struct {
+				RequestID json.RawMessage `json:"requestId"`
+			}
+			if json.Unmarshal(req.Params, &cancel) == nil {
+				pendingMu.Lock()
+				target := byMCP[string(cancel.RequestID)]
+				pendingMu.Unlock()
+				if target != "" {
+					connMu.Lock()
+					_ = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "cancel-" + target, "method": "rpc.cancel", "params": map[string]any{"requestId": target}})
+					connMu.Unlock()
+				}
+			}
 			continue
 		}
 		if req.Method == "initialize" {
@@ -127,33 +170,68 @@ func mcpStdio(args []string) {
 			write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": map[string]any{"content": []map[string]string{{"type": "text", "text": "unknown tool"}}, "isError": true}})
 			continue
 		}
-		if method != "state.snapshot" && method != "capabilities.get" && method != "wait.for_change" {
+		if method != "state.snapshot" && method != "capabilities.get" {
 			if target, e := resolve(call.Arguments); e != nil {
 				write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": map[string]any{"content": []map[string]string{{"type": "text", "text": e.Error()}}, "isError": true}})
 				continue
 			} else {
 				call.Arguments["paneRef"] = target["paneRef"]
+				delete(call.Arguments, "locator")
 			}
 		}
 		params, _ := json.Marshal(call.Arguments)
-		if err := writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "tool", "method": method, "params": json.RawMessage(params)}); err != nil {
-			write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "error": map[string]any{"code": -32001, "message": "controller unavailable"}})
-			continue
-		}
-		b, err := readFrame(c)
+		seq++
+		controllerID := "mcp-" + strconv.Itoa(seq)
+		pendingMu.Lock()
+		pending[controllerID] = append(json.RawMessage(nil), req.ID...)
+		byMCP[string(req.ID)] = controllerID
+		pendingMu.Unlock()
+		connMu.Lock()
+		err := writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": controllerID, "method": method, "params": json.RawMessage(params)})
+		connMu.Unlock()
 		if err != nil {
+			pendingMu.Lock()
+			delete(pending, controllerID)
+			delete(byMCP, string(req.ID))
+			pendingMu.Unlock()
 			write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "error": map[string]any{"code": -32001, "message": "controller unavailable"}})
 			continue
 		}
-		var response map[string]any
-		_ = json.Unmarshal(b, &response)
-		payload, _ := json.Marshal(response["result"])
-		isError := response["error"] != nil
-		if isError {
-			payload, _ = json.Marshal(response["error"])
-		}
-		write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": map[string]any{"content": []map[string]string{{"type": "text", "text": string(payload)}}, "structuredContent": response["result"], "isError": isError}})
 	}
+}
+
+func resolvePane(socket, credential, locator string) (map[string]any, error) {
+	c, err := net.Dial("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	open := map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp-resolver", "claimedProfile": "mcp-local", "credential": credential}}
+	if err = writeFrame(c, open); err != nil {
+		return nil, err
+	}
+	if _, err = readFrame(c); err != nil {
+		return nil, err
+	}
+	if err = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "resolve", "method": "pane.resolve", "params": map[string]any{"canonical": locator}}); err != nil {
+		return nil, err
+	}
+	b, err := readFrame(c)
+	if err != nil {
+		return nil, err
+	}
+	var r struct {
+		Result map[string]any `json:"result"`
+		Error  any            `json:"error"`
+	}
+	if json.Unmarshal(b, &r) != nil || r.Error != nil {
+		return nil, errors.New("canonical pane locator was not found")
+	}
+	ref, _ := r.Result["paneRef"].(string)
+	if ref == "" {
+		return nil, errors.New("canonical pane locator was not found")
+	}
+	return map[string]any{"paneRef": ref}, nil
 }
 
 func daemon(args []string) {

@@ -1,3 +1,4 @@
 [
-  "state:read", "operations:read", "events:wait", "metadata:write"
+  "state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write",
+  "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume"
 ]

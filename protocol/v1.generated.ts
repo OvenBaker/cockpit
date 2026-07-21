@@ -1,5 +1,5 @@
 /* Generated from protocol/v1.schema.json for Slice 0/1 wire checking. */
-export type Capability = "state:read" | "operations:read" | "events:wait" | "metadata:write";
+export type Capability = "state:read" | "operations:read" | "events:wait" | "capture:sanitized" | "metadata:write" | "interaction:nudge" | "interaction:pause" | "interaction:compact" | "interaction:resume";
 export type ErrorCode =
   | "INVALID_REQUEST" | "UNSUPPORTED_PROTOCOL" | "FRAME_TOO_LARGE" | "UNAUTHENTICATED"
   | "PERMISSION_DENIED" | "CAPABILITY_ABSENT" | "TARGET_NOT_FOUND" | "TARGET_GONE"
@@ -15,6 +15,8 @@ export interface EventSubscribeParams { controllerEpoch?: `cpe_${string}`; after
 export interface EventUnsubscribeParams { subscriptionRef: `cps_${string}` }
 export interface WaitForChangeParams { paneRef?: `cpp_${string}`; operationRef?: `cpo_${string}`; afterVersion: number; deadline: string }
 export interface RpcCancelParams { requestId: string | number }
+export interface CaptureParams { paneRef: `cpp_${string}`; lines: number }
+export interface InteractionRequest { protocol: "1.0"; deadline: string; idempotencyKey: `ik_${number}_${string}`; paneRef: `cpp_${string}`; text?: string; expectations: [PaneExpectation] }
 export type EmptyParams = Record<string, never>;
 export interface MethodParams {
   "session.open": SessionOpenParams;
@@ -22,8 +24,14 @@ export interface MethodParams {
   "state.snapshot": EmptyParams;
   "capabilities.get": EmptyParams;
   "pane.inspect": PaneInspectParams;
+  "pane.resolve": { canonical: string };
+  "pane.capture": CaptureParams;
   "operation.get": OperationGetParams;
   "metadata.set_display": BadgeRequest;
+  "interaction.nudge": InteractionRequest;
+  "interaction.pause": InteractionRequest;
+  "interaction.compact": InteractionRequest;
+  "interaction.resume": InteractionRequest;
   "events.subscribe": EventSubscribeParams;
   "events.unsubscribe": EventUnsubscribeParams;
   "wait.for_change": WaitForChangeParams;

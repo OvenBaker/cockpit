@@ -50,9 +50,36 @@ func MCPTools() []map[string]any {
 			continue
 		}
 		ann := map[string]any{"readOnlyHint": s.ReadOnly, "destructiveHint": s.Destructive, "openWorldHint": s.OpenWorld}
-		out = append(out, map[string]any{"name": s.MCPTool, "description": s.Description, "inputSchema": map[string]any{"type": "object", "additionalProperties": true}, "annotations": ann})
+		out = append(out, map[string]any{"name": s.MCPTool, "description": s.Description, "inputSchema": mcpSchema(s.Method), "annotations": ann})
 	}
 	return out
+}
+
+func mcpSchema(method string) map[string]any {
+	target := map[string]any{"paneRef": map[string]any{"type": "string"}, "locator": map[string]any{"type": "string", "description": "Canonical session:window.pane convenience locator."}}
+	switch method {
+	case "state.snapshot", "capabilities.get":
+		return map[string]any{"type": "object", "additionalProperties": false}
+	case "pane.inspect":
+		return map[string]any{"type": "object", "properties": target, "anyOf": []any{map[string]any{"required": []string{"paneRef"}}, map[string]any{"required": []string{"locator"}}}, "additionalProperties": false}
+	case "pane.capture":
+		target["lines"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 200}
+		return map[string]any{"type": "object", "properties": target, "required": []string{"lines"}, "additionalProperties": false}
+	case "wait.for_change":
+		target["operationRef"] = map[string]any{"type": "string"}
+		target["afterVersion"] = map[string]any{"type": "integer", "minimum": 0}
+		target["deadline"] = map[string]any{"type": "string"}
+		return map[string]any{"type": "object", "properties": target, "required": []string{"afterVersion", "deadline"}, "additionalProperties": false}
+	default:
+		target["protocol"] = map[string]any{"const": "1.0"}
+		target["deadline"] = map[string]any{"type": "string"}
+		target["idempotencyKey"] = map[string]any{"type": "string"}
+		target["expectations"] = map[string]any{"type": "array", "minItems": 1, "maxItems": 1}
+		if method == "interaction.nudge" || method == "interaction.resume" {
+			target["text"] = map[string]any{"type": "string", "minLength": 1, "maxLength": 16384}
+		}
+		return map[string]any{"type": "object", "properties": target, "required": []string{"protocol", "deadline", "idempotencyKey", "expectations"}, "additionalProperties": false}
+	}
 }
 
 func MCPMethod(tool string) (string, bool) {
