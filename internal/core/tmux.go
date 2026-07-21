@@ -8,7 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// Codex materializes a tmux literal paste asynchronously. Keep this bounded
+// settle private to the typed driver so the fixed submit key cannot overtake
+// the literal text. It is not a caller-configurable delay or a public key API.
+const literalSubmitSettle = 150 * time.Millisecond
 
 type tmux struct {
 	socket, trace    string
@@ -123,12 +129,14 @@ func (t tmux) interact(pane, action, text string) error {
 	switch action {
 	case "nudge", "resume":
 		// Codex's TUI must receive its literal text and submit key as distinct
-		// tmux client invocations. In a single semicolon batch the text reaches
-		// its input line but the turn is not reliably submitted. C-m is the
-		// terminal return key, not client-controlled raw key input.
+		// tmux client invocations. Codex materializes literal paste
+		// asynchronously, so the bounded settle prevents C-m from overtaking
+		// it. C-m is the terminal return key, not client-controlled raw key
+		// input.
 		if _, e := t.runSensitive("tmux -L "+t.socket+" interaction."+action+" text=[REDACTED]", "interaction."+action, "send-keys", "-t", pane, "-l", text); e != nil {
 			return e
 		}
+		time.Sleep(literalSubmitSettle)
 		_, e := t.runUntraced("interaction."+action, "send-keys", "-t", pane, "C-m")
 		return e
 	case "pause":

@@ -44,8 +44,12 @@ func TestTMUXLiteralInteractionUsesSeparateCRSubmit(t *testing.T) {
 
 	text := "Codex literal submit behavior"
 	driver := tmux{socket: socket, trace: filepath.Join(root, "driver.trace")}
+	started := time.Now()
 	if err = driver.interact(pane, "nudge", text); err != nil {
 		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < literalSubmitSettle {
+		t.Fatalf("literal submit settled for only %s, want at least %s", elapsed, literalSubmitSettle)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
