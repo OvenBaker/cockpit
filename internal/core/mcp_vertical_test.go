@@ -95,7 +95,7 @@ func TestMCPNudgeRaceUsesControllerCASAndPrivateAudit(t *testing.T) {
 	before, _ := os.ReadFile(filepath.Join(f.root, "driver.trace"))
 	secret := "literal guidance: TOKEN=never-persist-this"
 	params := func(n int) map[string]any {
-		return map[string]any{"protocol": "1.0", "deadline": time.Now().Add(time.Minute).UTC().Format(time.RFC3339), "idempotencyKey": ik(0, 1900+n), "paneRef": f.pane["paneRef"], "text": secret, "expectations": []any{map[string]any{"kind": "pane", "paneRef": f.pane["paneRef"], "generation": f.pane["generation"], "resourceVersion": f.pane["resourceVersion"], "material": map[string]any{"lifecycle": "active"}}}}
+		return map[string]any{"protocol": "1.0", "deadline": time.Now().Add(time.Minute).UTC().Format(time.RFC3339), "idempotencyKey": ik(0, 1900+n), "paneRef": f.pane["paneRef"], "text": secret, "expectations": []any{map[string]any{"kind": "pane", "paneRef": f.pane["paneRef"], "generation": f.pane["generation"], "resourceVersion": f.pane["resourceVersion"], "material": map[string]any{"lifecycle": "active", "observedState": "waiting"}}}}
 	}
 	var wg sync.WaitGroup
 	results := make([]map[string]any, 2)

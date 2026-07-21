@@ -743,7 +743,6 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		}
 		out := make([]any, 0, len(ps))
 		for _, p := range ps {
-			p = d.observePane(p)
 			out = append(out, p.view())
 		}
 		return map[string]any{"controllerEpoch": d.epoch, "eventSeq": d.currentEventSeq(), "panes": out}, nil
@@ -764,7 +763,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		if e != nil {
 			return nil, e
 		}
-		return d.observePane(x).view(), nil
+		return x.view(), nil
 	case "pane.resolve":
 		var p struct {
 			Canonical string `json:"canonical"`
@@ -1188,6 +1187,9 @@ func (d *daemon) interact(caller, method string, p interactionParams) (any, erro
 	}
 	if ex.Material.Lifecycle != "active" {
 		return nil, derr("CONFLICT_MATERIAL_STATE", "pane lifecycle changed")
+	}
+	if ex.Material.ObservedState != x.State {
+		return nil, derr("CONFLICT_MATERIAL_STATE", "pane observed state changed")
 	}
 	if x.Provider != "claude" && x.Provider != "codex" {
 		return nil, derr("CAPABILITY_ABSENT", "unsupported provider")

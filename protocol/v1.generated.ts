@@ -6,7 +6,7 @@ export type ErrorCode =
   | "CONFLICT_VERSION" | "CONFLICT_GENERATION" | "CONFLICT_MATERIAL_STATE"
   | "IDEMPOTENCY_CONFLICT" | "IDEMPOTENCY_EXPIRED" | "DEADLINE_EXCEEDED" | "CANCELLED"
   | "CONTROLLER_NOT_READY" | "INTERNAL";
-export interface PaneExpectation { kind: "pane"; paneRef: `cpp_${string}`; generation: number; resourceVersion: number; material: { lifecycle: "active" } }
+export interface PaneExpectation { kind: "pane"; paneRef: `cpp_${string}`; generation: number; resourceVersion: number; material: { lifecycle: "active"; observedState?: "waiting" | "working" | "paused" } }
 export interface BadgeRequest { protocol: "1.0"; deadline: string; idempotencyKey: `ik_${number}_${string}`; paneRef: `cpp_${string}`; badge: string; expectations: [PaneExpectation] }
 export interface SessionOpenParams { protocol: "1.0"; clientId: string; claimedProfile: "local-operator" | "read-only" | "tmux-binding" | "mcp-local" | "web-gateway" | "orbital" | "hook-producer"; credential: string }
 export interface PaneInspectParams { paneRef: `cpp_${string}` }

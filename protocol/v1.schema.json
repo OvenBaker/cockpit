@@ -63,7 +63,7 @@
         "generation": {"type": "integer", "minimum": 1}, "resourceVersion": {"type": "integer", "minimum": 1},
         "material": {
           "type": "object", "additionalProperties": false, "required": ["lifecycle"],
-          "properties": {"lifecycle": {"const": "active"}}
+          "properties": {"lifecycle": {"const": "active"}, "observedState": {"enum": ["waiting", "working", "paused"]}}
         }
       }
     },

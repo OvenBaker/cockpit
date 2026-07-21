@@ -71,7 +71,8 @@ type paneExpectation struct {
 	Generation      int64  `json:"generation"`
 	ResourceVersion int64  `json:"resourceVersion"`
 	Material        struct {
-		Lifecycle string `json:"lifecycle"`
+		Lifecycle     string `json:"lifecycle"`
+		ObservedState string `json:"observedState"`
 	} `json:"material"`
 }
 type badgeParams struct {
