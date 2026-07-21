@@ -1,0 +1,3 @@
+[
+  "state:read", "operations:read", "events:wait", "metadata:write"
+]
