@@ -13,6 +13,12 @@ import (
 type tmux struct{ socket, trace string }
 
 func (t tmux) run(args ...string) ([]byte, error) {
+	return t.runTrace("", "", args...)
+}
+func (t tmux) runSensitive(traceRecord, errorLabel string, args ...string) ([]byte, error) {
+	return t.runTrace(traceRecord, errorLabel, args...)
+}
+func (t tmux) runTrace(traceRecord, errorLabel string, args ...string) ([]byte, error) {
 	argv := append([]string{"-L", t.socket}, args...)
 	if t.socket == "cockpit" {
 		return nil, derr("INTERNAL", "live cockpit socket refused")
@@ -20,7 +26,10 @@ func (t tmux) run(args ...string) ([]byte, error) {
 	if t.trace != "" {
 		f, e := os.OpenFile(t.trace, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if e == nil {
-			_, _ = fmt.Fprintf(f, "tmux %s\n", strings.Join(argv, " "))
+			if traceRecord == "" {
+				traceRecord = "tmux " + strings.Join(argv, " ")
+			}
+			_, _ = fmt.Fprintln(f, traceRecord)
 			_ = f.Close()
 		}
 	}
@@ -29,6 +38,9 @@ func (t tmux) run(args ...string) ([]byte, error) {
 	c.Stderr = &stderr
 	out, e := c.Output()
 	if e != nil {
+		if errorLabel != "" {
+			return nil, fmt.Errorf("tmux %s: %w: %s", errorLabel, e, strings.TrimSpace(stderr.String()))
+		}
 		return nil, fmt.Errorf("tmux %q: %w: %s", args, e, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
@@ -102,7 +114,7 @@ func (t tmux) interact(pane, action, text string) error {
 	default:
 		return derr("INTERNAL", "unknown typed interaction")
 	}
-	_, e := t.run(args...)
+	_, e := t.runSensitive("tmux -L "+t.socket+" interaction."+action+" text=[REDACTED]", "interaction."+action, args...)
 	return e
 }
 func (t tmux) globalOption(key string) (string, error) {

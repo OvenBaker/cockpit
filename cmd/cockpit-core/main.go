@@ -218,6 +218,9 @@ func mcpStdio(args []string) {
 
 func privateMCPCredential() (string, error) {
 	path := os.Getenv("COCKPIT_MCP_CREDENTIAL_FILE")
+	return privateCredentialFile(path)
+}
+func privateCredentialFile(path string) (string, error) {
 	if path == "" || !filepath.IsAbs(path) {
 		return "", errors.New("credential file is required")
 	}
@@ -242,7 +245,7 @@ func resolvePane(socket, credential, locator string) (map[string]any, error) {
 		return nil, err
 	}
 	defer c.Close()
-	open := map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp-resolver", "claimedProfile": "mcp-local", "credential": credential}}
+	open := map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp", "claimedProfile": "mcp-local", "credential": credential}}
 	if err = writeFrame(c, open); err != nil {
 		return nil, err
 	}
@@ -285,11 +288,12 @@ func daemon(args []string) {
 	root := fs.String("test-root", "", "isolated test root")
 	socket := fs.String("socket", "", "control socket")
 	tmuxSocket := fs.String("tmux-socket", "", "throwaway tmux socket")
+	credentials := fs.String("credentials-file", "", "private controller credential registry")
 	fs.Parse(args)
-	if *root == "" || *socket == "" || *tmuxSocket == "" {
-		fatal("daemon requires --test-root --socket --tmux-socket")
+	if *root == "" || *socket == "" || *tmuxSocket == "" || *credentials == "" {
+		fatal("daemon requires --test-root --socket --tmux-socket --credentials-file")
 	}
-	d, err := core.NewDaemon(*root, *socket, *tmuxSocket)
+	d, err := core.NewDaemonWithCredentials(*root, *socket, *tmuxSocket, *credentials)
 	if err != nil {
 		fatal(err.Error())
 	}
@@ -302,10 +306,14 @@ func daemon(args []string) {
 func ctl(args []string) {
 	fs := flag.NewFlagSet("ctl", flag.ExitOnError)
 	socket := fs.String("socket", "", "control socket")
-	credential := fs.String("credential", "test-local", "test credential")
+	credentialFile := fs.String("credential-file", "", "private controller credential file")
 	fs.Parse(args)
-	if *socket == "" || fs.NArg() < 1 {
-		fatal("ctl requires --socket METHOD [JSON params]")
+	if *socket == "" || *credentialFile == "" || fs.NArg() < 1 {
+		fatal("ctl requires --socket --credential-file METHOD [JSON params]")
+	}
+	credential, err := privateCredentialFile(*credentialFile)
+	if err != nil {
+		fatal("ctl credential unavailable")
 	}
 	params := json.RawMessage(`{}`)
 	if fs.NArg() > 1 {
@@ -316,7 +324,7 @@ func ctl(args []string) {
 		fatal(err.Error())
 	}
 	defer c.Close()
-	if err := writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpitctl", "claimedProfile": "local-operator", "credential": *credential}}); err != nil {
+	if err := writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpitctl", "claimedProfile": "local-operator", "credential": credential}}); err != nil {
 		fatal(err.Error())
 	}
 	if _, err := readFrame(c); err != nil {
