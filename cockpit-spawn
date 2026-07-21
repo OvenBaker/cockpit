@@ -56,17 +56,15 @@ else
     || { echo "cockpit-spawn: no room for another pane in this workspace" >&2; exit 1; }
 fi
 
-$TMUX set -p -t "$pane" @session_id ""
-$TMUX set -p -t "$pane" @cwd "$cwd"
-$TMUX set -p -t "$pane" @agent "$agent"
 if [[ "$agent" == shell ]]; then
+  $TMUX set -p -t "$pane" @session_id ""
+  $TMUX set -p -t "$pane" @cwd "$cwd"
+  $TMUX set -p -t "$pane" @agent "$agent"
   $TMUX set -p -t "$pane" @born ""            # no @born → poller won't chase a transcript
   $TMUX set -p -t "$pane" @label "$(basename "$cwd") · bash"
   $TMUX set -p -t "$pane" @badge "shell"
 else
-  $TMUX set -p -t "$pane" @born "$(date +%s)" # poller adopts the fresh transcript
-  $TMUX set -p -t "$pane" @label "$name"
-  $TMUX set -p -t "$pane" @badge "starting"
+  cockpit_stamp_pending_agent "$pane" "$cwd" "$name" "$agent"
 fi
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 echo "$pane"

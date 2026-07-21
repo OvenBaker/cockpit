@@ -60,7 +60,7 @@ cockpit_snapshot() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
   printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
   $tmux list-panes -s -t "$COCKPIT_SESSION" -f '#{==:#{@orderly},}' \
-    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},claude}" 2>/dev/null
+    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}" 2>/dev/null
 }
 
 # The window the user is currently viewing = the active workspace. Helpers that
@@ -81,6 +81,39 @@ cockpit_resolve_workspace() {
   w=$($tmux list-windows -t "$COCKPIT_SESSION" -f "#{==:#{window_name},$name}" -F '#{window_id}' 2>/dev/null | head -1)
   [[ -n "$w" ]] || w=$($tmux new-window -t "$COCKPIT_SESSION" -P -F '#{window_id}' -n "$name" "bash -l" 2>/dev/null)
   echo "$w"
+}
+
+# Canonical managed-pane metadata belongs to the Cockpit launch/adoption path.
+# @state is deliberately cleared here: only cockpit-poller projects it after a
+# known session is available. This prevents a reused pane from carrying a prior
+# session's state into a new provider process.
+cockpit_clear_projection() {
+  local pane="$1" tmux=${COCKPIT_TMUX:-"tmux -L cockpit"}
+  $tmux set -p -t "$pane" @state ""
+  $tmux set -p -t "$pane" @hook_state ""
+  $tmux set -p -t "$pane" @hook_at ""
+}
+
+cockpit_stamp_known_agent() { # pane session-id cwd label agent
+  local pane="$1" sid="$2" cwd="$3" label="$4" agent="$5" tmux=${COCKPIT_TMUX:-"tmux -L cockpit"}
+  cockpit_clear_projection "$pane"
+  $tmux set -p -t "$pane" @session_id "$sid"
+  $tmux set -p -t "$pane" @cwd "$cwd"
+  $tmux set -p -t "$pane" @label "$(ck_clean_label "$label")"
+  $tmux set -p -t "$pane" @agent "$agent"
+  $tmux set -p -t "$pane" @born ""
+  $tmux set -p -t "$pane" @badge "starting"
+}
+
+cockpit_stamp_pending_agent() { # pane cwd label agent
+  local pane="$1" cwd="$2" label="$3" agent="$4" tmux=${COCKPIT_TMUX:-"tmux -L cockpit"}
+  cockpit_clear_projection "$pane"
+  $tmux set -p -t "$pane" @session_id ""
+  $tmux set -p -t "$pane" @cwd "$cwd"
+  $tmux set -p -t "$pane" @label "$(ck_clean_label "$label")"
+  $tmux set -p -t "$pane" @agent "$agent"
+  $tmux set -p -t "$pane" @born "$(date +%s)"
+  $tmux set -p -t "$pane" @badge "starting"
 }
 
 # --- session selection ------------------------------------------------------

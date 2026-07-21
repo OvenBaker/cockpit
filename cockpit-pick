@@ -48,11 +48,7 @@ retarget_pane() {
   fi
   local cmd; cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
   $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
-  $TMUX set -p -t "$pane" @session_id "$id"
-  $TMUX set -p -t "$pane" @cwd "$cwd"
-  $TMUX set -p -t "$pane" @label "$(ck_clean_label "$title")"   # one line; border truncates to width
-  $TMUX set -p -t "$pane" @agent "$agent"
-  $TMUX set -p -t "$pane" @badge "starting"
+  cockpit_stamp_known_agent "$pane" "$id" "$cwd" "$title" "$agent"
 }
 
 # spawn a brand-NEW session (no resume) in <cwd> for <agent>, reusing a bare
@@ -74,17 +70,15 @@ spawn_new() {
     pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
       || { say "  no room for another pane at this width."; return 1; }
   fi
-  $TMUX set -p -t "$pane" @session_id ""
-  $TMUX set -p -t "$pane" @cwd "$cwd"
-  $TMUX set -p -t "$pane" @agent "$agent"
   if [[ "$agent" == shell ]]; then                 # plain terminal — not tracked
+    $TMUX set -p -t "$pane" @session_id ""
+    $TMUX set -p -t "$pane" @cwd "$cwd"
+    $TMUX set -p -t "$pane" @agent "$agent"
     $TMUX set -p -t "$pane" @born ""               # no @born → poller won't try to adopt a transcript
     $TMUX set -p -t "$pane" @label "$(basename "$cwd") · bash"
     $TMUX set -p -t "$pane" @badge "shell"
   else                                             # claude/codex — poller adopts via @born
-    $TMUX set -p -t "$pane" @born "$(date +%s)"
-    $TMUX set -p -t "$pane" @label "new · $(basename "$cwd")"
-    $TMUX set -p -t "$pane" @badge "starting"
+    cockpit_stamp_pending_agent "$pane" "$cwd" "new · $(basename "$cwd")" "$agent"
   fi
   $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 }

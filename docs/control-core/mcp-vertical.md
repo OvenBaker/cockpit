@@ -50,7 +50,7 @@ still supplies generation, resource-version and material-state expectations.
 
 The owner-approved accelerated surface is intentionally honest about the
 Slice 0/1 observer gap. A supported Claude/Codex pane must have controller-read
-`@cockpit_provider` and `@cockpit_state` stamps. Nudge/resume are delivered as
+`@agent` and poller-produced `@state` stamps. Nudge/resume are delivered as
 bounded literal text; pause/compact are fixed actions. Each interaction gets a
 new pane version, is serialized through the same queue/CAS path as metadata,
 and audits only digest plus byte count. It returns
@@ -64,3 +64,6 @@ performed by this slice.
 For a reversible local-only setup and parity transcript, see
 [mcp-cutover-smoke.md](mcp-cutover-smoke.md). The helper creates an isolated
 directory only when explicitly run; it does not modify global client settings.
+
+For the legacy Cockpit launch/adoption provenance contract and its review-gated
+one-pane migration aid, see [canonical-pane-adoption.md](canonical-pane-adoption.md).

@@ -126,8 +126,8 @@ func TestMCPVerticalProtocolAndCancellation(t *testing.T) {
 func TestMCPNudgeRaceUsesControllerCASAndPrivateAudit(t *testing.T) {
 	f := newFixture(t)
 	defer f.close()
-	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_provider", "claude")
-	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_state", "waiting")
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@agent", "claude")
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@state", "idle")
 	f.refresh()
 	before, _ := os.ReadFile(filepath.Join(f.root, "driver.trace"))
 	secret := "literal guidance: TOKEN=never-persist-this"
@@ -177,7 +177,7 @@ func TestMCPNudgeRaceUsesControllerCASAndPrivateAudit(t *testing.T) {
 func TestMCPStatusFailsClosedAndLiteralTextSubmits(t *testing.T) {
 	f := newFixture(t)
 	defer f.close()
-	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_provider", "claude")
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@agent", "claude")
 	before, _ := os.ReadFile(filepath.Join(f.root, "driver.trace"))
 	status := mcpOneCall(t, f, "get_status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)["structuredContent"].(map[string]any)
 	if status["provider"] != "claude" || status["observedState"] != "unknown" || mcpHasCapability(status, "interaction:nudge") {
@@ -191,12 +191,17 @@ func TestMCPStatusFailsClosedAndLiteralTextSubmits(t *testing.T) {
 	if strings.Contains(string(after[len(before):]), "send-keys") {
 		t.Fatal("unknown observed state delivered terminal input")
 	}
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@state", "needs-input")
+	legacyAttention := mcpOneCall(t, f, "get_status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if legacyAttention["provider"] != "claude" || legacyAttention["observedState"] != "unknown" || mcpHasCapability(legacyAttention, "interaction:nudge") {
+		t.Fatalf("legacy needs-input was admitted as an interaction state: %#v", legacyAttention)
+	}
 
 	output := filepath.Join(f.root, "literal-input")
 	command := fmt.Sprintf("bash -c 'IFS= read -r line; printf %%s \"$line\" > %s; sleep 60'", output)
 	run(t, "tmux", "-L", f.tmux, "respawn-pane", "-k", "-t", f.targetPane, command)
-	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_provider", "claude")
-	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_state", "waiting")
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@agent", "claude")
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@state", "idle")
 	status = mcpOneCall(t, f, "get_status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)["structuredContent"].(map[string]any)
 	if status["provider"] != "claude" || status["observedState"] != "waiting" || !mcpHasCapability(status, "interaction:nudge") {
 		t.Fatalf("stamped status did not expose interaction facts: %#v", status)
@@ -310,8 +315,8 @@ func TestMCPCutoverParitySmoke(t *testing.T) {
 		t.Fatalf("wait parity ctl=%#v mcp=%#v", ctlWait, mcpWait)
 	}
 	t.Logf("wait: matched paneRef=%s", mcpWait["paneRef"])
-	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_provider", "claude")
-	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_state", "waiting")
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@agent", "claude")
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@state", "idle")
 	if result := mcpOneCall(t, f, "nudge", interactionArgs(f, "parity smoke nudge", "waiting", 2800)); !strings.Contains(fmt.Sprint(result), "effect-delivered-unconfirmed") {
 		t.Fatalf("nudge smoke: %#v", result)
 	}

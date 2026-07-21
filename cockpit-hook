@@ -54,7 +54,16 @@ if [[ "$ev" == session-start || "$ev" == working ]] && [[ -n "$INPUT" ]] && comm
   fi
   if [[ "$sid" =~ ^[0-9a-fA-F-]{36}$ ]]; then
     cur=$("${T[@]}" display -p -t "$TMUX_PANE" '#{@session_id}' 2>/dev/null || true)
-    [[ "$sid" != "$cur" ]] && { "${T[@]}" set -p -t "$TMUX_PANE" @session_id "$sid" 2>/dev/null || true; }
+    if [[ "$sid" != "$cur" ]]; then
+      "${T[@]}" set -p -t "$TMUX_PANE" @session_id "$sid" 2>/dev/null || true
+      "${T[@]}" set -p -t "$TMUX_PANE" @state "" 2>/dev/null || true
+    fi
+    # This hook is a provider-authenticated Claude lifecycle source, so it can
+    # complete a direct Claude pane's provenance without guessing from its
+    # title/process. The poller remains the sole @state projector.
+    "${T[@]}" set -p -t "$TMUX_PANE" @agent claude 2>/dev/null || true
+    cwd=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+    [[ "$cwd" = /* && -d "$cwd" ]] && "${T[@]}" set -p -t "$TMUX_PANE" @cwd "$cwd" 2>/dev/null || true
   fi
 fi
 

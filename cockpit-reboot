@@ -43,7 +43,7 @@ reboot_pane() {
   local cmd; cmd=$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")
   if (( dry )); then echo "would reboot $pid  ${sid:0:8}  [$state]  ${label:0:40}"; return 0; fi
   $TMUX respawn-pane -k -t "$pid" "bash -lc $(printf %q "$cmd")" 2>/dev/null || { echo "skip $pid: respawn failed" >&2; return 1; }
-  $TMUX set -p -t "$pid" @session_id "$sid"
+  cockpit_stamp_known_agent "$pid" "$sid" "$cwd" "$label" "$agent"
   $TMUX set -p -t "$pid" @badge "rebooting"
   echo "rebooted $pid  ${sid:0:8}  ${label:0:40}"
   return 0
@@ -56,7 +56,6 @@ while IFS="$TAB" read -r pid sid cwd label agent state orderly; do
   [[ "$sid" == "$NIL" ]] && sid=""; [[ "$cwd" == "$NIL" ]] && cwd=""
   [[ "$label" == "$NIL" ]] && label=""; [[ "$state" == "$NIL" ]] && state=""
   [[ "$orderly" == "$NIL" ]] && orderly=""
-  [[ -n "$agent" ]] || agent=claude
   case "$mode" in
     idle) [[ "$state" == "idle" || "$state" == "just-finished" ]] || continue;;
     all)  ;;
@@ -64,7 +63,7 @@ while IFS="$TAB" read -r pid sid cwd label agent state orderly; do
   esac
   reboot_pane "$pid" "$sid" "$cwd" "$label" "$agent" "$state" "$orderly" && n=$((n+1))
 done < <($TMUX list-panes -s -t "$COCKPIT_SESSION" \
-  -F "#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},claude}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@orderly,#{@orderly},$NIL}" 2>/dev/null)
+  -F "#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@orderly,#{@orderly},$NIL}" 2>/dev/null)
 
 echo "cockpit-reboot: rebooted $n pane(s)"
 [[ "$mode" == "one" && "$n" == 0 ]] && { echo "cockpit-reboot: no pane matched '$target'" >&2; exit 1; }

@@ -50,7 +50,7 @@ next_titles=0
 # can't pass through -F. Fix: tab-separate but emit a <nil> token for any blank
 # field so nothing is ever empty (→ no collapse), then restore "" after reading.
 TAB=$'\t'; NIL='<nil>'
-PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@born,#{@born},$NIL}${TAB}#{?@agent,#{@agent},claude}${TAB}#{?@hook_state,#{@hook_state},$NIL}${TAB}#{?@hook_at,#{@hook_at},$NIL}"
+PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@born,#{@born},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@hook_state,#{@hook_state},$NIL}${TAB}#{?@hook_at,#{@hook_at},$NIL}${TAB}#{?@state,#{@state},$NIL}"
 # How long an event-driven hook state (set by cockpit-hook) is trusted before we
 # fall back to tail-parsing the transcript. Active sessions refresh @hook_at on
 # every event, so this only bounds how long a stale state lingers after a missed
@@ -110,13 +110,13 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
   # per-cycle, per-window tallies (workspaces = windows)
   declare -A WCOUNT=() WSTATE=()
   nA=0; nF=0; nI=0
-  while IFS="$TAB" read -r win pid sid cwd curlabel born agent hookstate hookat; do
+  while IFS="$TAB" read -r win pid sid cwd curlabel born agent hookstate hookat stateopt; do
     [[ -n "$win" ]] || continue
     [[ "$sid" == "$NIL" ]] && sid=""; [[ "$cwd" == "$NIL" ]] && cwd=""
     [[ "$curlabel" == "$NIL" ]] && curlabel=""; [[ "$born" == "$NIL" ]] && born=""
-    [[ "$hookstate" == "$NIL" ]] && hookstate=""; [[ "$hookat" == "$NIL" ]] && hookat=""
-    [[ -n "$agent" ]] || agent=claude
+    [[ "$agent" == "$NIL" ]] && agent=""; [[ "$hookstate" == "$NIL" ]] && hookstate=""; [[ "$hookat" == "$NIL" ]] && hookat=""; [[ "$stateopt" == "$NIL" ]] && stateopt=""
     WCOUNT[$win]=$(( ${WCOUNT[$win]:-0} + 1 ))
+    [[ "$agent" == claude || "$agent" == codex ]] || continue
     if [[ -z "$sid" ]]; then
       # a pending NEW session (Alt-N): claim the transcript that appeared for this
       # pane's agent+cwd after it was born, then track it like any other.
@@ -160,7 +160,7 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     # @state is read by cockpit-next — but writing ANY pane option repaints that
     # pane's border line, so only write on change (else an idle pane's title
     # flickers every cycle).
-    if [[ "${LASTSTATE[$pid]:-}" != "$state" ]]; then
+    if [[ "${LASTSTATE[$pid]:-}" != "$state" || "$stateopt" != "$state" ]]; then
       $TMUX set -p -t "$pid" @state "$state"; LASTSTATE[$pid]="$state"
     fi
 
