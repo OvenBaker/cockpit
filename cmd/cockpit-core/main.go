@@ -286,12 +286,28 @@ func resolvePane(socket, credential, locator string) (map[string]any, error) {
 func daemon(args []string) {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	root := fs.String("test-root", "", "isolated test root")
+	runtimeRoot := fs.String("runtime-root", "", "private controller runtime root for --live-cockpit")
 	socket := fs.String("socket", "", "control socket")
 	tmuxSocket := fs.String("tmux-socket", "", "throwaway tmux socket")
 	credentials := fs.String("credentials-file", "", "private controller credential registry")
+	liveCockpit := fs.Bool("live-cockpit", false, "admit only the named Cockpit tmux socket")
 	fs.Parse(args)
-	if *root == "" || *socket == "" || *tmuxSocket == "" || *credentials == "" {
-		fatal("daemon requires --test-root --socket --tmux-socket --credentials-file")
+	if *liveCockpit {
+		if *runtimeRoot == "" || *socket == "" || *credentials == "" || *root != "" || *tmuxSocket != "" {
+			fatal("--live-cockpit requires --runtime-root --socket --credentials-file and rejects --test-root/--tmux-socket")
+		}
+		d, err := core.NewLiveCockpitDaemon(*runtimeRoot, *socket, *credentials)
+		if err != nil {
+			fatal(err.Error())
+		}
+		defer d.Close()
+		if err := d.Serve(); err != nil {
+			fatal(err.Error())
+		}
+		return
+	}
+	if *root == "" || *socket == "" || *tmuxSocket == "" || *credentials == "" || *runtimeRoot != "" {
+		fatal("daemon requires --test-root --socket --tmux-socket --credentials-file (or --live-cockpit with --runtime-root)")
 	}
 	d, err := core.NewDaemonWithCredentials(*root, *socket, *tmuxSocket, *credentials)
 	if err != nil {

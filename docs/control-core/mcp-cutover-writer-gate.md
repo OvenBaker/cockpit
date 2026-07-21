@@ -1,8 +1,9 @@
 # MCP cutover-readiness writer gate packet
 
-**Scope:** reversible local readiness only. This branch does not start a live
-Cockpit controller, remove/replace wrappers, install a global client config,
-or modify Cockpit web or Orbital.
+**Scope:** an explicit, owner-gated live Cockpit admission path plus reversible
+local readiness. This branch does not start a live Cockpit controller,
+remove/replace wrappers, install a global client config, or modify Cockpit web
+or Orbital.
 
 ## Reviewer probes
 
@@ -20,18 +21,21 @@ or modify Cockpit web or Orbital.
    wrappers and emits no global configuration change.
 5. The smoke transcript must exercise list, status, capture, wait and nudge
    through MCP against a disposable tmux server, with read parity against ctl.
+6. `daemon --live-cockpit` has no tmux target argument and is hardwired to
+   `cockpit`; it requires `--runtime-root`, `--socket`, and the existing
+   private registry. Ordinary constructors and `--tmux-socket cockpit` remain
+   refused. The live-mode test uses a fresh random equivalent server only.
 
 ## Focused evidence
 
 ```text
-go test ./internal/core -run 'Test(MCP(Vertical|Nudge|Status|Private|Cutover)|CredentialRegistry)' -count=1 -v
-go test ./internal/core -run TestControllerRejectsPublicCredentialRegistry -count=1 -v
-bash tests/check-protocol.sh
-npx tsc --project tsconfig.json
+GOCACHE=/tmp/cp-core-go-cache go test ./internal/core -run TestLiveCockpitAdmissionParityOnEquivalentSocket -count=1 -v  PASS
+GOCACHE=/tmp/cp-core-go-cache go test ./internal/core -run TestMCPCutoverParitySmoke -count=1 -v  PASS
 bash -n scripts/mcp-local-setup.sh
+git diff --check
 ```
 
 The repository-wide Slice 0/1 gates from merged PR #2 are retained as prior
-evidence. This branch changes authentication enforcement but not the V1 frame
-shape or the tmux ownership model; its focused authority/config plus parity
-evidence is included above for this narrow cutover-ready increment.
+evidence. This branch changes only live Cockpit admission; it leaves the V1
+frame shape, credential registry, identity/CAS/fencing, method registry, and
+tmux ownership model intact.

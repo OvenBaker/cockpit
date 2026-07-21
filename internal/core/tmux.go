@@ -10,7 +10,10 @@ import (
 	"strings"
 )
 
-type tmux struct{ socket, trace string }
+type tmux struct {
+	socket, trace    string
+	allowLiveCockpit bool
+}
 
 func (t tmux) run(args ...string) ([]byte, error) {
 	return t.runTrace("", "", args...)
@@ -20,7 +23,7 @@ func (t tmux) runSensitive(traceRecord, errorLabel string, args ...string) ([]by
 }
 func (t tmux) runTrace(traceRecord, errorLabel string, args ...string) ([]byte, error) {
 	argv := append([]string{"-L", t.socket}, args...)
-	if t.socket == "cockpit" {
+	if t.socket == "cockpit" && !t.allowLiveCockpit {
 		return nil, derr("INTERNAL", "live cockpit socket refused")
 	}
 	if t.trace != "" {
@@ -76,7 +79,7 @@ func (t tmux) capturePane(ctx context.Context, pane string, lines int) ([]byte, 
 	// The caller validates the exact stable target and the finite line bound.
 	args := []string{"capture-pane", "-p", "-e", "-t", pane, "-S", fmt.Sprint(-lines + 1)}
 	argv := append([]string{"-L", t.socket}, args...)
-	if t.socket == "cockpit" {
+	if t.socket == "cockpit" && !t.allowLiveCockpit {
 		return nil, derr("INTERNAL", "live cockpit socket refused")
 	}
 	if t.trace != "" {
