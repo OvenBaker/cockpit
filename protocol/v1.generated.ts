@@ -24,6 +24,7 @@ export interface MethodParams {
   "state.snapshot": EmptyParams;
   "capabilities.get": EmptyParams;
   "pane.inspect": PaneInspectParams;
+  "pane.status": PaneInspectParams;
   "pane.resolve": { canonical: string };
   "pane.capture": CaptureParams;
   "operation.get": OperationGetParams;

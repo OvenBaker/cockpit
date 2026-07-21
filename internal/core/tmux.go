@@ -94,11 +94,11 @@ func (t tmux) interact(pane, action, text string) error {
 	var args []string
 	switch action {
 	case "nudge", "resume":
-		args = []string{"send-keys", "-t", pane, "-l", text, "Enter"}
+		args = []string{"send-keys", "-t", pane, "-l", text, ";", "send-keys", "-t", pane, "Enter"}
 	case "pause":
 		args = []string{"send-keys", "-t", pane, "C-c"}
 	case "compact":
-		args = []string{"send-keys", "-t", pane, "-l", "/compact", "Enter"}
+		args = []string{"send-keys", "-t", pane, "-l", "/compact", ";", "send-keys", "-t", pane, "Enter"}
 	default:
 		return derr("INTERNAL", "unknown typed interaction")
 	}

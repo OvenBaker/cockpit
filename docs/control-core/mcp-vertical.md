@@ -8,15 +8,18 @@ controller socket.
 
 ## Local configuration (not installed by this slice)
 
-Replace the placeholders with the controller's local socket and credential;
-do not put a credential in a checked-in configuration file.
+Replace the socket placeholder with the controller's local socket. `mcp-stdio`
+requires `COCKPIT_MCP_CREDENTIAL_FILE`: an absolute, regular private file
+(mode `0600` or stricter) containing the local credential. It refuses a
+missing, public, malformed, or denied credential and never accepts one in
+argv or in checked-in configuration.
 
 Codex:
 
 ```toml
 [mcp_servers.cockpit]
 command = "/absolute/path/to/cockpit-core"
-args = ["mcp-stdio", "--socket", "/absolute/private/control.sock", "--credential", "${COCKPIT_MCP_CREDENTIAL}"]
+args = ["mcp-stdio", "--socket", "/absolute/private/control.sock"]
 ```
 
 Claude Code:
@@ -26,7 +29,7 @@ Claude Code:
   "mcpServers": {
     "cockpit": {
       "command": "/absolute/path/to/cockpit-core",
-      "args": ["mcp-stdio", "--socket", "/absolute/private/control.sock", "--credential", "${COCKPIT_MCP_CREDENTIAL}"]
+      "args": ["mcp-stdio", "--socket", "/absolute/private/control.sock"]
     }
   }
 }

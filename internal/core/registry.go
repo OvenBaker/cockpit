@@ -15,7 +15,7 @@ type MethodSpec struct {
 
 var methodRegistry = []MethodSpec{
 	{"state.snapshot", "state:read", true, "list_panes", "List Cockpit panes with stable identities and current versions.", false, false},
-	{"pane.inspect", "state:read", true, "get_status", "Get one pane by stable paneRef.", false, false},
+	{"pane.status", "state:read", true, "get_status", "Get one pane's controller-read provider, observed state, and effective capabilities.", false, false},
 	{"pane.capture", "capture:sanitized", true, "capture_pane", "Read a bounded, redacted tail from one pane.", false, false},
 	{"wait.for_change", "events:wait", true, "wait_for_state", "Wait for a pane version or operation terminal transition.", false, false},
 	{"capabilities.get", "state:read", true, "get_capabilities", "Get the effective controller capabilities.", false, false},
@@ -60,7 +60,7 @@ func mcpSchema(method string) map[string]any {
 	switch method {
 	case "state.snapshot", "capabilities.get":
 		return map[string]any{"type": "object", "additionalProperties": false}
-	case "pane.inspect":
+	case "pane.inspect", "pane.status":
 		return map[string]any{"type": "object", "properties": target, "anyOf": []any{map[string]any{"required": []string{"paneRef"}}, map[string]any{"required": []string{"locator"}}}, "additionalProperties": false}
 	case "pane.capture":
 		target["lines"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 200}

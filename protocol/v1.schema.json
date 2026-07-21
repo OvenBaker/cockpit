@@ -9,7 +9,7 @@
   "properties": {
     "jsonrpc": {"const": "2.0"},
     "id": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "integer"}]},
-    "method": {"enum": ["session.open", "controller.health", "state.snapshot", "pane.inspect", "pane.resolve", "pane.capture", "capabilities.get", "operation.get", "metadata.set_display", "interaction.nudge", "interaction.pause", "interaction.compact", "interaction.resume", "events.subscribe", "events.unsubscribe", "wait.for_change", "rpc.cancel"]},
+    "method": {"enum": ["session.open", "controller.health", "state.snapshot", "pane.inspect", "pane.status", "pane.resolve", "pane.capture", "capabilities.get", "operation.get", "metadata.set_display", "interaction.nudge", "interaction.pause", "interaction.compact", "interaction.resume", "events.subscribe", "events.unsubscribe", "wait.for_change", "rpc.cancel"]},
     "params": {"type": "object"}
   },
   "oneOf": [
@@ -18,6 +18,7 @@
     {"properties": {"method": {"const": "state.snapshot"}, "params": {"$ref": "#/$defs/empty"}}},
     {"properties": {"method": {"const": "capabilities.get"}, "params": {"$ref": "#/$defs/empty"}}},
     {"properties": {"method": {"const": "pane.inspect"}, "params": {"$ref": "#/$defs/paneInspect"}}},
+    {"properties": {"method": {"const": "pane.status"}, "params": {"$ref": "#/$defs/paneInspect"}}},
     {"properties": {"method": {"const": "pane.resolve"}, "params": {"$ref": "#/$defs/paneResolve"}}},
     {"properties": {"method": {"const": "pane.capture"}, "params": {"$ref": "#/$defs/paneCapture"}}},
     {"properties": {"method": {"const": "operation.get"}, "params": {"$ref": "#/$defs/operationGet"}}},

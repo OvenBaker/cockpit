@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gareth/cockpit-core/internal/core"
@@ -40,21 +42,34 @@ func main() {
 func mcpStdio(args []string) {
 	fs := flag.NewFlagSet("mcp-stdio", flag.ExitOnError)
 	socket := fs.String("socket", "", "control socket")
-	credential := fs.String("credential", "test-local", "local controller credential")
 	fs.Parse(args)
 	if *socket == "" {
 		fatal("mcp-stdio requires --socket")
+	}
+	credential, err := privateMCPCredential()
+	if err != nil {
+		fatal("mcp-stdio credential unavailable")
 	}
 	c, err := net.Dial("unix", *socket)
 	if err != nil {
 		fatal(err.Error())
 	}
 	defer c.Close()
-	if err = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp", "claimedProfile": "mcp-local", "credential": *credential}}); err != nil {
+	if err = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp", "claimedProfile": "mcp-local", "credential": credential}}); err != nil {
 		fatal(err.Error())
 	}
-	if _, err = readFrame(c); err != nil {
+	opened, err := readFrame(c)
+	if err != nil {
 		fatal(err.Error())
+	}
+	var openedResponse struct {
+		Result struct {
+			Ready bool `json:"ready"`
+		} `json:"result"`
+		Error any `json:"error"`
+	}
+	if json.Unmarshal(opened, &openedResponse) != nil || openedResponse.Error != nil || !openedResponse.Result.Ready {
+		fatal("mcp-stdio controller session denied")
 	}
 	out := bufio.NewWriter(os.Stdout)
 	var outMu, connMu, pendingMu sync.Mutex
@@ -111,7 +126,7 @@ func mcpStdio(args []string) {
 		if !ok || loc == "" {
 			return nil, errors.New("paneRef or canonical locator is required")
 		}
-		return resolvePane(*socket, *credential, loc)
+		return resolvePane(*socket, credential, loc)
 	}
 	s := bufio.NewScanner(os.Stdin)
 	s.Buffer(make([]byte, 4096), maxFrame)
@@ -170,7 +185,8 @@ func mcpStdio(args []string) {
 			write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": map[string]any{"content": []map[string]string{{"type": "text", "text": "unknown tool"}}, "isError": true}})
 			continue
 		}
-		if method != "state.snapshot" && method != "capabilities.get" {
+		operationOnlyWait := method == "wait.for_change" && call.Arguments["operationRef"] != nil && call.Arguments["paneRef"] == nil && call.Arguments["locator"] == nil
+		if method != "state.snapshot" && method != "capabilities.get" && !operationOnlyWait {
 			if target, e := resolve(call.Arguments); e != nil {
 				write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": map[string]any{"content": []map[string]string{{"type": "text", "text": e.Error()}}, "isError": true}})
 				continue
@@ -200,6 +216,26 @@ func mcpStdio(args []string) {
 	}
 }
 
+func privateMCPCredential() (string, error) {
+	path := os.Getenv("COCKPIT_MCP_CREDENTIAL_FILE")
+	if path == "" || !filepath.IsAbs(path) {
+		return "", errors.New("credential file is required")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return "", errors.New("credential file must be private")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	credential := strings.TrimSpace(string(b))
+	if credential == "" || len(credential) > 512 || strings.ContainsAny(credential, "\x00\r\n") {
+		return "", errors.New("credential file is invalid")
+	}
+	return credential, nil
+}
+
 func resolvePane(socket, credential, locator string) (map[string]any, error) {
 	c, err := net.Dial("unix", socket)
 	if err != nil {
@@ -210,8 +246,18 @@ func resolvePane(socket, credential, locator string) (map[string]any, error) {
 	if err = writeFrame(c, open); err != nil {
 		return nil, err
 	}
-	if _, err = readFrame(c); err != nil {
+	opened, err := readFrame(c)
+	if err != nil {
 		return nil, err
+	}
+	var openedResponse struct {
+		Result struct {
+			Ready bool `json:"ready"`
+		} `json:"result"`
+		Error any `json:"error"`
+	}
+	if json.Unmarshal(opened, &openedResponse) != nil || openedResponse.Error != nil || !openedResponse.Result.Ready {
+		return nil, errors.New("controller session denied")
 	}
 	if err = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "resolve", "method": "pane.resolve", "params": map[string]any{"canonical": locator}}); err != nil {
 		return nil, err

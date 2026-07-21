@@ -764,6 +764,21 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 			return nil, e
 		}
 		return x.view(), nil
+	case "pane.status":
+		var p struct {
+			PaneRef string `json:"paneRef"`
+		}
+		if e := strict(r.Params, &p); e != nil || p.PaneRef == "" {
+			return nil, rpcStandard(-32602, "invalid params")
+		}
+		x, e := d.st.pane(p.PaneRef)
+		if e == sql.ErrNoRows {
+			return nil, derr("TARGET_NOT_FOUND", "pane not found")
+		}
+		if e != nil {
+			return nil, e
+		}
+		return d.observePane(x).view(), nil
 	case "pane.resolve":
 		var p struct {
 			Canonical string `json:"canonical"`
@@ -869,7 +884,7 @@ func (p pane) view() map[string]any {
 		p.Provider = "unknown"
 	}
 	if p.State == "" {
-		p.State = "waiting"
+		p.State = "unknown"
 	}
 	lifecycle, capabilities := "active", []string{"metadata:write"}
 	if p.Fenced {
@@ -903,7 +918,7 @@ func (d *daemon) observePane(p pane) pane {
 	if se == nil && (state == "waiting" || state == "working" || state == "paused") {
 		p.State = state
 	} else {
-		p.State = "waiting"
+		p.State = "unknown"
 	}
 	return p
 }
