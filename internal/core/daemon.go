@@ -268,7 +268,7 @@ func (d *daemon) reconcile() error {
 	} else if got, ge := d.tm.globalOption("@cockpit_server_fingerprint"); ge != nil || got != fp {
 		return derr("CONTROLLER_NOT_READY", "tmux server fingerprint does not match durable controller")
 	}
-	b, e := d.tm.run("list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{@cockpit_workspace_ref}\t#{@cockpit_pane_ref}\t#{@cockpit_pane_generation}\t#{@cockpit_pane_version}\t#{@cockpit_badge}")
+	b, e := d.tm.run("list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{@cockpit_workspace_ref}\t#{@cockpit_pane_ref}\t#{@cockpit_pane_generation}\t#{@cockpit_pane_version}\t#{@cockpit_badge}\t#{@cockpit_provider}\t#{@cockpit_state}")
 	if e != nil {
 		return e
 	}
@@ -284,7 +284,7 @@ func (d *daemon) reconcile() error {
 			continue
 		}
 		f := strings.Split(line, "\t")
-		if len(f) != 8 {
+		if len(f) != 10 {
 			return fmt.Errorf("unexpected tmux inventory")
 		}
 		wid, pid, wref, pref := f[0], f[2], f[3], f[4]
@@ -319,7 +319,7 @@ func (d *daemon) reconcile() error {
 			continue
 		}
 		f := strings.Split(line, "\t")
-		if len(f) != 8 {
+		if len(f) != 10 {
 			return fmt.Errorf("unexpected tmux inventory")
 		}
 		wid, name, pid, wref, pref := f[0], f[1], f[2], f[3], f[4]
@@ -685,7 +685,7 @@ func validClaimedProfile(profile string) bool {
 }
 func caps(profile string) []string {
 	if profile == "local-operator" {
-		return []string{"state:read", "operations:read", "events:wait", "metadata:write"}
+		return []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume"}
 	}
 	return []string{"state:read", "operations:read", "events:wait"}
 }
@@ -743,6 +743,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		}
 		out := make([]any, 0, len(ps))
 		for _, p := range ps {
+			p = d.observePane(p)
 			out = append(out, p.view())
 		}
 		return map[string]any{"controllerEpoch": d.epoch, "eventSeq": d.currentEventSeq(), "panes": out}, nil
@@ -763,7 +764,27 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		if e != nil {
 			return nil, e
 		}
-		return x.view(), nil
+		return d.observePane(x).view(), nil
+	case "pane.resolve":
+		var p struct {
+			Canonical string `json:"canonical"`
+		}
+		if e := strict(r.Params, &p); e != nil || !regexp.MustCompile(`^[A-Za-z0-9_.-]+:[0-9]+\.[0-9]+$`).MatchString(p.Canonical) {
+			return nil, rpcStandard(-32602, "invalid params")
+		}
+		return d.resolveCanonical(p.Canonical)
+	case "pane.capture":
+		var p struct {
+			PaneRef string `json:"paneRef"`
+			Lines   int    `json:"lines"`
+		}
+		if e := strict(r.Params, &p); e != nil || p.PaneRef == "" || p.Lines < 1 || p.Lines > 200 {
+			return nil, rpcStandard(-32602, "invalid params")
+		}
+		if !has(caps(profile), "capture:sanitized") {
+			return nil, derr("PERMISSION_DENIED", "capture capability absent")
+		}
+		return d.capture(p.PaneRef, p.Lines)
 	case "operation.get":
 		var p struct {
 			OperationRef string `json:"operationRef"`
@@ -788,6 +809,16 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 			return nil, rpcStandard(-32602, "invalid params")
 		}
 		return d.setBadge(caller, p)
+	case "interaction.nudge", "interaction.pause", "interaction.compact", "interaction.resume":
+		spec, _ := specForMethod(r.Method)
+		if !has(caps(profile), spec.Capability) {
+			return nil, derr("PERMISSION_DENIED", "interaction capability absent")
+		}
+		var p interactionParams
+		if e := strict(r.Params, &p); e != nil || p.Protocol == "" || p.PaneRef == "" || p.IdempotencyKey == "" || p.Deadline == "" {
+			return nil, rpcStandard(-32602, "invalid params")
+		}
+		return d.interact(caller, r.Method, p)
 	case "events.subscribe":
 		if !has(caps(profile), "events:wait") {
 			return nil, derr("PERMISSION_DENIED", "events capability absent")
@@ -835,11 +866,61 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 	}
 }
 func (p pane) view() map[string]any {
+	if p.Provider == "" {
+		p.Provider = "unknown"
+	}
+	if p.State == "" {
+		p.State = "waiting"
+	}
 	lifecycle, capabilities := "active", []string{"metadata:write"}
 	if p.Fenced {
 		lifecycle, capabilities = "recovery-required", []string{}
 	}
-	return map[string]any{"paneRef": p.Ref, "workspaceRef": p.WorkspaceRef, "generation": p.Generation, "resourceVersion": p.Version, "lifecycle": lifecycle, "locator": map[string]any{"paneId": p.PaneID, "windowId": p.WindowID}, "display": map[string]any{"badge": p.Badge}, "capabilities": capabilities}
+	if p.Provider == "claude" || p.Provider == "codex" {
+		if p.State == "waiting" {
+			capabilities = append(capabilities, "interaction:nudge", "interaction:compact")
+		}
+		if p.State == "working" {
+			capabilities = append(capabilities, "interaction:pause")
+		}
+		if p.State == "paused" {
+			capabilities = append(capabilities, "interaction:resume")
+		}
+	}
+	return map[string]any{"paneRef": p.Ref, "workspaceRef": p.WorkspaceRef, "generation": p.Generation, "resourceVersion": p.Version, "lifecycle": lifecycle, "provider": p.Provider, "observedState": p.State, "locator": map[string]any{"paneId": p.PaneID, "windowId": p.WindowID}, "display": map[string]any{"badge": p.Badge}, "capabilities": capabilities}
+}
+
+// Provider and observed state are deliberately not client writable and are not
+// persisted from terminal output in this slice. They are controller-read tmux
+// stamps; unavailable/invalid values fail closed as unsupported.
+func (d *daemon) observePane(p pane) pane {
+	provider, pe := d.tm.paneOption(p.PaneID, "@cockpit_provider")
+	state, se := d.tm.paneOption(p.PaneID, "@cockpit_state")
+	if pe == nil && (provider == "claude" || provider == "codex") {
+		p.Provider = provider
+	} else {
+		p.Provider = "unknown"
+	}
+	if se == nil && (state == "waiting" || state == "working" || state == "paused") {
+		p.State = state
+	} else {
+		p.State = "waiting"
+	}
+	return p
+}
+
+func (d *daemon) resolveCanonical(canonical string) (any, error) {
+	b, err := d.tm.run("list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}\t#{@cockpit_pane_ref}")
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) == 2 && f[0] == canonical && f[1] != "" {
+			return d.dispatch(context.Background(), "local-operator", "resolver", rpcRequest{Method: "pane.inspect", Params: json.RawMessage(fmt.Sprintf(`{"paneRef":%q}`, f[1]))})
+		}
+	}
+	return nil, derr("TARGET_NOT_FOUND", "canonical pane locator not found")
 }
 func has(xs []string, x string) bool {
 	for _, v := range xs {
@@ -1010,6 +1091,173 @@ func (d *daemon) setBadgeLocked(caller string, p badgeParams, deadline time.Time
 		return nil, d.recoveryAfterEffect(ref, x.Ref, x.Version, e)
 	}
 	d.publishEvent(x.Ref, v, "operation.completed", ref)
+	return op, nil
+}
+
+func (d *daemon) capture(ref string, lines int) (any, error) {
+	p, err := d.st.pane(ref)
+	if err == sql.ErrNoRows {
+		return nil, derr("TARGET_NOT_FOUND", "pane not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if p.Fenced {
+		return nil, derr("CONTROLLER_NOT_READY", "pane is fenced pending recovery")
+	}
+	// Recheck stable identity immediately before the privacy-sensitive driver
+	// read. A reused tmux pane id must never disclose another pane's output.
+	stamp, err := d.tm.paneOption(p.PaneID, "@cockpit_pane_ref")
+	if err != nil || stamp != p.Ref {
+		return nil, derr("CONFLICT_GENERATION", "pane locator or stable stamp changed")
+	}
+	b, err := d.tm.capturePane(p.PaneID, lines)
+	if err != nil {
+		return nil, err
+	}
+	text, truncated := sanitizeCapture(b, 64*1024)
+	return map[string]any{"paneRef": p.Ref, "generation": p.Generation, "resourceVersion": p.Version, "lines": lines, "text": text, "redacted": true, "truncated": truncated, "private": true}, nil
+}
+
+func sanitizeCapture(b []byte, max int) (string, bool) {
+	// Strip terminal controls first. Redaction is intentionally conservative:
+	// common bearer/token assignments are replaced, and captures remain marked
+	// private/untrusted rather than being treated as secret-free.
+	s := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r >= 0x20 && r != 0x7f {
+			return r
+		}
+		return -1
+	}, string(b))
+	secret := regexp.MustCompile(`(?i)(api[_-]?key|token|password|secret)\s*([=:])\s*[^\s]+`)
+	s = secret.ReplaceAllString(s, "$1$2[REDACTED]")
+	truncated := len(s) > max
+	if truncated {
+		s = s[:max]
+		for !utf8.ValidString(s) {
+			s = s[:len(s)-1]
+		}
+	}
+	return s, truncated
+}
+
+func (d *daemon) interact(caller, method string, p interactionParams) (any, error) {
+	if p.Protocol != Protocol {
+		return nil, derr("UNSUPPORTED_PROTOCOL", "protocol 1.0 required")
+	}
+	if err := validateIdempotency(p.IdempotencyKey, time.Now()); err != nil {
+		return nil, err
+	}
+	dl, err := time.Parse(time.RFC3339, p.Deadline)
+	if err != nil || !dl.After(time.Now()) || time.Until(dl) > 30*time.Minute {
+		return nil, derr("DEADLINE_EXCEEDED", "deadline expired")
+	}
+	if len(p.Expectations) != 1 || p.Expectations[0].Kind != "pane" || p.Expectations[0].PaneRef != p.PaneRef {
+		return nil, derr("INVALID_REQUEST", "one exact pane expectation is required")
+	}
+	action := strings.TrimPrefix(method, "interaction.")
+	if (action == "nudge" || action == "resume") && (len(p.Text) < 1 || len(p.Text) > 16384 || !utf8.ValidString(p.Text) || strings.ContainsAny(p.Text, "\x00\x1b\r\n")) {
+		return nil, derr("INVALID_REQUEST", "interaction text is not bounded literal text")
+	}
+	if (action == "pause" || action == "compact") && p.Text != "" {
+		return nil, derr("INVALID_REQUEST", "this interaction does not accept text")
+	}
+	m := d.lockFor(p.PaneRef)
+	m.Lock()
+	defer m.Unlock()
+	if time.Now().After(dl) {
+		return nil, derr("DEADLINE_EXCEEDED", "deadline expired")
+	}
+	x, err := d.st.pane(p.PaneRef)
+	if err == sql.ErrNoRows {
+		return nil, derr("TARGET_NOT_FOUND", "pane not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	x = d.observePane(x)
+	ex := p.Expectations[0]
+	if x.Fenced {
+		return nil, derr("CONTROLLER_NOT_READY", "pane is fenced pending recovery")
+	}
+	if ex.Generation != x.Generation {
+		return nil, derr("CONFLICT_GENERATION", "pane generation changed")
+	}
+	if ex.ResourceVersion != x.Version {
+		return nil, derr("CONFLICT_VERSION", "pane version changed")
+	}
+	if ex.Material.Lifecycle != "active" {
+		return nil, derr("CONFLICT_MATERIAL_STATE", "pane lifecycle changed")
+	}
+	if x.Provider != "claude" && x.Provider != "codex" {
+		return nil, derr("CAPABILITY_ABSENT", "unsupported provider")
+	}
+	want := map[string]string{"nudge": "waiting", "compact": "waiting", "pause": "working", "resume": "paused"}[action]
+	if x.State != want {
+		return nil, derr("CONFLICT_MATERIAL_STATE", "pane is not in the required observed state")
+	}
+	if !has(x.view()["capabilities"].([]string), "interaction:"+action) {
+		return nil, derr("CAPABILITY_ABSENT", "interaction capability absent")
+	}
+	refStamp, re := d.tm.paneOption(x.PaneID, "@cockpit_pane_ref")
+	genStamp, ge := d.tm.paneOption(x.PaneID, "@cockpit_pane_generation")
+	verStamp, ve := d.tm.paneOption(x.PaneID, "@cockpit_pane_version")
+	if re != nil || ge != nil || ve != nil || refStamp != x.Ref || genStamp != fmt.Sprint(x.Generation) || verStamp != fmt.Sprint(x.Version) {
+		return nil, derr("CONFLICT_GENERATION", "pane locator or stable stamp changed")
+	}
+	digestText := digest(p.Text)
+	intent := fmt.Sprintf("%s:%s:%d:%d:%s", action, p.PaneRef, ex.Generation, ex.ResourceVersion, digestText)
+	var oldRef, oldIntent, status, result string
+	err = d.st.db.QueryRow("SELECT ref,intent,status,result FROM operations WHERE caller=? AND method=? AND idem_key=?", caller, method, p.IdempotencyKey).Scan(&oldRef, &oldIntent, &status, &result)
+	if err == nil {
+		if oldIntent != intent {
+			return nil, derr("IDEMPOTENCY_CONFLICT", "idempotency key has a different intent")
+		}
+		var prior any
+		_ = json.Unmarshal([]byte(result), &prior)
+		if prior == nil {
+			prior = map[string]any{"operationRef": oldRef, "status": status}
+		}
+		return map[string]any{"replayed": true, "operation": prior}, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+	ref := id("cpo_")
+	if _, err = d.st.db.Exec("INSERT INTO operations(ref,caller,method,idem_key,intent,status,pane_ref,badge,target_version,result,created_at) VALUES(?,?,?,?,?,'prepared',?,'',?,'null',?)", ref, caller, method, p.IdempotencyKey, intent, x.Ref, x.Version, time.Now().Unix()); err != nil {
+		return nil, err
+	}
+	if err = d.tm.interact(x.PaneID, action, p.Text); err != nil {
+		return nil, d.recoveryAfterEffect(ref, x.Ref, x.Version, err)
+	}
+	if err = d.tm.setPaneVersion(x.PaneID, x.Version+1); err != nil {
+		return nil, d.recoveryAfterEffect(ref, x.Ref, x.Version, err)
+	}
+	// Delivery is not completion.  In this accelerated slice there is no
+	// provider observer yet, so pause/compact cannot claim success merely from
+	// elapsed time. The durable outcome is explicitly unconfirmed and callers
+	// use wait/status after an independent provider observation.
+	v := x.Version + 1
+	op := map[string]any{"operationRef": ref, "status": "effect-delivered-unconfirmed", "paneRef": x.Ref, "generation": x.Generation, "resourceVersion": v, "provider": x.Provider}
+	rb, _ := json.Marshal(op)
+	tx, err := d.st.db.Begin()
+	if err != nil {
+		return nil, d.recoveryAfterEffect(ref, x.Ref, x.Version, err)
+	}
+	if err = mustTx(tx, "UPDATE panes SET version=? WHERE ref=?", v, x.Ref); err == nil {
+		err = mustTx(tx, "UPDATE operations SET status='effect-delivered-unconfirmed',result=? WHERE ref=?", string(rb), ref)
+	}
+	if err == nil {
+		err = mustTx(tx, "INSERT INTO audit(at,caller,method,pane_ref,before_digest,after_digest) VALUES(?,?,?,?,?,?)", time.Now().Unix(), caller, method, x.Ref, digestText, fmt.Sprintf("bytes:%d", len(p.Text)))
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, d.recoveryAfterEffect(ref, x.Ref, x.Version, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, d.recoveryAfterEffect(ref, x.Ref, x.Version, err)
+	}
+	d.publishEvent(x.Ref, v, "operation.effect-delivered-unconfirmed", ref)
 	return op, nil
 }
 func (d *daemon) markFailed(operationRef string) error {

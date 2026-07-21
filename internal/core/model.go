@@ -57,9 +57,9 @@ func id(prefix string) string {
 }
 
 type pane struct {
-	Ref, WorkspaceRef, WindowID, PaneID, Badge string
-	Generation, Version                        int64
-	Fenced                                     bool
+	Ref, WorkspaceRef, WindowID, PaneID, Badge, Provider, State string
+	Generation, Version                                         int64
+	Fenced                                                      bool
 }
 type workspace struct {
 	Ref, WindowID, Name string
@@ -80,6 +80,14 @@ type badgeParams struct {
 	IdempotencyKey string            `json:"idempotencyKey"`
 	PaneRef        string            `json:"paneRef"`
 	Badge          string            `json:"badge"`
+	Expectations   []paneExpectation `json:"expectations"`
+}
+type interactionParams struct {
+	Protocol       string            `json:"protocol"`
+	Deadline       string            `json:"deadline"`
+	IdempotencyKey string            `json:"idempotencyKey"`
+	PaneRef        string            `json:"paneRef"`
+	Text           string            `json:"text"`
 	Expectations   []paneExpectation `json:"expectations"`
 }
 type sessionParams struct {

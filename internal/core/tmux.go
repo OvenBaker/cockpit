@@ -51,9 +51,37 @@ func (t tmux) setPaneBadgeVersion(pane, badge string, version int64) error {
 	_, e := t.run("set-option", "-p", "-t", pane, "@cockpit_badge", badge, ";", "set-option", "-p", "-t", pane, "@cockpit_pane_version", fmt.Sprint(version))
 	return e
 }
+func (t tmux) setPaneVersion(pane string, version int64) error {
+	_, e := t.run("set-option", "-p", "-t", pane, "@cockpit_pane_version", fmt.Sprint(version))
+	return e
+}
 func (t tmux) paneOption(pane, key string) (string, error) {
 	b, e := t.run("display-message", "-p", "-t", pane, "#{"+key+"}")
 	return strings.TrimSpace(string(b)), e
+}
+func (t tmux) capturePane(pane string, lines int) ([]byte, error) {
+	// The caller validates the exact stable target and the finite line bound.
+	return t.run("capture-pane", "-p", "-e", "-t", pane, "-S", fmt.Sprint(-lines+1))
+}
+
+// interact is intentionally not a general send-keys wrapper.  The only
+// values accepted here are controller-selected typed actions and already
+// validated literal instruction text; no MCP or CLI request can supply keys,
+// a command, an environment, or a tmux target.
+func (t tmux) interact(pane, action, text string) error {
+	var args []string
+	switch action {
+	case "nudge", "resume":
+		args = []string{"send-keys", "-t", pane, "-l", text, "Enter"}
+	case "pause":
+		args = []string{"send-keys", "-t", pane, "C-c"}
+	case "compact":
+		args = []string{"send-keys", "-t", pane, "-l", "/compact", "Enter"}
+	default:
+		return derr("INTERNAL", "unknown typed interaction")
+	}
+	_, e := t.run(args...)
+	return e
 }
 func (t tmux) globalOption(key string) (string, error) {
 	b, e := t.run("show-option", "-gqv", key)
