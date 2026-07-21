@@ -71,7 +71,7 @@ func (w *frameWriter) write(v any) error { w.mu.Lock(); defer w.mu.Unlock(); ret
 // tests. It deliberately admits no sessions; production-capable callers must
 // use NewDaemonWithCredentials.
 func NewDaemon(root, socket, tmuxSocket string) (*daemon, error) {
-	return newDaemon(root, socket, tmuxSocket, nil)
+	return newDaemon(root, socket, tmuxSocket, nil, false)
 }
 
 func NewDaemonWithCredentials(root, socket, tmuxSocket, credentialFile string) (*daemon, error) {
@@ -79,11 +79,25 @@ func NewDaemonWithCredentials(root, socket, tmuxSocket, credentialFile string) (
 	if err != nil {
 		return nil, err
 	}
-	return newDaemon(root, socket, tmuxSocket, auth)
+	return newDaemon(root, socket, tmuxSocket, auth, false)
 }
 
-func newDaemon(root, socket, tmuxSocket string, auth *authenticator) (*daemon, error) {
-	if tmuxSocket == "cockpit" {
+// NewLiveCockpitDaemon is the only production admission path for the named
+// Cockpit tmux server. The target is fixed here rather than supplied by a
+// caller; ordinary constructors continue to refuse that server by default.
+func NewLiveCockpitDaemon(runtimeRoot, socket, credentialFile string) (*daemon, error) {
+	auth, err := loadAuthenticator(credentialFile)
+	if err != nil {
+		return nil, err
+	}
+	return newDaemon(runtimeRoot, socket, "cockpit", auth, true)
+}
+
+// The liveCockpit switch is private so production callers can only select the
+// fixed name through NewLiveCockpitDaemon. Tests exercise the same path with
+// a random throwaway server, never the real Cockpit socket.
+func newDaemon(root, socket, tmuxSocket string, auth *authenticator, liveCockpit bool) (*daemon, error) {
+	if tmuxSocket == "cockpit" && !liveCockpit {
 		return nil, errors.New("refusing live tmux socket cockpit")
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(tmuxSocket) {
@@ -99,8 +113,8 @@ func newDaemon(root, socket, tmuxSocket string, auth *authenticator) (*daemon, e
 	if err := os.MkdirAll(clean, 0700); err != nil {
 		return nil, err
 	}
-	t := tmux{socket: tmuxSocket, trace: tracePath(clean)}
-	serverSocket, e := (tmux{socket: tmuxSocket}).serverSocketPath()
+	t := tmux{socket: tmuxSocket, trace: tracePath(clean), allowLiveCockpit: liveCockpit}
+	serverSocket, e := (tmux{socket: tmuxSocket, allowLiveCockpit: liveCockpit}).serverSocketPath()
 	if e != nil {
 		return nil, e
 	}
@@ -122,7 +136,7 @@ func newDaemon(root, socket, tmuxSocket string, auth *authenticator) (*daemon, e
 	// A root may only use an existing server stamp if its own already-durable
 	// fingerprint agrees. This read-only preflight happens before migration,
 	// keeping an empty precreated control.db and a losing root untouched.
-	serverFP, fpErr := (tmux{socket: tmuxSocket}).globalOption("@cockpit_server_fingerprint")
+	serverFP, fpErr := (tmux{socket: tmuxSocket, allowLiveCockpit: liveCockpit}).globalOption("@cockpit_server_fingerprint")
 	if fpErr != nil {
 		return nil, fpErr
 	}

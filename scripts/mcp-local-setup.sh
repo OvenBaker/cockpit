@@ -20,6 +20,7 @@ if ((remove)); then
   rmdir "$root" 2>/dev/null || true
   exit 0
 fi
+case "$socket" in "$root"/*) ;; *) echo "socket must be inside setup root" >&2; exit 2;; esac
 [[ -x "$binary" ]] || { echo "binary is not executable" >&2; exit 2; }
 mkdir -p "$root"; chmod 700 "$root"; umask 077
 token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
@@ -41,5 +42,6 @@ cat >"$root/claude-mcp.json" <<EOF
 EOF
 touch "$root/.cockpit-mcp-local"; chmod 600 "$root/.cockpit-mcp-local"
 echo "local setup created at $root"
-echo "start a dedicated controller with: $binary daemon --test-root ROOT --socket SOCKET --tmux-socket NAME --credentials-file $root/clients.json"
+echo "throwaway controller: $binary daemon --test-root $root --socket $socket --tmux-socket NAME --credentials-file $root/clients.json"
+echo "owner-gated live controller: $binary daemon --live-cockpit --runtime-root $root --socket $socket --credentials-file $root/clients.json"
 echo "use $root/codex-mcp.toml or $root/claude-mcp.json manually; this script installed nothing globally"
