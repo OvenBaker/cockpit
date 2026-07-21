@@ -23,12 +23,12 @@ import (
 // These tests deliberately use a real random tmux socket, a daemon OS process,
 // and separate ctl OS processes. They never accept the live socket name.
 type fixture struct {
-	t                         *testing.T
-	root, socket, tmux, bin   string
-	daemon                    *exec.Cmd
-	pane                      map[string]any
-	targetPane, nonTargetPane string
-	nonTargetMarker           string
+	t                                                     *testing.T
+	root, socket, tmux, bin, credentials, localCredential string
+	daemon                                                *exec.Cmd
+	pane                                                  map[string]any
+	targetPane, nonTargetPane                             string
+	nonTargetMarker                                       string
 }
 
 func TestSlice01Acceptance(t *testing.T) {
@@ -81,7 +81,8 @@ func newFixture(t *testing.T) *fixture {
 	if o, e := cmd.CombinedOutput(); e != nil {
 		t.Fatalf("build: %v: %s", e, o)
 	}
-	f := &fixture{t: t, root: root, socket: socket, tmux: tmuxSocket, bin: bin, nonTargetMarker: marker}
+	credentials := writeTestCredentials(t, root)
+	f := &fixture{t: t, root: root, socket: socket, tmux: tmuxSocket, bin: bin, credentials: credentials, localCredential: writePrivateCredential(t, root, "test-local"), nonTargetMarker: marker}
 	f.start(false)
 	snap := f.call("state.snapshot", map[string]any{})
 	f.targetPane = strings.TrimSpace(string(mustOutput(t, "tmux", "-L", tmuxSocket, "display-message", "-p", "-t", "slice:0.0", "#{pane_id}")))
@@ -107,7 +108,7 @@ func mustOutput(t *testing.T, name string, args ...string) []byte {
 }
 func (f *fixture) start(crash bool) {
 	f.t.Helper()
-	c := exec.Command(f.bin, "daemon", "--test-root", f.root, "--socket", f.socket, "--tmux-socket", f.tmux)
+	c := exec.Command(f.bin, "daemon", "--test-root", f.root, "--socket", f.socket, "--tmux-socket", f.tmux, "--credentials-file", f.credentials)
 	barriers := filepath.Join(f.root, "barriers")
 	if err := os.MkdirAll(barriers, 0700); err != nil {
 		f.t.Fatal(err)
@@ -128,6 +129,31 @@ func (f *fixture) start(crash bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	f.t.Fatal("daemon did not create socket")
+}
+func writeTestCredentials(t *testing.T, root string) string {
+	t.Helper()
+	path := filepath.Join(root, "clients.json")
+	registry := map[string]any{"version": 1, "clients": []any{
+		map[string]any{"credential": "test-local", "profile": "local-operator", "capabilities": []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume"}},
+		map[string]any{"credential": "test-read", "profile": "read-only", "capabilities": []string{"state:read", "operations:read", "events:wait"}},
+		map[string]any{"credential": "test-mcp", "clientId": "cockpit-mcp", "profile": "mcp-local", "capabilities": []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume"}},
+	}}
+	b, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+func writePrivateCredential(t *testing.T, root, credential string) string {
+	t.Helper()
+	path := filepath.Join(root, "local.token")
+	if err := os.WriteFile(path, []byte(credential), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 func (f *fixture) stop() {
 	if f.daemon != nil && f.daemon.Process != nil {
@@ -154,7 +180,7 @@ func run(t *testing.T, name string, args ...string) {
 func (f *fixture) call(method string, params any) map[string]any {
 	f.t.Helper()
 	p, _ := json.Marshal(params)
-	c := exec.Command(f.bin, "ctl", "--socket", f.socket, method, string(p))
+	c := exec.Command(f.bin, "ctl", "--socket", f.socket, "--credential-file", f.localCredential, method, string(p))
 	if o, e := c.Output(); e != nil {
 		f.t.Fatalf("ctl %s: %v", method, e)
 	} else {
@@ -202,7 +228,7 @@ func (f *fixture) raceCAS(t *testing.T) {
 		go func(i int, p map[string]any) {
 			defer wg.Done()
 			raw, _ := json.Marshal(p)
-			c := exec.Command(f.bin, "ctl", "--socket", f.socket, "metadata.set_display", string(raw))
+			c := exec.Command(f.bin, "ctl", "--socket", f.socket, "--credential-file", f.localCredential, "metadata.set_display", string(raw))
 			out[i], _ = c.Output()
 		}(i, p)
 	}
@@ -369,7 +395,7 @@ func (f *fixture) async(p map[string]any) <-chan []byte {
 	ch := make(chan []byte, 1)
 	go func() {
 		raw, _ := json.Marshal(p)
-		o, _ := exec.Command(f.bin, "ctl", "--socket", f.socket, "metadata.set_display", string(raw)).Output()
+		o, _ := exec.Command(f.bin, "ctl", "--socket", f.socket, "--credential-file", f.localCredential, "metadata.set_display", string(raw)).Output()
 		ch <- o
 	}()
 	return ch
@@ -489,7 +515,7 @@ func (f *fixture) crashRecovery(t *testing.T) {
 	f.start(true)
 	p := f.badgeParams("recovered", ik(0, 20), f.pane["resourceVersion"].(float64))
 	raw, _ := json.Marshal(p)
-	_ = exec.Command(f.bin, "ctl", "--socket", f.socket, "metadata.set_display", string(raw)).Run()
+	_ = exec.Command(f.bin, "ctl", "--socket", f.socket, "--credential-file", f.localCredential, "metadata.set_display", string(raw)).Run()
 	_ = f.daemon.Wait()
 	f.daemon = nil
 	_ = os.Remove(f.socket)
@@ -744,7 +770,7 @@ func (f *fixture) protocolAndWait(t *testing.T) {
 	raw, _ := json.Marshal(p4)
 	p4out := make(chan []byte, 1)
 	go func() {
-		o, _ := exec.Command(f.bin, "ctl", "--socket", f.socket, "metadata.set_display", string(raw)).Output()
+		o, _ := exec.Command(f.bin, "ctl", "--socket", f.socket, "--credential-file", f.localCredential, "metadata.set_display", string(raw)).Output()
 		p4out <- o
 	}()
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {

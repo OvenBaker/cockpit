@@ -33,9 +33,6 @@ func MethodSpecs() []MethodSpec { return append([]MethodSpec(nil), methodRegistr
 
 func specForMethod(method string) (MethodSpec, bool) {
 	for _, s := range methodRegistry {
-		if s.MCPTool == "" {
-			continue
-		}
 		if s.Method == method {
 			return s, true
 		}

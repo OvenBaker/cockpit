@@ -25,6 +25,7 @@ type daemon struct {
 	root, socket, epoch  string
 	st                   *store
 	tm                   tmux
+	auth                 *authenticator
 	lock                 *os.File
 	serverLock           *os.File
 	listener             net.Listener
@@ -66,7 +67,22 @@ type frameWriter struct {
 
 func (w *frameWriter) write(v any) error { w.mu.Lock(); defer w.mu.Unlock(); return writeFrame(w.w, v) }
 
+// NewDaemon retains the no-credential constructor used by isolated ownership
+// tests. It deliberately admits no sessions; production-capable callers must
+// use NewDaemonWithCredentials.
 func NewDaemon(root, socket, tmuxSocket string) (*daemon, error) {
+	return newDaemon(root, socket, tmuxSocket, nil)
+}
+
+func NewDaemonWithCredentials(root, socket, tmuxSocket, credentialFile string) (*daemon, error) {
+	auth, err := loadAuthenticator(credentialFile)
+	if err != nil {
+		return nil, err
+	}
+	return newDaemon(root, socket, tmuxSocket, auth)
+}
+
+func newDaemon(root, socket, tmuxSocket string, auth *authenticator) (*daemon, error) {
 	if tmuxSocket == "cockpit" {
 		return nil, errors.New("refusing live tmux socket cockpit")
 	}
@@ -145,7 +161,7 @@ func NewDaemon(root, socket, tmuxSocket string) (*daemon, error) {
 		lf.Close()
 		return nil, e
 	}
-	d := &daemon{root: clean, socket: socket, epoch: id("cpe_"), st: s, tm: t, lock: lf, serverLock: slf, paneLocks: map[string]*sync.Mutex{}, watchers: map[string]*watcher{}, subs: map[string]*subscription{}}
+	d := &daemon{root: clean, socket: socket, epoch: id("cpe_"), st: s, tm: t, auth: auth, lock: lf, serverLock: slf, paneLocks: map[string]*sync.Mutex{}, watchers: map[string]*watcher{}, subs: map[string]*subscription{}}
 	if e = d.reconcile(); e != nil {
 		leaseTransferred = true
 		d.Close()
@@ -486,7 +502,7 @@ func (d *daemon) handle(c net.Conn) {
 		}
 		ownedMu.Unlock()
 	}()
-	profile, caller, ok := d.open(c, writer)
+	profile, caller, capabilities, ok := d.open(c, writer)
 	if !ok {
 		return
 	}
@@ -581,7 +597,7 @@ func (d *daemon) handle(c net.Conn) {
 				pendingMu.Unlock()
 				cancel()
 			}()
-			result, err := d.dispatch(ctx, profile, caller, req)
+			result, err := d.dispatch(ctx, profile, caller, capabilities, req)
 			if err != nil {
 				_ = writer.write(d.errorResponse(req.ID, err))
 				return
@@ -631,50 +647,44 @@ func (d *daemon) handle(c net.Conn) {
 		}(req, key, isWait)
 	}
 }
-func (d *daemon) open(r io.Reader, w *frameWriter) (string, string, bool) {
+func (d *daemon) open(r io.Reader, w *frameWriter) (string, string, []string, bool) {
 	raw, e := readFrame(r)
 	if e != nil {
-		return "", "", false
+		return "", "", nil, false
 	}
 	if !utf8.Valid(raw) || !json.Valid(raw) {
 		_ = w.write(rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: -32700, Message: "parse error"}})
-		return "", "", false
+		return "", "", nil, false
 	}
 	var req rpcRequest
 	if strictJSON(raw, &req) != nil || req.JSONRPC != "2.0" || req.Method != "session.open" {
 		_ = w.write(rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: -32600, Message: "invalid request"}})
-		return "", "", false
+		return "", "", nil, false
 	}
 	if _, ok := requestIDFromRaw(req.ID); !ok {
 		_ = w.write(rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: -32600, Message: "invalid request"}})
-		return "", "", false
+		return "", "", nil, false
 	}
 	var p sessionParams
 	if strict(req.Params, &p) != nil || p.Protocol == "" || p.ClientID == "" || utf8.RuneCountInString(p.ClientID) > 128 || p.ClaimedProfile == "" || !validClaimedProfile(p.ClaimedProfile) || p.Credential == "" || utf8.RuneCountInString(p.Credential) > 512 {
 		_ = w.write(d.errorResponse(req.ID, rpcStandard(-32602, "invalid params")))
-		return "", "", false
+		return "", "", nil, false
 	}
 	if p.Protocol != Protocol {
 		_ = w.write(d.errorResponse(req.ID, derr("UNSUPPORTED_PROTOCOL", "protocol 1.0 required")))
-		return "", "", false
+		return "", "", nil, false
 	}
-	profile := ""
-	switch p.Credential {
-	case "test-local":
-		profile = "local-operator"
-	case "test-read":
-		profile = "read-only"
-	}
-	if profile == "" {
+	grant, authenticated := d.auth.verify(p.Credential, p.ClientID, p.ClaimedProfile)
+	if !authenticated {
 		_ = w.write(d.errorResponse(req.ID, derr("UNAUTHENTICATED", "invalid credential")))
-		return "", "", false
+		return "", "", nil, false
 	}
-	caller := "test-local-operator"
-	if profile == "read-only" {
-		caller = "test-read-only"
+	caller := grant.ClientID
+	if caller == "" {
+		caller = p.ClientID
 	}
-	_ = w.write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"protocol": Protocol, "controllerEpoch": d.epoch, "clientId": caller, "profile": profile, "ready": true, "capabilities": caps(profile)}})
-	return profile, caller, true
+	_ = w.write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"protocol": Protocol, "controllerEpoch": d.epoch, "clientId": caller, "profile": grant.Profile, "ready": true, "capabilities": grant.Capabilities}})
+	return grant.Profile, caller, grant.Capabilities, true
 }
 func validClaimedProfile(profile string) bool {
 	switch profile {
@@ -682,12 +692,6 @@ func validClaimedProfile(profile string) bool {
 		return true
 	}
 	return false
-}
-func caps(profile string) []string {
-	if profile == "local-operator" {
-		return []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume"}
-	}
-	return []string{"state:read", "operations:read", "events:wait"}
 }
 func requestID(v any) (string, bool) {
 	b, err := json.Marshal(v)
@@ -718,7 +722,10 @@ func requestIDFromRaw(raw json.RawMessage) (string, bool) {
 	return "", false
 }
 
-func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequest) (any, error) {
+func (d *daemon) dispatch(ctx context.Context, profile, caller string, capabilities []string, r rpcRequest) (any, error) {
+	if spec, known := specForMethod(r.Method); known && spec.Capability != "" && !has(capabilities, spec.Capability) {
+		return nil, derr("PERMISSION_DENIED", "capability absent")
+	}
 	switch r.Method {
 	case "controller.health":
 		var p struct{}
@@ -731,7 +738,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		if e := strict(r.Params, &p); e != nil {
 			return nil, rpcStandard(-32602, "invalid params")
 		}
-		return map[string]any{"capabilities": caps(profile)}, nil
+		return map[string]any{"capabilities": capabilities}, nil
 	case "state.snapshot":
 		var p struct{}
 		if e := strict(r.Params, &p); e != nil {
@@ -795,7 +802,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		if e := strict(r.Params, &p); e != nil || p.PaneRef == "" || p.Lines < 1 || p.Lines > 200 {
 			return nil, rpcStandard(-32602, "invalid params")
 		}
-		if !has(caps(profile), "capture:sanitized") {
+		if !has(capabilities, "capture:sanitized") {
 			return nil, derr("PERMISSION_DENIED", "capture capability absent")
 		}
 		return d.capture(ctx, p.PaneRef, p.Lines)
@@ -815,7 +822,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		}
 		return x, e
 	case "metadata.set_display":
-		if profile != "local-operator" {
+		if !has(capabilities, "metadata:write") {
 			return nil, derr("PERMISSION_DENIED", "metadata capability absent")
 		}
 		var p badgeParams
@@ -825,7 +832,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		return d.setBadge(caller, p)
 	case "interaction.nudge", "interaction.pause", "interaction.compact", "interaction.resume":
 		spec, _ := specForMethod(r.Method)
-		if !has(caps(profile), spec.Capability) {
+		if !has(capabilities, spec.Capability) {
 			return nil, derr("PERMISSION_DENIED", "interaction capability absent")
 		}
 		var p interactionParams
@@ -834,7 +841,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		}
 		return d.interact(caller, r.Method, p)
 	case "events.subscribe":
-		if !has(caps(profile), "events:wait") {
+		if !has(capabilities, "events:wait") {
 			return nil, derr("PERMISSION_DENIED", "events capability absent")
 		}
 		var p struct {
@@ -859,7 +866,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, r rpcRequ
 		}
 		return map[string]any{"released": true}, nil
 	case "wait.for_change":
-		if !has(caps(profile), "events:wait") {
+		if !has(capabilities, "events:wait") {
 			return nil, derr("PERMISSION_DENIED", "events capability absent")
 		}
 		var p struct {
@@ -931,7 +938,7 @@ func (d *daemon) resolveCanonical(canonical string) (any, error) {
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) == 2 && f[0] == canonical && f[1] != "" {
-			return d.dispatch(context.Background(), "local-operator", "resolver", rpcRequest{Method: "pane.inspect", Params: json.RawMessage(fmt.Sprintf(`{"paneRef":%q}`, f[1]))})
+			return d.dispatch(context.Background(), "resolver", "resolver", []string{"state:read"}, rpcRequest{Method: "pane.inspect", Params: json.RawMessage(fmt.Sprintf(`{"paneRef":%q}`, f[1]))})
 		}
 	}
 	return nil, derr("TARGET_NOT_FOUND", "canonical pane locator not found")

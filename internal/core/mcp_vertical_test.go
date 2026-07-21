@@ -20,7 +20,7 @@ func TestMCPVerticalProtocolAndCancellation(t *testing.T) {
 	f := newFixture(t)
 	defer f.close()
 	c := exec.Command(f.bin, "mcp-stdio", "--socket", f.socket)
-	c.Env = mcpCredentialEnv(t, "test-local")
+	c.Env = mcpCredentialEnv(t, "test-mcp")
 	in, err := c.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -156,8 +156,8 @@ func TestMCPNudgeRaceUsesControllerCASAndPrivateAudit(t *testing.T) {
 	}
 	after, _ := os.ReadFile(filepath.Join(f.root, "driver.trace"))
 	delta := string(after[len(before):])
-	if strings.Count(delta, "send-keys") != 2 {
-		t.Fatalf("race delivered duplicate terminal input: %q", delta)
+	if strings.Count(delta, "interaction.nudge text=[REDACTED]") != 1 || strings.Contains(delta, secret) {
+		t.Fatalf("race trace was duplicate or leaked literal input: %q", delta)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(f.root, "control.db"))
 	if err != nil {
@@ -238,7 +238,7 @@ func TestMCPPrivateCredentialAndSessionDenial(t *testing.T) {
 		t.Fatal("mcp accepted no private credential source")
 	}
 	publicPath := filepath.Join(t.TempDir(), "public-credential")
-	if err := os.WriteFile(publicPath, []byte("test-local"), 0644); err != nil {
+	if err := os.WriteFile(publicPath, []byte("test-mcp"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	public := exec.Command(f.bin, "mcp-stdio", "--socket", f.socket)
@@ -253,6 +253,71 @@ func TestMCPPrivateCredentialAndSessionDenial(t *testing.T) {
 	}
 }
 
+func TestCredentialRegistryBindsProfileAndCapabilities(t *testing.T) {
+	f := newFixture(t)
+	defer f.close()
+	local := rawOpen(t, f.socket, map[string]any{"protocol": "1.0", "clientId": "cockpitctl", "claimedProfile": "local-operator", "credential": "test-local"})
+	if local["result"] == nil || !mcpHasCapability(local["result"].(map[string]any), "metadata:write") {
+		t.Fatalf("local grant: %#v", local)
+	}
+	mismatch := rawOpen(t, f.socket, map[string]any{"protocol": "1.0", "clientId": "cockpitctl", "claimedProfile": "read-only", "credential": "test-local"})
+	if !strings.Contains(fmt.Sprint(mismatch), "UNAUTHENTICATED") {
+		t.Fatalf("profile mismatch admitted: %#v", mismatch)
+	}
+	mcp := rawOpen(t, f.socket, map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp", "claimedProfile": "mcp-local", "credential": "test-mcp"})
+	if mcp["result"] == nil || mcpHasCapability(mcp["result"].(map[string]any), "metadata:write") || !mcpHasCapability(mcp["result"].(map[string]any), "interaction:nudge") {
+		t.Fatalf("mcp capability binding: %#v", mcp)
+	}
+}
+
+func TestControllerRejectsPublicCredentialRegistry(t *testing.T) {
+	f := newFixture(t)
+	defer f.close()
+	f.stop()
+	if err := os.Chmod(f.credentials, 0644); err != nil {
+		t.Fatal(err)
+	}
+	bad := exec.Command(f.bin, "daemon", "--test-root", f.root, "--socket", f.socket, "--tmux-socket", f.tmux, "--credentials-file", f.credentials)
+	if out, err := bad.CombinedOutput(); err == nil || !strings.Contains(string(out), "private") {
+		t.Fatalf("public credential registry admitted: %v %s", err, out)
+	}
+}
+
+func TestMCPCutoverParitySmoke(t *testing.T) {
+	f := newFixture(t)
+	defer f.close()
+	ctlList := f.call("state.snapshot", map[string]any{})["result"].(map[string]any)
+	mcpList := mcpOneCall(t, f, "list_panes", map[string]any{})["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if len(ctlList["panes"].([]any)) != len(mcpList["panes"].([]any)) {
+		t.Fatalf("list parity ctl=%#v mcp=%#v", ctlList, mcpList)
+	}
+	t.Logf("list: panes=%d", len(mcpList["panes"].([]any)))
+	ctlStatus := f.call("pane.status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)
+	mcpStatus := mcpOneCall(t, f, "get_status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if ctlStatus["paneRef"] != mcpStatus["paneRef"] || ctlStatus["resourceVersion"] != mcpStatus["resourceVersion"] {
+		t.Fatalf("status parity ctl=%#v mcp=%#v", ctlStatus, mcpStatus)
+	}
+	t.Logf("status: paneRef=%s version=%v", mcpStatus["paneRef"], mcpStatus["resourceVersion"])
+	ctlCapture := f.call("pane.capture", map[string]any{"paneRef": f.pane["paneRef"], "lines": 10})["result"].(map[string]any)
+	mcpCapture := mcpOneCall(t, f, "capture_pane", map[string]any{"paneRef": f.pane["paneRef"], "lines": 10})["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if ctlCapture["paneRef"] != mcpCapture["paneRef"] || ctlCapture["text"] != mcpCapture["text"] {
+		t.Fatalf("capture parity ctl=%#v mcp=%#v", ctlCapture, mcpCapture)
+	}
+	t.Logf("capture: bounded-redacted=%v", mcpCapture["redacted"])
+	ctlWait := f.call("wait.for_change", map[string]any{"paneRef": f.pane["paneRef"], "afterVersion": -1, "deadline": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})["result"].(map[string]any)
+	mcpWait := mcpOneCall(t, f, "wait_for_state", map[string]any{"paneRef": f.pane["paneRef"], "afterVersion": -1, "deadline": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if ctlWait["paneRef"] != mcpWait["paneRef"] {
+		t.Fatalf("wait parity ctl=%#v mcp=%#v", ctlWait, mcpWait)
+	}
+	t.Logf("wait: matched paneRef=%s", mcpWait["paneRef"])
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_provider", "claude")
+	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@cockpit_state", "waiting")
+	if result := mcpOneCall(t, f, "nudge", interactionArgs(f, "parity smoke nudge", "waiting", 2800)); !strings.Contains(fmt.Sprint(result), "effect-delivered-unconfirmed") {
+		t.Fatalf("nudge smoke: %#v", result)
+	}
+	t.Log("nudge: controller admitted typed literal interaction")
+}
+
 func mcpCredentialEnv(t *testing.T, credential string) []string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mcp-credential")
@@ -265,7 +330,7 @@ func mcpCredentialEnv(t *testing.T, credential string) []string {
 func mcpOneCall(t *testing.T, f *fixture, name string, args map[string]any) map[string]any {
 	t.Helper()
 	c := exec.Command(f.bin, "mcp-stdio", "--socket", f.socket)
-	c.Env = mcpCredentialEnv(t, "test-local")
+	c.Env = mcpCredentialEnv(t, "test-mcp")
 	in, e := c.StdinPipe()
 	if e != nil {
 		t.Fatal(e)

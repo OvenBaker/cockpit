@@ -8,11 +8,13 @@ controller socket.
 
 ## Local configuration (not installed by this slice)
 
-Replace the socket placeholder with the controller's local socket. `mcp-stdio`
-requires `COCKPIT_MCP_CREDENTIAL_FILE`: an absolute, regular private file
-(mode `0600` or stricter) containing the local credential. It refuses a
-missing, public, malformed, or denied credential and never accepts one in
-argv or in checked-in configuration.
+Replace the socket placeholder with the controller's local socket. The
+controller requires a private `--credentials-file` registry binding each
+credential to a profile, optional exact client ID, and a capability subset.
+`mcp-stdio` requires `COCKPIT_MCP_CREDENTIAL_FILE`: an absolute, regular
+private file (mode `0600` or stricter) containing its credential. It refuses a
+missing, public, malformed, or denied credential and never accepts one in argv
+or checked-in configuration.
 
 Codex:
 
@@ -58,3 +60,7 @@ success. Unsupported or stale/wrong-state panes fail before terminal input.
 
 No installer, service configuration, web/Orbital migration, or cutover is
 performed by this slice.
+
+For a reversible local-only setup and parity transcript, see
+[mcp-cutover-smoke.md](mcp-cutover-smoke.md). The helper creates an isolated
+directory only when explicitly run; it does not modify global client settings.
