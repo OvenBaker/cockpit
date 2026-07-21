@@ -9,7 +9,7 @@
   "properties": {
     "jsonrpc": {"const": "2.0"},
     "id": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "integer"}]},
-    "method": {"enum": ["session.open", "controller.health", "state.snapshot", "pane.inspect", "capabilities.get", "operation.get", "metadata.set_display", "events.subscribe", "events.unsubscribe", "wait.for_change", "rpc.cancel"]},
+    "method": {"enum": ["session.open", "controller.health", "state.snapshot", "pane.inspect", "pane.status", "pane.resolve", "pane.capture", "capabilities.get", "operation.get", "metadata.set_display", "interaction.nudge", "interaction.pause", "interaction.compact", "interaction.resume", "events.subscribe", "events.unsubscribe", "wait.for_change", "rpc.cancel"]},
     "params": {"type": "object"}
   },
   "oneOf": [
@@ -18,8 +18,15 @@
     {"properties": {"method": {"const": "state.snapshot"}, "params": {"$ref": "#/$defs/empty"}}},
     {"properties": {"method": {"const": "capabilities.get"}, "params": {"$ref": "#/$defs/empty"}}},
     {"properties": {"method": {"const": "pane.inspect"}, "params": {"$ref": "#/$defs/paneInspect"}}},
+    {"properties": {"method": {"const": "pane.status"}, "params": {"$ref": "#/$defs/paneInspect"}}},
+    {"properties": {"method": {"const": "pane.resolve"}, "params": {"$ref": "#/$defs/paneResolve"}}},
+    {"properties": {"method": {"const": "pane.capture"}, "params": {"$ref": "#/$defs/paneCapture"}}},
     {"properties": {"method": {"const": "operation.get"}, "params": {"$ref": "#/$defs/operationGet"}}},
     {"properties": {"method": {"const": "metadata.set_display"}, "params": {"$ref": "#/$defs/badgeMutation"}}},
+    {"properties": {"method": {"const": "interaction.nudge"}, "params": {"$ref": "#/$defs/interactionText"}}},
+    {"properties": {"method": {"const": "interaction.pause"}, "params": {"$ref": "#/$defs/interactionNoText"}}},
+    {"properties": {"method": {"const": "interaction.compact"}, "params": {"$ref": "#/$defs/interactionNoText"}}},
+    {"properties": {"method": {"const": "interaction.resume"}, "params": {"$ref": "#/$defs/interactionText"}}},
     {"properties": {"method": {"const": "events.subscribe"}, "params": {"$ref": "#/$defs/eventSubscribe"}}},
     {"properties": {"method": {"const": "events.unsubscribe"}, "params": {"$ref": "#/$defs/eventUnsubscribe"}}},
     {"properties": {"method": {"const": "wait.for_change"}, "params": {"$ref": "#/$defs/waitForChange"}}},
@@ -43,6 +50,8 @@
       "type": "object", "additionalProperties": false, "required": ["paneRef"],
       "properties": {"paneRef": {"$ref": "#/$defs/paneRef"}}
     },
+    "paneResolve": {"type":"object","additionalProperties":false,"required":["canonical"],"properties":{"canonical":{"type":"string","pattern":"^[A-Za-z0-9_.-]+:[0-9]+\\.[0-9]+$"}}},
+    "paneCapture": {"type":"object","additionalProperties":false,"required":["paneRef","lines"],"properties":{"paneRef":{"$ref":"#/$defs/paneRef"},"lines":{"type":"integer","minimum":1,"maximum":200}}},
     "operationGet": {
       "type": "object", "additionalProperties": false, "required": ["operationRef"],
       "properties": {"operationRef": {"$ref": "#/$defs/operationRef"}}
@@ -55,7 +64,7 @@
         "generation": {"type": "integer", "minimum": 1}, "resourceVersion": {"type": "integer", "minimum": 1},
         "material": {
           "type": "object", "additionalProperties": false, "required": ["lifecycle"],
-          "properties": {"lifecycle": {"const": "active"}}
+          "properties": {"lifecycle": {"const": "active"}, "observedState": {"enum": ["waiting", "working", "paused"]}}
         }
       }
     },
@@ -69,6 +78,9 @@
         "expectations": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/paneExpectation"}}
       }
     },
+    "interactionBase": {"type":"object","additionalProperties":false,"required":["protocol","deadline","idempotencyKey","paneRef","expectations"],"properties":{"protocol":{"const":"1.0"},"deadline":{"$ref":"#/$defs/deadline"},"idempotencyKey":{"type":"string","pattern":"^ik_[0-9]{1,12}_[a-f0-9]{32}$"},"paneRef":{"$ref":"#/$defs/paneRef"},"expectations":{"type":"array","minItems":1,"maxItems":1,"items":{"$ref":"#/$defs/paneExpectation"}}}},
+    "interactionText": {"type":"object","additionalProperties":false,"required":["protocol","deadline","idempotencyKey","paneRef","text","expectations"],"properties":{"protocol":{"const":"1.0"},"deadline":{"$ref":"#/$defs/deadline"},"idempotencyKey":{"type":"string","pattern":"^ik_[0-9]{1,12}_[a-f0-9]{32}$"},"paneRef":{"$ref":"#/$defs/paneRef"},"text":{"type":"string","minLength":1,"maxLength":16384},"expectations":{"type":"array","minItems":1,"maxItems":1,"items":{"$ref":"#/$defs/paneExpectation"}}}},
+    "interactionNoText": {"allOf":[{"$ref":"#/$defs/interactionBase"}]},
     "eventSubscribe": {
       "type": "object", "additionalProperties": false,
       "properties": {"controllerEpoch": {"type": "string", "pattern": "^cpe_[a-f0-9]{32}$"}, "afterEventSeq": {"type":"integer", "minimum":0}, "paneRef":{"$ref":"#/$defs/paneRef"}, "operationRef":{"$ref":"#/$defs/operationRef"}}
