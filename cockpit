@@ -198,11 +198,7 @@ apply_chrome() {
 }
 
 stamp_pane() {  # pane-id  session-id  cwd  label  [agent]
-  $TMUX set -p -t "$1" @session_id "$2"
-  $TMUX set -p -t "$1" @cwd "$3"
-  $TMUX set -p -t "$1" @label "$(ck_clean_label "$4")"   # full title (one line); border truncates to width
-  $TMUX set -p -t "$1" @agent "${5:-claude}"
-  $TMUX set -p -t "$1" @badge "starting"
+  cockpit_stamp_known_agent "$1" "$2" "$3" "$4" "${5:-claude}"
 }
 
 # launch exactly one poller (clears stragglers, fully detached) and attach.
@@ -247,7 +243,8 @@ restore_grid() {
     # file degrades to fewer panes instead of `NAMEWIN[""]` "bad array subscript".
     [[ "$f1" =~ ^[0-9]+$ && -n "$f2" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""; [[ "$f5" == "$NIL" ]] && f5=""
-    [[ -z "$f6" || "$f6" == "$NIL" ]] && f6=claude
+    [[ "$f6" == "$NIL" ]] && f6=""
+    [[ "$f6" == claude || "$f6" == codex ]] || continue
     W+=("$f2"); S+=("$f3"); C+=("$f4"); L+=("$f5"); A+=("$f6")
   done < "$STATE_FILE"
   n=${#W[@]}; (( n > 0 )) || return 1

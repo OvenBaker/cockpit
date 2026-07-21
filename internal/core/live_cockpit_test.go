@@ -98,8 +98,8 @@ func TestLiveCockpitAdmissionParityOnEquivalentSocket(t *testing.T) {
 		t.Fatalf("durable server fingerprint missing: %q %v", fingerprint, err)
 	}
 
-	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", p.PaneID, "@cockpit_provider", "claude")
-	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", p.PaneID, "@cockpit_state", "waiting")
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", p.PaneID, "@agent", "claude")
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", p.PaneID, "@state", "idle")
 	status := call("pane.status", map[string]any{"paneRef": p.Ref}).(map[string]any)
 	if status["provider"] != "claude" || status["observedState"] != "waiting" || !has(status["capabilities"].([]string), "interaction:nudge") {
 		t.Fatalf("status parity lost controller-read state/capability facts: %#v", status)
@@ -129,7 +129,7 @@ func TestLiveCockpitAdmissionParityOnEquivalentSocket(t *testing.T) {
 	}
 	nudgeText := "live-equivalent nudge literal"
 	interact("nudge", "waiting", nudgeText, 1)
-	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", p.PaneID, "@cockpit_state", "paused")
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", p.PaneID, "@state", "paused")
 	resumeText := "live-equivalent resume literal"
 	interact("resume", "paused", resumeText, 2)
 	trace, err := os.ReadFile(filepath.Join(root, "driver.trace"))

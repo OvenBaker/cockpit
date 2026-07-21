@@ -298,7 +298,7 @@ func (d *daemon) reconcile() error {
 	} else if got, ge := d.tm.globalOption("@cockpit_server_fingerprint"); ge != nil || got != fp {
 		return derr("CONTROLLER_NOT_READY", "tmux server fingerprint does not match durable controller")
 	}
-	b, e := d.tm.run("list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{@cockpit_workspace_ref}\t#{@cockpit_pane_ref}\t#{@cockpit_pane_generation}\t#{@cockpit_pane_version}\t#{@cockpit_badge}\t#{@cockpit_provider}\t#{@cockpit_state}")
+	b, e := d.tm.run("list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{@cockpit_workspace_ref}\t#{@cockpit_pane_ref}\t#{@cockpit_pane_generation}\t#{@cockpit_pane_version}\t#{@cockpit_badge}\t#{@agent}\t#{@state}")
 	if e != nil {
 		return e
 	}
@@ -926,17 +926,24 @@ func (p pane) view() map[string]any {
 }
 
 // Provider and observed state are deliberately not client writable and are not
-// persisted from terminal output in this slice. They are controller-read tmux
-// stamps; unavailable/invalid values fail closed as unsupported.
+// persisted from terminal output in this slice. Cockpit's existing poller owns
+// the @agent/@state projection; unavailable/invalid values fail closed as
+// unsupported.
 func (d *daemon) observePane(p pane) pane {
-	provider, pe := d.tm.paneOption(p.PaneID, "@cockpit_provider")
-	state, se := d.tm.paneOption(p.PaneID, "@cockpit_state")
+	provider, pe := d.tm.paneOption(p.PaneID, "@agent")
+	state, se := d.tm.paneOption(p.PaneID, "@state")
 	if pe == nil && (provider == "claude" || provider == "codex") {
 		p.Provider = provider
 	} else {
 		p.Provider = "unknown"
 	}
-	if se == nil && (state == "waiting" || state == "working" || state == "paused") {
+	// Cockpit's idle and just-finished projections are both settled provider
+	// turns. The latter is only an attention latch applied after idle, so they
+	// share the V1 waiting material state. needs-input/dead and missing values
+	// intentionally remain unavailable to typed interactions.
+	if se == nil && (state == "idle" || state == "just-finished") {
+		p.State = "waiting"
+	} else if se == nil && (state == "working" || state == "paused") {
 		p.State = state
 	} else {
 		p.State = "unknown"

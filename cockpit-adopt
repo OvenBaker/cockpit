@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# cockpit-adopt — explicitly bind one already-running legitimate Cockpit pane
+# to an existing provider transcript. This is a review-gated migration aid; it
+# never guesses provider/state from a title, process name, or pane output.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+usage() {
+  echo "usage: cockpit-adopt --pane %N --agent claude|codex --session-id UUID --cwd ABSOLUTE_DIR" >&2
+  exit 2
+}
+
+pane=""; agent=""; sid=""; cwd=""
+while (($#)); do
+  case "$1" in
+    --pane) pane=${2:-}; shift 2;;
+    --agent) agent=${2:-}; shift 2;;
+    --session-id) sid=${2:-}; shift 2;;
+    --cwd) cwd=${2:-}; shift 2;;
+    *) usage;;
+  esac
+done
+[[ "$pane" =~ ^%[0-9]+$ && "$agent" =~ ^(claude|codex)$ && "$sid" =~ ^[0-9a-fA-F-]{36}$ && "$cwd" = /* && -d "$cwd" ]] || usage
+
+# Resolve the exact pane from the selected Cockpit grid and reject a conflicting
+# existing binding. An operator supplies the session identity; the transcript
+# check below proves it belongs to the supplied provider/cwd before any stamp.
+row=$($TMUX display-message -p -t "$pane" '#{session_name}|#{pane_id}|#{@agent}|#{@session_id}|#{@cwd}|#{@label}' 2>/dev/null) || { echo "cockpit-adopt: pane not found" >&2; exit 1; }
+IFS='|' read -r session gotPane oldAgent oldSID oldCWD label <<<"$row"
+[[ "$session" == "$COCKPIT_SESSION" && "$gotPane" == "$pane" ]] || { echo "cockpit-adopt: pane is outside cockpit" >&2; exit 1; }
+[[ -z "$oldAgent" || "$oldAgent" == "$agent" ]] || { echo "cockpit-adopt: provider conflicts with existing pane binding" >&2; exit 1; }
+[[ -z "$oldSID" || "$oldSID" == "$sid" ]] || { echo "cockpit-adopt: session conflicts with existing pane binding" >&2; exit 1; }
+[[ -z "$oldCWD" || "$oldCWD" == "$cwd" ]] || { echo "cockpit-adopt: cwd conflicts with existing pane binding" >&2; exit 1; }
+
+transcript=$(agent_transcript "$agent" "$sid" "$cwd")
+[[ -f "$transcript" ]] || { echo "cockpit-adopt: provider transcript is not available for the requested binding" >&2; exit 1; }
+[[ -n "$label" ]] || label="$(basename "$cwd")"
+cockpit_stamp_known_agent "$pane" "$sid" "$cwd" "$label" "$agent"
+echo "adopted $pane as $agent session ${sid:0:8}"

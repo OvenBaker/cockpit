@@ -19,7 +19,7 @@ fi
 active=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)
 
 panes_tsv=$($TMUX list-panes -s -t "$COCKPIT_SESSION" \
-  -F "#{pane_id}${TAB}#{window_id}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},claude}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@badge,#{@badge},$NIL}${TAB}#{?@orderly,#{@orderly},$NIL}" 2>/dev/null)
+  -F "#{pane_id}${TAB}#{window_id}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@badge,#{@badge},$NIL}${TAB}#{?@orderly,#{@orderly},$NIL}" 2>/dev/null)
 
 wins_tsv=$($TMUX list-windows -t "$COCKPIT_SESSION" \
   -F "#{window_id}${TAB}#{window_name}${TAB}#{?window_active,1,0}" 2>/dev/null)

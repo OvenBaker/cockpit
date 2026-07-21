@@ -85,11 +85,7 @@ else
   pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
     || { $TMUX display-message "cockpit: no room for another pane at this width"; exit 0; }
 fi
-$TMUX set -p -t "$pane" @session_id "$id"
-$TMUX set -p -t "$pane" @cwd "$cwd"
-$TMUX set -p -t "$pane" @label "$(ck_clean_label "$title")"   # one line; border truncates to width
-$TMUX set -p -t "$pane" @agent "$agent"
-$TMUX set -p -t "$pane" @badge "starting"
+cockpit_stamp_known_agent "$pane" "$id" "$cwd" "$title" "$agent"
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 $TMUX display-message "cockpit: + ${title:0:40}"
 echo "resumed ${id:0:8} → ${title:0:60}"
