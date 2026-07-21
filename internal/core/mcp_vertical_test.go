@@ -297,6 +297,22 @@ func TestMCPCutoverParitySmoke(t *testing.T) {
 		t.Fatalf("list parity ctl=%#v mcp=%#v", ctlList, mcpList)
 	}
 	t.Logf("list: panes=%d", len(mcpList["panes"].([]any)))
+	before := len(mcpList["panes"].([]any))
+	run(t, "tmux", "-L", f.tmux, "new-window", "-d", "-t", "slice", "-n", "later", "sleep 60")
+	mcpList = mcpOneCall(t, f, "list_panes", map[string]any{})["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if len(mcpList["panes"].([]any)) != before+1 {
+		t.Fatalf("mcp list did not discover pane created after startup: %#v", mcpList)
+	}
+	foundDynamic := false
+	for _, raw := range mcpList["panes"].([]any) {
+		p := raw.(map[string]any)
+		if p["locator"].(map[string]any)["windowId"] != f.pane["locator"].(map[string]any)["windowId"] && p["paneRef"] != "" && p["generation"].(float64) >= 1 && p["resourceVersion"].(float64) >= 1 {
+			foundDynamic = true
+		}
+	}
+	if !foundDynamic {
+		t.Fatalf("mcp list dynamic pane lacks a stable identity: %#v", mcpList)
+	}
 	ctlStatus := f.call("pane.status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)
 	mcpStatus := mcpOneCall(t, f, "get_status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)["structuredContent"].(map[string]any)
 	if ctlStatus["paneRef"] != mcpStatus["paneRef"] || ctlStatus["resourceVersion"] != mcpStatus["resourceVersion"] {

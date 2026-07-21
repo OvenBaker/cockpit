@@ -21,6 +21,20 @@ func (t tmux) run(args ...string) ([]byte, error) {
 func (t tmux) runSensitive(traceRecord, errorLabel string, args ...string) ([]byte, error) {
 	return t.runTrace(traceRecord, errorLabel, args...)
 }
+func (t tmux) runUntraced(errorLabel string, args ...string) ([]byte, error) {
+	argv := append([]string{"-L", t.socket}, args...)
+	if t.socket == "cockpit" && !t.allowLiveCockpit {
+		return nil, derr("INTERNAL", "live cockpit socket refused")
+	}
+	c := exec.Command("tmux", argv...)
+	var stderr bytes.Buffer
+	c.Stderr = &stderr
+	out, e := c.Output()
+	if e != nil {
+		return nil, fmt.Errorf("tmux %s: %w: %s", errorLabel, e, strings.TrimSpace(stderr.String()))
+	}
+	return out, nil
+}
 func (t tmux) runTrace(traceRecord, errorLabel string, args ...string) ([]byte, error) {
 	argv := append([]string{"-L", t.socket}, args...)
 	if t.socket == "cockpit" && !t.allowLiveCockpit {
@@ -106,19 +120,26 @@ func (t tmux) capturePane(ctx context.Context, pane string, lines int) ([]byte, 
 // validated literal instruction text; no MCP or CLI request can supply keys,
 // a command, an environment, or a tmux target.
 func (t tmux) interact(pane, action, text string) error {
-	var args []string
 	switch action {
 	case "nudge", "resume":
-		args = []string{"send-keys", "-t", pane, "-l", text, ";", "send-keys", "-t", pane, "Enter"}
+		// Codex's TUI must receive its literal text and submit key as distinct
+		// tmux client invocations. In a single semicolon batch the text reaches
+		// its input line but the turn is not reliably submitted. C-m is the
+		// terminal return key, not client-controlled raw key input.
+		if _, e := t.runSensitive("tmux -L "+t.socket+" interaction."+action+" text=[REDACTED]", "interaction."+action, "send-keys", "-t", pane, "-l", text); e != nil {
+			return e
+		}
+		_, e := t.runUntraced("interaction."+action, "send-keys", "-t", pane, "C-m")
+		return e
 	case "pause":
-		args = []string{"send-keys", "-t", pane, "C-c"}
+		_, e := t.runSensitive("tmux -L "+t.socket+" interaction."+action+" text=[REDACTED]", "interaction."+action, "send-keys", "-t", pane, "C-c")
+		return e
 	case "compact":
-		args = []string{"send-keys", "-t", pane, "-l", "/compact", ";", "send-keys", "-t", pane, "Enter"}
+		_, e := t.runSensitive("tmux -L "+t.socket+" interaction."+action+" text=[REDACTED]", "interaction."+action, "send-keys", "-t", pane, "-l", "/compact", ";", "send-keys", "-t", pane, "Enter")
+		return e
 	default:
 		return derr("INTERNAL", "unknown typed interaction")
 	}
-	_, e := t.runSensitive("tmux -L "+t.socket+" interaction."+action+" text=[REDACTED]", "interaction."+action, args...)
-	return e
 }
 func (t tmux) globalOption(key string) (string, error) {
 	b, e := t.run("show-option", "-gqv", key)
