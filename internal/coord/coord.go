@@ -48,13 +48,14 @@ const (
 )
 
 var (
-	workstreamIDRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-	taskIDRE       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
-	requestIDRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$`)
-	leaseIDRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$`)
-	gitShaRE       = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	sha256RE       = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	idemRE         = regexp.MustCompile(`^ik_([0-9]{1,12})_([a-f0-9]{32})$`)
+	workstreamIDRE  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	taskIDRE        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+	requestIDRE     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$`)
+	leaseIDRE       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$`)
+	gitShaRE        = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	sha256RE        = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	idemRE          = regexp.MustCompile(`^ik_([0-9]{1,12})_([a-f0-9]{32})$`)
+	policyVersionRE = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,63}$`)
 )
 
 // Roles are fixed server-side assignments. A mutation payload can never claim

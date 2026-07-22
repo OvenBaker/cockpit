@@ -35,7 +35,9 @@ func TestStoreV1PragmasVersionAndFutureRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec("PRAGMA user_version=2"); err != nil {
+	// Versions 2-3 are the coordination domain and are legitimate; the first
+	// genuinely future version this binary must refuse is 4.
+	if _, err = db.Exec("PRAGMA user_version=4"); err != nil {
 		t.Fatal(err)
 	}
 	_ = db.Close()

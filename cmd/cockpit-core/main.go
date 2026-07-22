@@ -50,12 +50,19 @@ func mcpStdio(args []string) {
 	if err != nil {
 		fatal("mcp-stdio credential unavailable")
 	}
+	// A credential grant may pin its client id (e.g. a coordination role
+	// identity); the claimed id must then match the grant. The default keeps
+	// the historical cockpit-mcp identity.
+	clientID := os.Getenv("COCKPIT_MCP_CLIENT_ID")
+	if clientID == "" {
+		clientID = "cockpit-mcp"
+	}
 	c, err := net.Dial("unix", *socket)
 	if err != nil {
 		fatal(err.Error())
 	}
 	defer c.Close()
-	if err = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp", "claimedProfile": "mcp-local", "credential": credential}}); err != nil {
+	if err = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": clientID, "claimedProfile": "mcp-local", "credential": credential}}); err != nil {
 		fatal(err.Error())
 	}
 	opened, err := readFrame(c)
@@ -126,7 +133,7 @@ func mcpStdio(args []string) {
 		if !ok || loc == "" {
 			return nil, errors.New("paneRef or canonical locator is required")
 		}
-		return resolvePane(*socket, credential, loc)
+		return resolvePane(*socket, credential, clientID, loc)
 	}
 	s := bufio.NewScanner(os.Stdin)
 	s.Buffer(make([]byte, 4096), maxFrame)
@@ -241,13 +248,13 @@ func privateCredentialFile(path string) (string, error) {
 	return credential, nil
 }
 
-func resolvePane(socket, credential, locator string) (map[string]any, error) {
+func resolvePane(socket, credential, clientID, locator string) (map[string]any, error) {
 	c, err := net.Dial("unix", socket)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
-	open := map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp", "claimedProfile": "mcp-local", "credential": credential}}
+	open := map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": clientID, "claimedProfile": "mcp-local", "credential": credential}}
 	if err = writeFrame(c, open); err != nil {
 		return nil, err
 	}

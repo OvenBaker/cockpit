@@ -431,7 +431,7 @@ func (f *coordFixture) mcpParity(t *testing.T, ws string, verdict map[string]any
 		t.Fatal(err)
 	}
 	c := exec.Command(f.bin, "mcp-stdio", "--socket", f.socket)
-	c.Env = append(os.Environ(), "COCKPIT_MCP_CREDENTIAL_FILE="+credFile)
+	c.Env = append(os.Environ(), "COCKPIT_MCP_CREDENTIAL_FILE="+credFile, "COCKPIT_MCP_CLIENT_ID=builder-client")
 	stdin, err := c.StdinPipe()
 	if err != nil {
 		t.Fatal(err)

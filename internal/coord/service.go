@@ -299,16 +299,16 @@ func (s *Service) statusGet(params json.RawMessage) (any, error) {
 	if err = s.db.QueryRow("SELECT COALESCE(MAX(seq),0) FROM coord_events WHERE workstream_id=?", p.WorkstreamID).Scan(&eventSeq); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT task_id,revision,status,assignment_sha,head_sha,handoff_sha,review_request_sha,review_result_sha,verdict,acceptance_sha,release_sha
+	rows, err := s.db.Query(`SELECT task_id,revision,status,assignment_sha,head_sha,handoff_sha,review_request_sha,review_result_sha,verdict,acceptance_sha,release_sha,policy_version,brief_sha
 		FROM coord_tasks WHERE workstream_id=? ORDER BY task_id,revision`, p.WorkstreamID)
 	if err != nil {
 		return nil, err
 	}
 	tasks := []any{}
 	for rows.Next() {
-		var id, status, assignment, head, handoff, reviewReq, reviewRes, verdict, acceptance, release string
+		var id, status, assignment, head, handoff, reviewReq, reviewRes, verdict, acceptance, release, policyVersion, briefSha string
 		var rev int64
-		if err = rows.Scan(&id, &rev, &status, &assignment, &head, &handoff, &reviewReq, &reviewRes, &verdict, &acceptance, &release); err != nil {
+		if err = rows.Scan(&id, &rev, &status, &assignment, &head, &handoff, &reviewReq, &reviewRes, &verdict, &acceptance, &release, &policyVersion, &briefSha); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -316,7 +316,7 @@ func (s *Service) statusGet(params json.RawMessage) (any, error) {
 			"taskId": id, "revision": rev, "status": status, "assignmentSha256": assignment,
 			"headSha": head, "handoffSha256": handoff, "reviewRequestSha256": reviewReq,
 			"reviewResultSha256": reviewRes, "verdict": verdict, "acceptanceSha256": acceptance,
-			"releaseSha256": release,
+			"releaseSha256": release, "policyVersion": policyVersion, "briefPackageSha256": briefSha,
 		})
 	}
 	if err = rows.Err(); err != nil {

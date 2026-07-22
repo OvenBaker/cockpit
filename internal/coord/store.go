@@ -15,11 +15,11 @@ func Migrate(db *sql.DB) error {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 2 {
-		return fmt.Errorf("store schema %d is newer than supported version 2", version)
+	if version > 3 {
+		return fmt.Errorf("store schema %d is newer than supported version 3", version)
 	}
-	if version == 2 {
-		return nil
+	if version == 2 || version == 3 {
+		return migrateV3(db, version)
 	}
 	if version != 1 {
 		return fmt.Errorf("coordination migration requires base schema version 1, found %d", version)
@@ -124,6 +124,31 @@ CREATE TABLE IF NOT EXISTS coord_idempotency(
   created_at INTEGER NOT NULL,
   PRIMARY KEY(caller, method, idem_key));
 PRAGMA user_version=2;`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return migrateV3(db, 2)
+}
+
+// migrateV3 binds tasks to the frozen build-a-brief policy package
+// (policy-v1 amendment): version and brief-package hash columns on the task
+// projection. Forward-only from version 2.
+func migrateV3(db *sql.DB, version int) error {
+	if version == 3 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`
+ALTER TABLE coord_tasks ADD COLUMN policy_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE coord_tasks ADD COLUMN brief_sha TEXT NOT NULL DEFAULT '';
+PRAGMA user_version=3;`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err

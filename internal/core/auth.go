@@ -63,15 +63,11 @@ func (a *authenticator) verify(credential, clientID, claimedProfile string) (cre
 	for _, g := range a.grants {
 		// Compare every configured candidate without using a map keyed by a
 		// secret. This is a local boundary, but avoids an avoidable token oracle.
-		// A grant-pinned ClientID is authoritative: the caller's claimed id is
-		// then irrelevant rather than a matching requirement, because the
-		// effective identity always comes from the grant, never the claim.
 		match := subtle.ConstantTimeCompare([]byte(g.Credential), []byte(credential)) == 1
-		if match && g.Profile == claimedProfile {
+		if match && (g.ClientID == "" || g.ClientID == clientID) && g.Profile == claimedProfile {
 			return g, true
 		}
 	}
-	_ = clientID
 	return credentialGrant{}, false
 }
 

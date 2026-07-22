@@ -114,8 +114,42 @@ type OutputArtifact struct {
 type Finding struct {
 	ID       string `json:"id"`
 	Severity string `json:"severity"` // blocker | major | minor | note
+	Class    string `json:"class,omitempty"`
 	Summary  string `json:"summary"`
 	Evidence string `json:"evidence"`
+}
+
+// PolicyBinding pins a record to the frozen build-a-brief package that is the
+// requirements floor and scope ceiling for its task. Binding originates in
+// the task assignment; downstream records must then carry the identical
+// binding, so a later record can never silently amend or shed the policy.
+type PolicyBinding struct {
+	Version            string `json:"version"`
+	BriefPackageSha256 string `json:"briefPackageSha256"`
+}
+
+func (p *PolicyBinding) validate() error {
+	if p == nil {
+		return nil
+	}
+	if !policyVersionRE.MatchString(p.Version) {
+		return cerr("INVALID_REQUEST", "policy.version is required and bounded")
+	}
+	if !sha256RE.MatchString(p.BriefPackageSha256) {
+		return cerr("INVALID_REQUEST", "policy.briefPackageSha256 must be 64 lowercase hex")
+	}
+	return nil
+}
+
+// Finding classes under the policy-v1 review triage. When a review result is
+// policy-bound, every finding must be classified; classification constrains
+// the severity a finding may carry so triage cannot be blocked-by-nitpick.
+var findingClassSeverities = map[string][]string{
+	"in-scope-blocker":   {"blocker"},
+	"in-scope-material":  {"major"},
+	"valid-follow-up":    {"minor", "note"},
+	"irrelevant-nitpick": {"minor", "note"},
+	"reviewer-error":     {"minor", "note"},
 }
 
 type RoleBinding struct {
@@ -149,6 +183,7 @@ type TaskAssignment struct {
 	RequiredOutputs        RequiredOutputs `json:"requiredOutputs"`
 	StopConditions         []string        `json:"stopConditions"`
 	CorrectionOf           *CorrectionOf   `json:"correctionOf,omitempty"`
+	Policy                 *PolicyBinding  `json:"policy,omitempty"`
 }
 
 func (r *TaskAssignment) validate() error {
@@ -243,31 +278,35 @@ func (r *TaskAssignment) validate() error {
 	} else if r.Revision != 0 {
 		return cerr("INVALID_REQUEST", "revision above 0 requires correctionOf")
 	}
-	return nil
+	return r.Policy.validate()
 }
 
 // BuilderHandoff (coord.builder-handoff.v0) binds a committed exact head SHA,
 // clean worktree, checks, and declared output hashes.
 type BuilderHandoff struct {
-	SchemaVersion            string           `json:"schemaVersion"`
-	RecordType               string           `json:"recordType"`
-	WorkstreamID             string           `json:"workstreamId"`
-	TaskID                   string           `json:"taskId"`
-	TaskRevision             int64            `json:"taskRevision"`
-	CreatedAt                string           `json:"createdAt"`
-	CreatedByRole            string           `json:"createdByRole"`
-	PlanSha256               string           `json:"planSha256"`
-	BaseSha                  string           `json:"baseSha"`
-	HeadSha                  string           `json:"headSha"`
-	Branch                   string           `json:"branch"`
-	Worktree                 string           `json:"worktree"`
-	CommitSummary            []string         `json:"commitSummary"`
-	DiffSummary              string           `json:"diffSummary"`
-	Checks                   []CheckResult    `json:"checks"`
-	KnownLimitations         []string         `json:"knownLimitations"`
-	OutputArtifactsAndSha256 []OutputArtifact `json:"outputArtifactsAndSha256"`
-	WorktreeClean            bool             `json:"worktreeClean"`
-	SeededInputDependencySha string           `json:"seededInputDependencySha"`
+	SchemaVersion                       string           `json:"schemaVersion"`
+	RecordType                          string           `json:"recordType"`
+	WorkstreamID                        string           `json:"workstreamId"`
+	TaskID                              string           `json:"taskId"`
+	TaskRevision                        int64            `json:"taskRevision"`
+	CreatedAt                           string           `json:"createdAt"`
+	CreatedByRole                       string           `json:"createdByRole"`
+	PlanSha256                          string           `json:"planSha256"`
+	BaseSha                             string           `json:"baseSha"`
+	HeadSha                             string           `json:"headSha"`
+	Branch                              string           `json:"branch"`
+	Worktree                            string           `json:"worktree"`
+	CommitSummary                       []string         `json:"commitSummary"`
+	DiffSummary                         string           `json:"diffSummary"`
+	Checks                              []CheckResult    `json:"checks"`
+	KnownLimitations                    []string         `json:"knownLimitations"`
+	OutputArtifactsAndSha256            []OutputArtifact `json:"outputArtifactsAndSha256"`
+	WorktreeClean                       bool             `json:"worktreeClean"`
+	SeededInputDependencySha            string           `json:"seededInputDependencySha"`
+	Policy                              *PolicyBinding   `json:"policy,omitempty"`
+	PolicyAssetPathsAndSha256           []OutputArtifact `json:"policyAssetPathsAndSha256,omitempty"`
+	CircuitBreakerDisposition           string           `json:"circuitBreakerDisposition,omitempty"`
+	ScopeCeilingAssumptionsAndFollowUps []string         `json:"scopeCeilingAssumptionsAndFollowUps,omitempty"`
 }
 
 func (r *BuilderHandoff) validate() error {
@@ -345,23 +384,43 @@ func (r *BuilderHandoff) validate() error {
 			return cerr("INVALID_REQUEST", "output artifact sha256 must be 64 lowercase hex")
 		}
 	}
-	return nil
+	if err := boundedList(len(r.PolicyAssetPathsAndSha256), "policyAssetPathsAndSha256"); err != nil {
+		return err
+	}
+	for _, a := range r.PolicyAssetPathsAndSha256 {
+		if a.Path == "" || len(a.Path) > maxLongString || !sha256RE.MatchString(a.Sha256) {
+			return cerr("INVALID_REQUEST", "policy asset entries require a path and 64-hex sha256")
+		}
+	}
+	if err := boundedString(r.CircuitBreakerDisposition, maxLongString, "circuitBreakerDisposition"); err != nil {
+		return err
+	}
+	if err := boundedList(len(r.ScopeCeilingAssumptionsAndFollowUps), "scopeCeilingAssumptionsAndFollowUps"); err != nil {
+		return err
+	}
+	for _, x := range r.ScopeCeilingAssumptionsAndFollowUps {
+		if err := boundedString(x, maxLongString, "scopeCeilingAssumptionsAndFollowUps item"); err != nil {
+			return err
+		}
+	}
+	return r.Policy.validate()
 }
 
 // ReviewRequest (coord.review-request.v0) pins one builder handoff and its
 // exact head SHA.
 type ReviewRequest struct {
-	SchemaVersion string   `json:"schemaVersion"`
-	RecordType    string   `json:"recordType"`
-	WorkstreamID  string   `json:"workstreamId"`
-	TaskID        string   `json:"taskId"`
-	TaskRevision  int64    `json:"taskRevision"`
-	CreatedAt     string   `json:"createdAt"`
-	CreatedByRole string   `json:"createdByRole"`
-	HandoffSha256 string   `json:"handoffSha256"`
-	HeadSha       string   `json:"headSha"`
-	BaseSha       string   `json:"baseSha"`
-	ReviewScope   []string `json:"reviewScope"`
+	SchemaVersion string         `json:"schemaVersion"`
+	RecordType    string         `json:"recordType"`
+	WorkstreamID  string         `json:"workstreamId"`
+	TaskID        string         `json:"taskId"`
+	TaskRevision  int64          `json:"taskRevision"`
+	CreatedAt     string         `json:"createdAt"`
+	CreatedByRole string         `json:"createdByRole"`
+	HandoffSha256 string         `json:"handoffSha256"`
+	HeadSha       string         `json:"headSha"`
+	BaseSha       string         `json:"baseSha"`
+	ReviewScope   []string       `json:"reviewScope"`
+	Policy        *PolicyBinding `json:"policy,omitempty"`
 }
 
 func (r *ReviewRequest) validate() error {
@@ -391,25 +450,26 @@ func (r *ReviewRequest) validate() error {
 			return err
 		}
 	}
-	return nil
+	return r.Policy.validate()
 }
 
 // ReviewResult (coord.review-result.v0) is the single immutable reviewer
 // verdict for one exact head SHA.
 type ReviewResult struct {
-	SchemaVersion          string    `json:"schemaVersion"`
-	RecordType             string    `json:"recordType"`
-	WorkstreamID           string    `json:"workstreamId"`
-	TaskID                 string    `json:"taskId"`
-	TaskRevision           int64     `json:"taskRevision"`
-	CreatedAt              string    `json:"createdAt"`
-	CreatedByRole          string    `json:"createdByRole"`
-	ReviewRequestSha256    string    `json:"reviewRequestSha256"`
-	HandoffSha256          string    `json:"handoffSha256"`
-	HeadSha                string    `json:"headSha"`
-	Verdict                string    `json:"verdict"`
-	Findings               []Finding `json:"findings"`
-	RecommendedDisposition string    `json:"recommendedDisposition"`
+	SchemaVersion          string         `json:"schemaVersion"`
+	RecordType             string         `json:"recordType"`
+	WorkstreamID           string         `json:"workstreamId"`
+	TaskID                 string         `json:"taskId"`
+	TaskRevision           int64          `json:"taskRevision"`
+	CreatedAt              string         `json:"createdAt"`
+	CreatedByRole          string         `json:"createdByRole"`
+	ReviewRequestSha256    string         `json:"reviewRequestSha256"`
+	HandoffSha256          string         `json:"handoffSha256"`
+	HeadSha                string         `json:"headSha"`
+	Verdict                string         `json:"verdict"`
+	Findings               []Finding      `json:"findings"`
+	RecommendedDisposition string         `json:"recommendedDisposition"`
+	Policy                 *PolicyBinding `json:"policy,omitempty"`
 }
 
 func (r *ReviewResult) validate() error {
@@ -447,6 +507,23 @@ func (r *ReviewResult) validate() error {
 		if f.Severity != "blocker" && f.Severity != "major" && f.Severity != "minor" && f.Severity != "note" {
 			return cerr("INVALID_REQUEST", "finding severity must be blocker|major|minor|note")
 		}
+		if f.Class != "" {
+			allowed, known := findingClassSeverities[f.Class]
+			if !known {
+				return cerr("INVALID_REQUEST", "finding class must be in-scope-blocker|in-scope-material|valid-follow-up|irrelevant-nitpick|reviewer-error")
+			}
+			classOK := false
+			for _, sv := range allowed {
+				if f.Severity == sv {
+					classOK = true
+				}
+			}
+			if !classOK {
+				return cerr("INVALID_REQUEST", "finding severity is inconsistent with its triage class")
+			}
+		} else if r.Policy != nil {
+			return cerr("INVALID_REQUEST", "a policy-bound review result must classify every finding")
+		}
 		if f.Severity == "blocker" || f.Severity == "major" {
 			blocking = true
 		}
@@ -462,6 +539,9 @@ func (r *ReviewResult) validate() error {
 	}
 	if r.Verdict == VerdictChangesRequested && !blocking {
 		return cerr("INVALID_REQUEST", "CHANGES_REQUESTED requires at least one blocker or major finding")
+	}
+	if err := r.Policy.validate(); err != nil {
+		return err
 	}
 	return boundedString(r.RecommendedDisposition, maxLongString, "recommendedDisposition")
 }
@@ -481,6 +561,7 @@ type FinalAcceptance struct {
 	ReviewResultSha256 string           `json:"reviewResultSha256"`
 	Gates              []CheckResult    `json:"gates"`
 	ArtifactManifest   []OutputArtifact `json:"artifactManifest"`
+	Policy             *PolicyBinding   `json:"policy,omitempty"`
 }
 
 func (r *FinalAcceptance) validate() error {
@@ -524,24 +605,25 @@ func (r *FinalAcceptance) validate() error {
 			return cerr("INVALID_REQUEST", "artifact manifest entries require a path and 64-hex sha256")
 		}
 	}
-	return nil
+	return r.Policy.validate()
 }
 
 // ReleaseHandoff (coord.release-handoff.v0) prepares the accepted head for
 // release-conductor consumption. It never merges or deploys.
 type ReleaseHandoff struct {
-	SchemaVersion    string   `json:"schemaVersion"`
-	RecordType       string   `json:"recordType"`
-	WorkstreamID     string   `json:"workstreamId"`
-	TaskID           string   `json:"taskId"`
-	TaskRevision     int64    `json:"taskRevision"`
-	CreatedAt        string   `json:"createdAt"`
-	CreatedByRole    string   `json:"createdByRole"`
-	AcceptanceSha256 string   `json:"acceptanceSha256"`
-	HeadSha          string   `json:"headSha"`
-	BaseSha          string   `json:"baseSha"`
-	Branch           string   `json:"branch"`
-	Notes            []string `json:"notes"`
+	SchemaVersion    string         `json:"schemaVersion"`
+	RecordType       string         `json:"recordType"`
+	WorkstreamID     string         `json:"workstreamId"`
+	TaskID           string         `json:"taskId"`
+	TaskRevision     int64          `json:"taskRevision"`
+	CreatedAt        string         `json:"createdAt"`
+	CreatedByRole    string         `json:"createdByRole"`
+	AcceptanceSha256 string         `json:"acceptanceSha256"`
+	HeadSha          string         `json:"headSha"`
+	BaseSha          string         `json:"baseSha"`
+	Branch           string         `json:"branch"`
+	Notes            []string       `json:"notes"`
+	Policy           *PolicyBinding `json:"policy,omitempty"`
 }
 
 func (r *ReleaseHandoff) validate() error {
@@ -574,7 +656,7 @@ func (r *ReleaseHandoff) validate() error {
 			return err
 		}
 	}
-	return nil
+	return r.Policy.validate()
 }
 
 // WorkstreamContract (coord.workstream-contract.v0) creates the workstream and

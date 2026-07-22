@@ -30,6 +30,22 @@ func peekRecordType(canon []byte) string {
 	return head.RecordType
 }
 
+// matchTaskPolicy enforces the policy-binding invariant: binding originates
+// in the task assignment, and every downstream lifecycle record must carry
+// exactly the task's frozen policy package or none when the task is unbound.
+func matchTaskPolicy(policyVersion, briefSha string, p *PolicyBinding) error {
+	if policyVersion == "" {
+		if p != nil {
+			return cerr("CONFLICT_MATERIAL_STATE", "record carries a policy binding but the task assignment recorded none")
+		}
+		return nil
+	}
+	if p == nil || p.Version != policyVersion || p.BriefPackageSha256 != briefSha {
+		return cerr("CONFLICT_MATERIAL_STATE", "record does not bind the task's frozen policy package")
+	}
+	return nil
+}
+
 // ---- workstream_create ---------------------------------------------------
 
 func (s *Service) workstreamCreate(sess Session, params json.RawMessage) (any, error) {
@@ -165,8 +181,8 @@ func (s *Service) taskPublish(sess Session, params json.RawMessage) (any, error)
 	var correctionOf any
 	if a.CorrectionOf != nil {
 		eventKind = "correction.published"
-		var priorStatus, priorReviewResult string
-		err = m.tx.QueryRow("SELECT status,review_result_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, a.TaskID, a.CorrectionOf.Revision).Scan(&priorStatus, &priorReviewResult)
+		var priorStatus, priorReviewResult, priorPolicyVersion, priorBriefSha string
+		err = m.tx.QueryRow("SELECT status,review_result_sha,policy_version,brief_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, a.TaskID, a.CorrectionOf.Revision).Scan(&priorStatus, &priorReviewResult, &priorPolicyVersion, &priorBriefSha)
 		if err == sql.ErrNoRows {
 			return fail(cerr("TARGET_NOT_FOUND", "correction references an unknown task revision"))
 		}
@@ -178,6 +194,9 @@ func (s *Service) taskPublish(sess Session, params json.RawMessage) (any, error)
 		}
 		if priorReviewResult != a.CorrectionOf.ReviewResultSha256 {
 			return fail(cerr("CONFLICT_MATERIAL_STATE", "correction reviewResultSha256 does not match the recorded review result"))
+		}
+		if err = matchTaskPolicy(priorPolicyVersion, priorBriefSha, a.Policy); err != nil {
+			return fail(err)
 		}
 		reviewBytes, rerr := s.readArtifact(m.tx, priorReviewResult)
 		if rerr != nil {
@@ -206,9 +225,13 @@ func (s *Service) taskPublish(sess Session, params json.RawMessage) (any, error)
 	if a.Pins.SeededInputCapability != nil {
 		seededDep = a.Pins.SeededInputCapability.Sha
 	}
-	if _, err = m.tx.Exec(`INSERT INTO coord_tasks(workstream_id,task_id,revision,status,assignment_sha,plan_sha,base_sha,seeded_dep_sha,worktree,branch,lease_id,correction_of_revision)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.WorkstreamID, a.TaskID, a.Revision, StatusPublished, sha, a.Pins.Plan.Sha256, a.Pins.Base.Sha, seededDep, a.Authority.Worktree, a.Authority.Branch, a.Authority.WriteLease.LeaseID, correctionOf); err != nil {
+	policyVersion, briefSha := "", ""
+	if a.Policy != nil {
+		policyVersion, briefSha = a.Policy.Version, a.Policy.BriefPackageSha256
+	}
+	if _, err = m.tx.Exec(`INSERT INTO coord_tasks(workstream_id,task_id,revision,status,assignment_sha,plan_sha,base_sha,seeded_dep_sha,worktree,branch,lease_id,correction_of_revision,policy_version,brief_sha)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.WorkstreamID, a.TaskID, a.Revision, StatusPublished, sha, a.Pins.Plan.Sha256, a.Pins.Base.Sha, seededDep, a.Authority.Worktree, a.Authority.Branch, a.Authority.WriteLease.LeaseID, correctionOf, policyVersion, briefSha); err != nil {
 		return fail(err)
 	}
 	seq, err := s.addEvent(m, eventKind, a.TaskID, sha)
@@ -372,8 +395,8 @@ func (s *Service) handoffSubmit(sess Session, params json.RawMessage) (any, erro
 		return nil, err
 	}
 	fail := func(e error) (any, error) { _ = m.tx.Rollback(); return nil, e }
-	var status, planSha, baseSha, seededDep, worktree, branch, leaseID string
-	err = m.tx.QueryRow("SELECT status,plan_sha,base_sha,seeded_dep_sha,worktree,branch,lease_id FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, h.TaskID, h.TaskRevision).Scan(&status, &planSha, &baseSha, &seededDep, &worktree, &branch, &leaseID)
+	var status, planSha, baseSha, seededDep, worktree, branch, leaseID, policyVersion, briefSha string
+	err = m.tx.QueryRow("SELECT status,plan_sha,base_sha,seeded_dep_sha,worktree,branch,lease_id,policy_version,brief_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, h.TaskID, h.TaskRevision).Scan(&status, &planSha, &baseSha, &seededDep, &worktree, &branch, &leaseID, &policyVersion, &briefSha)
 	if err == sql.ErrNoRows {
 		return fail(cerr("TARGET_NOT_FOUND", "task not found"))
 	}
@@ -397,6 +420,9 @@ func (s *Service) handoffSubmit(sess Session, params json.RawMessage) (any, erro
 	}
 	if seededDep != "" && h.SeededInputDependencySha != seededDep {
 		return fail(cerr("CONFLICT_MATERIAL_STATE", "handoff seededInputDependencySha does not match the pinned dependency"))
+	}
+	if err = matchTaskPolicy(policyVersion, briefSha, h.Policy); err != nil {
+		return fail(err)
 	}
 	var holder string
 	err = m.tx.QueryRow("SELECT holder_client FROM coord_leases WHERE workstream_id=? AND lease_id=? AND status='active'", p.WorkstreamID, leaseID).Scan(&holder)
@@ -458,8 +484,8 @@ func (s *Service) reviewRequest(sess Session, params json.RawMessage) (any, erro
 		return nil, err
 	}
 	fail := func(e error) (any, error) { _ = m.tx.Rollback(); return nil, e }
-	var status, headSha, handoffSha, baseSha string
-	err = m.tx.QueryRow("SELECT status,head_sha,handoff_sha,base_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, r.TaskID, r.TaskRevision).Scan(&status, &headSha, &handoffSha, &baseSha)
+	var status, headSha, handoffSha, baseSha, policyVersion, briefSha string
+	err = m.tx.QueryRow("SELECT status,head_sha,handoff_sha,base_sha,policy_version,brief_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, r.TaskID, r.TaskRevision).Scan(&status, &headSha, &handoffSha, &baseSha, &policyVersion, &briefSha)
 	if err == sql.ErrNoRows {
 		return fail(cerr("TARGET_NOT_FOUND", "task not found"))
 	}
@@ -477,6 +503,9 @@ func (s *Service) reviewRequest(sess Session, params json.RawMessage) (any, erro
 	}
 	if r.BaseSha != baseSha {
 		return fail(cerr("CONFLICT_MATERIAL_STATE", "review request baseSha does not match the pinned base"))
+	}
+	if err = matchTaskPolicy(policyVersion, briefSha, r.Policy); err != nil {
+		return fail(err)
 	}
 	ref, sha, err := s.publishRecord(m, "review-request", r.TaskID, r.TaskRevision, RoleOrchestrator, canon, handoffSha)
 	if err != nil {
@@ -521,8 +550,8 @@ func (s *Service) reviewSubmit(sess Session, params json.RawMessage) (any, error
 		return nil, err
 	}
 	fail := func(e error) (any, error) { _ = m.tx.Rollback(); return nil, e }
-	var status, headSha, handoffSha, requestSha string
-	err = m.tx.QueryRow("SELECT status,head_sha,handoff_sha,review_request_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, r.TaskID, r.TaskRevision).Scan(&status, &headSha, &handoffSha, &requestSha)
+	var status, headSha, handoffSha, requestSha, policyVersion, briefSha string
+	err = m.tx.QueryRow("SELECT status,head_sha,handoff_sha,review_request_sha,policy_version,brief_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, r.TaskID, r.TaskRevision).Scan(&status, &headSha, &handoffSha, &requestSha, &policyVersion, &briefSha)
 	if err == sql.ErrNoRows {
 		return fail(cerr("TARGET_NOT_FOUND", "task not found"))
 	}
@@ -540,6 +569,9 @@ func (s *Service) reviewSubmit(sess Session, params json.RawMessage) (any, error
 	}
 	if r.HeadSha != headSha {
 		return fail(cerr("CONFLICT_MATERIAL_STATE", "review result headSha does not match the reviewed head"))
+	}
+	if err = matchTaskPolicy(policyVersion, briefSha, r.Policy); err != nil {
+		return fail(err)
 	}
 	var activeLeases int
 	if err = m.tx.QueryRow("SELECT count(*) FROM coord_leases WHERE workstream_id=? AND status='active'", p.WorkstreamID).Scan(&activeLeases); err != nil {
@@ -728,8 +760,8 @@ func (s *Service) acceptanceSubmit(sess Session, params json.RawMessage) (any, e
 		return nil, err
 	}
 	fail := func(e error) (any, error) { _ = m.tx.Rollback(); return nil, e }
-	var status, headSha, handoffSha, reviewResultSha string
-	err = m.tx.QueryRow("SELECT status,head_sha,handoff_sha,review_result_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, a.TaskID, a.TaskRevision).Scan(&status, &headSha, &handoffSha, &reviewResultSha)
+	var status, headSha, handoffSha, reviewResultSha, policyVersion, briefSha string
+	err = m.tx.QueryRow("SELECT status,head_sha,handoff_sha,review_result_sha,policy_version,brief_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, a.TaskID, a.TaskRevision).Scan(&status, &headSha, &handoffSha, &reviewResultSha, &policyVersion, &briefSha)
 	if err == sql.ErrNoRows {
 		return fail(cerr("TARGET_NOT_FOUND", "task not found"))
 	}
@@ -741,6 +773,9 @@ func (s *Service) acceptanceSubmit(sess Session, params json.RawMessage) (any, e
 	}
 	if a.HeadSha != headSha || a.HandoffSha256 != handoffSha || a.ReviewResultSha256 != reviewResultSha {
 		return fail(cerr("CONFLICT_MATERIAL_STATE", "acceptance must bind the exact reviewed head, handoff, and review result"))
+	}
+	if err = matchTaskPolicy(policyVersion, briefSha, a.Policy); err != nil {
+		return fail(err)
 	}
 	var activeLeases int
 	if err = m.tx.QueryRow("SELECT count(*) FROM coord_leases WHERE workstream_id=? AND status='active'", p.WorkstreamID).Scan(&activeLeases); err != nil {
@@ -790,8 +825,8 @@ func (s *Service) releaseSubmit(sess Session, params json.RawMessage) (any, erro
 		return nil, err
 	}
 	fail := func(e error) (any, error) { _ = m.tx.Rollback(); return nil, e }
-	var status, headSha, baseSha, branch, acceptanceSha string
-	err = m.tx.QueryRow("SELECT status,head_sha,base_sha,branch,acceptance_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, r.TaskID, r.TaskRevision).Scan(&status, &headSha, &baseSha, &branch, &acceptanceSha)
+	var status, headSha, baseSha, branch, acceptanceSha, policyVersion, briefSha string
+	err = m.tx.QueryRow("SELECT status,head_sha,base_sha,branch,acceptance_sha,policy_version,brief_sha FROM coord_tasks WHERE workstream_id=? AND task_id=? AND revision=?", p.WorkstreamID, r.TaskID, r.TaskRevision).Scan(&status, &headSha, &baseSha, &branch, &acceptanceSha, &policyVersion, &briefSha)
 	if err == sql.ErrNoRows {
 		return fail(cerr("TARGET_NOT_FOUND", "task not found"))
 	}
@@ -803,6 +838,9 @@ func (s *Service) releaseSubmit(sess Session, params json.RawMessage) (any, erro
 	}
 	if r.AcceptanceSha256 != acceptanceSha || r.HeadSha != headSha || r.BaseSha != baseSha || r.Branch != branch {
 		return fail(cerr("CONFLICT_MATERIAL_STATE", "release handoff must bind the exact accepted head, base, branch, and acceptance record"))
+	}
+	if err = matchTaskPolicy(policyVersion, briefSha, r.Policy); err != nil {
+		return fail(err)
 	}
 	ref, sha, err := s.publishRecord(m, "release-handoff", r.TaskID, r.TaskRevision, RoleOrchestrator, canon, acceptanceSha)
 	if err != nil {

@@ -45,6 +45,52 @@ shapes: `coord.status.v0` (compact projection), `coord.event.v0`.
 The live coord workstream's own `BUILD-001` envelope is the golden fixture
 (`internal/coord/testdata/task-assignment-live.json`).
 
+## Policy binding (policy-v1 amendment)
+
+An approved **build-a-brief package** is the builder's complete primary input:
+a requirements floor *and* scope ceiling. Coordination transports it without
+starting another discovery cycle, and later findings can never silently amend
+it. Two mechanisms make that durable:
+
+**Repository policy assets.** The five frozen policy-v1 Markdown inputs
+(operating contract + four role prompts) are copied byte-for-byte into
+`docs/policy-v1/` with their source paths and SHA-256 digests recorded in
+`docs/policy-v1/MANIFEST.json` (which also pins the brief-package artifact
+hash). `TestPolicyAssetsMatchManifest` fails on any drift.
+
+**Record binding.** Lifecycle records accept an optional bounded
+`policy {version, briefPackageSha256}` object. The binding originates in the
+task assignment; the invariant enforced on every transition is:
+
+- a policy-bound task refuses any downstream handoff / review request /
+  review result / acceptance / release record that omits the binding or
+  carries a different version or brief-package hash;
+- an unbound task refuses downstream records that try to introduce one;
+- a correction revision must preserve the predecessor's exact binding.
+
+A policy-bound review result must additionally **classify every finding** with
+one of the policy triage classes, and classification constrains severity so
+triage cannot be blocked-by-nitpick:
+
+| class                | allowed severities |
+|----------------------|--------------------|
+| `in-scope-blocker`   | `blocker`          |
+| `in-scope-material`  | `major`            |
+| `valid-follow-up`    | `minor`, `note`    |
+| `irrelevant-nitpick` | `minor`, `note`    |
+| `reviewer-error`     | `minor`, `note`    |
+
+Materiality follows `docs/policy-v1/operating-contract.md`: a finding may
+block only for failed explicit acceptance, supported-flow regression,
+realistic data/security harm, or inability to build/start/migrate/perform the
+changed flow. The compact status projection exposes `policyVersion` and
+`briefPackageSha256` per task for release-conductor consumption.
+
+The current owner-authorized delivery limit remains **one bounded reviewer
+and at most one correction loop** (enforced: revision ≤ 1); the durable
+general policy's two-failed-review circuit breaker is a follow-up proposal
+(see below), not authorization for a second correction.
+
 ## Roles and authority
 
 Roles (`orchestrator`, `builder`, `reviewer`, `release-conductor`) are bound
@@ -167,10 +213,48 @@ naturally idempotent; corruption of a committed body fails controller startup
   4. Never migrate a workspace mid-turn; absent a verified clean checkpoint,
      stay on the deterministic rehearsal.
 
+## Follow-up proposal: review circuit breaker (not implemented)
+
+The policy-v1 operating contract's general rule — at most **two** failed
+review rounds, then a mandatory stop and orchestrator escalation triage — is
+materially expansive relative to the shipped one-correction state model (new
+terminal state, per-workstream configuration, a new record type, and a
+resumption path), so per the amendment it is checked in here as a concrete
+follow-up rather than implemented. Proposed shape:
+
+- **Schema.** `WorkstreamContract.reviewLimits {maxFailedReviewRounds: 1..2}`
+  (default 1, preserving today's behavior); new record type
+  `coord.escalation-triage.v0` `{workstreamId, taskId, taskRevision,
+  createdAt, createdByRole: orchestrator, headShaOrCheckpoint,
+  unresolvedFindings: [{findingId, reviewResultSha256, class, evidence}],
+  briefAmbiguityAssessment, recommendedDisposition: one-bounded-repair |
+  amend-brief | accept-with-follow-ups | split-work | owner-judgment,
+  policy}`.
+- **Storage.** `coord_tasks.failed_review_rounds INTEGER NOT NULL DEFAULT 0`
+  (schema v4, forward-only); increment inside the `review_submit` transaction
+  when the verdict is `CHANGES_REQUESTED`.
+- **Transitions.** When `failed_review_rounds == maxFailedReviewRounds`, the
+  task moves to a new terminal-until-triage status `halted-circuit-breaker`
+  instead of `reviewed-changes-requested`; in that status `task_publish`
+  (correction), `handoff_submit`, and `review_request` are refused with
+  `CONFLICT_MATERIAL_STATE`. A new orchestrator-only operation
+  `coordination.escalation_submit` publishes the triage record (event
+  `escalation.published`) and its `recommendedDisposition` gates exactly one
+  resumption path (`one-bounded-repair` re-opens a single correction;
+  everything else ends the task revision line).
+- **Tests.** Second `CHANGES_REQUESTED` verdict halts the task with no
+  further mutation possible; an unclassified triage record is refused; a
+  `one-bounded-repair` disposition permits exactly one more correction and a
+  third failure is unrepresentable; crash/restart preserves
+  `failed_review_rounds` and the halted status; status/events expose the
+  halt for release-conductor monitoring.
+
 ## Test map
 
 - Schemas / golden corpus: `internal/coord/records_test.go` (live `BUILD-001`
   fixture + invalid corpus).
+- Policy binding, finding-class triage, and policy-asset integrity:
+  `internal/coord/policy_test.go`.
 - Fail-closed matrix (roles, stale revisions, hash mismatches, duplicate
   lease, idempotency conflicts — all no-mutation): `service_test.go`.
 - Delivery, hash-bound acknowledgement, prompt drift/symlink, launcher exit
