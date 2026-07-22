@@ -2,10 +2,15 @@
 # cockpit-state — emit the live grid as JSON for the web control surface.
 #
 #   { active, workspaces:[{window_id,name,active}], recent_cwds:[…],
-#     panes:[{pane_id,window_id,window,session_id,cwd,label,agent,state,badge,orderly}] }
+#     panes:[{pane_id,window_id,window,session_id,cwd,label,agent,state,badge,orderly,initial_turn}] }
 #
 # state/badge are what the poller last painted (@state/@badge); orderly marks
 # aide-de-camp panes (brief/alpha/bravo) so the UI can show them read-only.
+#
+# initial_turn (contract 1, additive) reports the seeded first-turn evidence for EVERY pane: seeded panes
+# carry their durable request's prompt-free metadata (request id, sha256, bytes, pending|accepted|failed,
+# session binding, bounded error code); an unseeded pane reports the EXPLICIT status "none" — positive
+# producer evidence that no seed was requested, distinct from the object being absent on a pre-fix export.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
@@ -19,13 +24,28 @@ fi
 active=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)
 
 panes_tsv=$($TMUX list-panes -s -t "$COCKPIT_SESSION" \
-  -F "#{pane_id}${TAB}#{window_id}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@badge,#{@badge},$NIL}${TAB}#{?@orderly,#{@orderly},$NIL}" 2>/dev/null)
+  -F "#{pane_id}${TAB}#{window_id}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@badge,#{@badge},$NIL}${TAB}#{?@orderly,#{@orderly},$NIL}${TAB}#{?@seed_request_id,#{@seed_request_id},$NIL}" 2>/dev/null)
 
 wins_tsv=$($TMUX list-windows -t "$COCKPIT_SESSION" \
   -F "#{window_id}${TAB}#{window_name}${TAB}#{?window_active,1,0}" 2>/dev/null)
 
-panes=$(printf '%s\n' "$panes_tsv" | jq -Rn '
+# Per-pane seed evidence from the durable records (safe metadata ONLY — never prompt content). A pane whose
+# @seed_request_id has no readable record is reported failed with a bounded code rather than guessed at.
+seed_map='{}'
+while IFS="$TAB" read -r pid _win _wname _sid _cwd _label _agent _state _badge _orderly seedreq; do
+  [[ -n "$pid" && "$seedreq" != "$NIL" && -n "$seedreq" ]] || continue
+  rec=$(cockpit_seed_record_path "$seedreq") || rec=""
+  if [[ -n "$rec" && -f "$rec" && ! -L "$rec" ]]; then
+    row=$(jq -c '{contract:1,request_id,sha256,bytes,status,session_id,accepted_at,error_code}' "$rec" 2>/dev/null) || row=""
+  else row=""; fi
+  [[ -n "$row" ]] || row=$(jq -cn --arg r "$seedreq" \
+    '{contract:1,request_id:$r,sha256:"",bytes:0,status:"failed",session_id:"",accepted_at:"",error_code:"seed-record-missing"}')
+  seed_map=$(jq -c --arg p "$pid" --argjson row "$row" '. + {($p): $row}' <<<"$seed_map")
+done <<<"$panes_tsv"
+
+panes=$(printf '%s\n' "$panes_tsv" | jq -Rn --argjson seeds "$seed_map" '
   def nn: if . == "<nil>" then "" else . end;
+  def none: {contract:1,request_id:"",sha256:"",bytes:0,status:"none",session_id:"",accepted_at:"",error_code:""};
   [ inputs | select(length>0) | split("\t") | {
       pane_id:    .[0],
       window_id:  .[1],
@@ -36,7 +56,8 @@ panes=$(printf '%s\n' "$panes_tsv" | jq -Rn '
       agent:      (.[6]),
       state:      (.[7]|nn),
       badge:      (.[8]|nn),
-      orderly:    (.[9]|nn)
+      orderly:    (.[9]|nn),
+      initial_turn: ($seeds[.[0]] // none)
     } ]')
 
 workspaces=$(printf '%s\n' "$wins_tsv" | jq -Rn '
