@@ -164,13 +164,23 @@ lease / delivery material), `IDEMPOTENCY_CONFLICT`, `DEADLINE_EXCEEDED`,
 coord.task-pointer.v0 workstreamId=… taskId=… revision=… requestId=… artifactPath=… artifactHash=…
 ```
 
-and invokes the **pinned external seeded first-turn producer** (the
-`fix/cockpit-seeded-spawn` capability) through the four-flag interface
-`--request-id --initial-prompt-file --initial-prompt-sha256
---initial-prompt-bytes` (plus `--cwd`/`--name` launch context). The launcher
-path comes from `COCKPIT_SEED_LAUNCHER` (absolute); unset means delivery
-fails closed (`CAPABILITY_ABSENT`). There is no send-keys or shell-injection
-path, and the coordination package cannot express one.
+and invokes the **pinned external seeded first-turn producer**
+(`fix/cockpit-seeded-spawn`, reviewed exact head
+`86c544ea24bf39f5b0718a5006316f2f6ad3c316`) through the material-binding
+interface `--request-id --initial-prompt-file --initial-prompt-sha256
+--initial-prompt-bytes`, plus `--cwd`/`--name` launch context and the typed
+selective interaction profile. Coordination-controlled sessions are
+agent-to-agent by definition, so the adapter always requests
+`--interaction-profile agent` as a fixed value — no request can select the
+human profile, and human/default launches elsewhere (e.g. Develop Brief)
+are untouched. The producer binds the profile into its durable reservation
+identity: replaying a request id with a different profile conflicts before
+any launch. The profile changes communication behavior only; the
+content-addressed build-a-brief package remains the complete primary input
+and task authority. The launcher path comes from `COCKPIT_SEED_LAUNCHER`
+(absolute); unset means delivery fails closed (`CAPABILITY_ABSENT`). There
+is no send-keys or shell-injection path, and the coordination package cannot
+express one.
 
 Delivery is two-phase and durable: reservation (status `prepared`) commits
 before any launch side effect; the launch outcome (`launched`/`failed` with

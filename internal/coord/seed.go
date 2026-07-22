@@ -16,13 +16,21 @@ import (
 //
 // The controller writes a private, bounded prompt file containing only a
 // typed task-pointer envelope, then invokes the shared seeded first-turn
-// capability through the pinned four-flag interface
+// capability through the pinned material-binding interface
 // (--request-id --initial-prompt-file --initial-prompt-sha256
-// --initial-prompt-bytes). There is no send-keys or shell-injection path
-// here: the launcher is an external pinned producer, the prompt reaches the
-// provider as its positional first-turn input, and acknowledgement is a
-// structured controller record bound by request id and artifact hash.
-// Terminal display, copy mode, and scrolling are irrelevant to delivery.
+// --initial-prompt-bytes) plus the typed selective interaction profile
+// (--interaction-profile, reviewed seeded-spawn head
+// 86c544ea24bf39f5b0718a5006316f2f6ad3c316). Coordination deliveries are
+// always agent-to-agent, so the adapter requests the agent profile; the
+// producer binds the profile into its durable reservation identity, and
+// human/default launches elsewhere are untouched. There is no send-keys or
+// shell-injection path here: the launcher is an external pinned producer,
+// the prompt reaches the provider as its positional first-turn input, and
+// acknowledgement is a structured controller record bound by request id and
+// artifact hash. Terminal display, copy mode, and scrolling are irrelevant
+// to delivery. The profile changes communication behavior only; the
+// content-addressed build-a-brief package remains the complete primary
+// input and task authority.
 
 // Launcher is the narrow seam onto the seeded first-turn capability.
 type Launcher interface {
@@ -55,9 +63,13 @@ func (e *LaunchError) Error() string { return e.Code + ": " + e.Detail }
 type ExecLauncher struct{ Path string }
 
 func (l ExecLauncher) Launch(req LaunchRequest) (string, error) {
+	// Coordination-controlled sessions are agent-driven by definition: the
+	// typed profile is a fixed part of this adapter's contract, never caller
+	// data, so no request can select the human profile or omit it.
 	cmd := exec.Command(l.Path,
 		"--cwd", req.Cwd,
 		"--name", req.Name,
+		"--interaction-profile", "agent",
 		"--request-id", req.RequestID,
 		"--initial-prompt-file", req.PromptFile,
 		"--initial-prompt-sha256", req.PromptSha256,

@@ -165,7 +165,7 @@ func assignmentJSON(ws, taskID string, revision int64, worktree string) map[stri
 		"pins": map[string]any{
 			"plan":                  map[string]any{"path": "/tmp/plan.json", "sha256": testPlanSha, "revision": 0},
 			"base":                  map[string]any{"ref": "origin/main", "refreshedAt": "2026-07-22T12:00:00Z", "sha": testBaseSha},
-			"seededInputCapability": map[string]any{"ref": "origin/seed", "sha": testSeedSha, "interface": []string{"--request-id", "--initial-prompt-file", "--initial-prompt-sha256", "--initial-prompt-bytes"}, "integrationPolicy": "consume behind adapter"},
+			"seededInputCapability": map[string]any{"ref": "origin/seed", "sha": testSeedSha, "interface": []string{"--request-id", "--initial-prompt-file", "--initial-prompt-sha256", "--initial-prompt-bytes", "--interaction-profile"}, "integrationPolicy": "consume behind adapter"},
 		},
 		"objective":              "test objective",
 		"scope":                  map[string]any{"required": []string{"r"}, "explicitlyOutOfScope": []string{"o"}},

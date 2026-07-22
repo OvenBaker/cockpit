@@ -79,14 +79,17 @@ func newCoordFixture(t *testing.T) *coordFixture {
 	f.worktree = filepath.Join(root, "wt")
 	git("worktree", "add", "-q", "-b", "feat/test", f.worktree, "main")
 
-	// Fake seeded launcher: records argv, verifies the prompt material, and
-	// prints a pane id. It is the only launch path; no send-keys exists.
+	// Fake seeded launcher: records argv, verifies the prompt material and
+	// the mandatory agent interaction profile (reviewed seeded-spawn head
+	// 86c544e contract), and prints a pane id. It is the only launch path;
+	// no send-keys exists.
 	f.launcherLog = filepath.Join(root, "launcher.log")
 	launcher := filepath.Join(root, "fake-seed-spawn")
 	script := `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" >> ` + f.launcherLog + `
 declare -A a; while [[ $# -gt 0 ]]; do a["$1"]="$2"; shift 2; done
+[[ "${a[--interaction-profile]:-}" == agent ]] || { echo profile >&2; exit 2; }
 f="${a[--initial-prompt-file]}"
 [[ -f "$f" && ! -L "$f" ]] || { echo bad-file >&2; exit 4; }
 [[ "$(sha256sum < "$f" | cut -d' ' -f1)" == "${a[--initial-prompt-sha256]}" ]] || { echo drift >&2; exit 4; }
@@ -255,12 +258,16 @@ func TestCoordRehearsalFullCycle(t *testing.T) {
 	if del["status"] != "launched" || del["paneId"] != "%77" {
 		t.Fatalf("deliver: %#v", del)
 	}
-	// The launcher received the pinned four-flag material and verified it.
+	// The launcher received the pinned material-binding flags and the agent
+	// interaction profile, and verified them.
 	argv, _ := os.ReadFile(f.launcherLog)
 	for _, flag := range []string{"--request-id", "--initial-prompt-file", "--initial-prompt-sha256", "--initial-prompt-bytes"} {
 		if !strings.Contains(string(argv), flag) {
 			t.Fatalf("launcher argv missing %s: %s", flag, argv)
 		}
+	}
+	if !strings.Contains(string(argv), "--interaction-profile\nagent\n") {
+		t.Fatalf("launcher argv missing agent interaction profile: %s", argv)
 	}
 	f.result("builder", "coordination.task_acknowledge", map[string]any{
 		"workstreamId": ws, "expectedRevision": f.revision(ws), "idempotencyKey": ikc(4),

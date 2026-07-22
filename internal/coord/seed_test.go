@@ -260,8 +260,11 @@ func TestPromptFileSymlinkAndDriftFailClosed(t *testing.T) {
 }
 
 func TestExecLauncherFlagContract(t *testing.T) {
-	// The exec adapter must speak exactly the pinned four-flag interface plus
-	// the launch context flags, and map the producer's exit codes.
+	// The exec adapter must speak exactly the pinned material-binding flags
+	// plus the launch context and the fixed agent interaction profile
+	// (reviewed seeded-spawn head 86c544e), and map the producer's exit
+	// codes. The exact-argv equality below is the proof that no other flag —
+	// and never the human profile — can be requested.
 	root := t.TempDir()
 	script := filepath.Join(root, "fake-spawn")
 	log := filepath.Join(root, "argv.log")
@@ -278,7 +281,7 @@ func TestExecLauncherFlagContract(t *testing.T) {
 		t.Fatalf("launch: %q %v", pane, err)
 	}
 	argv, _ := os.ReadFile(log)
-	want := fmt.Sprintf("--cwd\n/tmp/wt\n--name\nBUILD-001\n--request-id\nreq-1\n--initial-prompt-file\n%s\n--initial-prompt-sha256\n%s\n--initial-prompt-bytes\n26\n", prompt, strings.Repeat("a", 64))
+	want := fmt.Sprintf("--cwd\n/tmp/wt\n--name\nBUILD-001\n--interaction-profile\nagent\n--request-id\nreq-1\n--initial-prompt-file\n%s\n--initial-prompt-sha256\n%s\n--initial-prompt-bytes\n26\n", prompt, strings.Repeat("a", 64))
 	if string(argv) != want {
 		t.Fatalf("argv:\n%q\nwant\n%q", argv, want)
 	}

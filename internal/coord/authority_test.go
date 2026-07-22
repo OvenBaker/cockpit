@@ -53,15 +53,22 @@ func TestCoordinationHasNoTerminalAuthority(t *testing.T) {
 			return true
 		})
 	}
-	// The seed adapter's only executable surface is the pinned flag interface.
+	// The seed adapter's only executable surface is the pinned flag
+	// interface, including the fixed agent interaction profile.
 	b, err := os.ReadFile("seed.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, flag := range []string{"--request-id", "--initial-prompt-file", "--initial-prompt-sha256", "--initial-prompt-bytes"} {
+	for _, flag := range []string{"--request-id", "--initial-prompt-file", "--initial-prompt-sha256", "--initial-prompt-bytes", "--interaction-profile"} {
 		if !strings.Contains(string(b), `"`+flag+`"`) {
 			t.Errorf("seed adapter lost pinned flag %s", flag)
 		}
+	}
+	if !strings.Contains(string(b), `"--interaction-profile", "agent"`) {
+		t.Error("seed adapter must request the agent interaction profile as a fixed value")
+	}
+	if strings.Contains(string(b), `"human"`) {
+		t.Error("seed adapter must never be able to request the human profile")
 	}
 	if strings.Contains(string(b), "tmux") && !strings.Contains(string(b), "// ") {
 		t.Error("seed adapter references tmux")
