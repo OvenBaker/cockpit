@@ -4,7 +4,8 @@
 # web/remote surface can open a session without driving the interactive picker.
 #
 #   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME]
-#                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N]
+#                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N
+#                  [--interaction-profile human|agent]]
 #
 # claude panes come up with Remote Control on (via lib.sh), so the session shows
 # in the Claude app under NAME and you can steer it from your phone. No id is
@@ -19,6 +20,15 @@
 # a reused request id conflicts before any spawn. Acceptance is a separate asynchronous fact owned by the
 # Claude UserPromptSubmit hook (see cockpit-hook); nothing here marks a seed accepted.
 #
+# INTERACTION PROFILE (seeded contract only): --interaction-profile human|agent selects who is on the other
+# side of the seeded session. Omitted → `human`, which is byte-for-byte the pre-profile launch (existing
+# Develop Brief and manual seeded launches are unchanged). `agent` keeps the identical prompt/identity
+# contract but launches Claude agent-to-agent (see cockpit-seed-exec for the exact argv/env delta). The
+# validated profile is BOUND into the durable reservation identity: replaying a request id with a different
+# profile is material drift and conflicts (exit 5) before any pane or provider start. The profile crosses to
+# cockpit-seed-exec only as a validated argv value — never via prompt text or shell interpolation — and is
+# strictly per invocation: no global Claude settings are read or written.
+#
 # Exit codes: 0 ok (pane id on stdout) · 1 no grid/workspace · 2 validation refused ·
 #             4 seed terminally failed (bounded code on stderr) · 5 seed request conflict (changed material).
 set -uo pipefail
@@ -30,7 +40,7 @@ TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 export COCKPIT_REMOTE_CONTROL=1
 
 cwd=""; ws=""; agent="claude"; name=""
-req_id=""; prompt_file=""; prompt_sha=""; prompt_bytes=""
+req_id=""; prompt_file=""; prompt_sha=""; prompt_bytes=""; profile=""; profile_given=0
 while [[ $# -gt 0 ]]; do case "$1" in
   --cwd)       cwd="${2:-}"; shift;;
   --workspace) ws="${2:-}"; shift;;
@@ -40,6 +50,7 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --initial-prompt-file)   prompt_file="${2:-}"; shift;;
   --initial-prompt-sha256) prompt_sha="${2:-}"; shift;;
   --initial-prompt-bytes)  prompt_bytes="${2:-}"; shift;;
+  --interaction-profile)   profile="${2:-}"; profile_given=1; shift;;
   *) echo "cockpit-spawn: unknown arg: $1" >&2; exit 2;;
 esac; shift; done
 
@@ -73,7 +84,19 @@ if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
     refuse "initial prompt contains disallowed control characters"
   fi
   case "$name$ws" in *$'\n'*|*$'\t'*|*$'\r'*) refuse "workspace/name must not contain control characters";; esac
+  # Typed interaction profile: exactly `human` or `agent`; omission means `human` (the backward-compatible
+  # default — an unprofiled seeded launch stays byte-identical to the pre-profile contract).
+  if (( profile_given )); then
+    case "$profile" in human|agent) ;; *) refuse "--interaction-profile must be 'human' or 'agent'";; esac
+  else
+    profile=human
+  fi
   seeded=1
+fi
+# The interaction profile is part of the SEEDED launch contract only; on a plain spawn it has no meaning and
+# is refused rather than silently ignored.
+if (( profile_given && ! seeded )); then
+  echo "cockpit-spawn: --interaction-profile requires a seeded launch (--request-id …)" >&2; exit 2
 fi
 
 $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "cockpit-spawn: no cockpit grid running" >&2; exit 1; }
@@ -111,9 +134,10 @@ if (( seeded )); then
   if [[ -f "$record" ]]; then
     prior=$(cat "$record")
     # Material binding: identical material replays/reconciles; ANY drift (prompt digest/bytes, provider, cwd,
-    # workspace, name) under a reused request id conflicts loudly BEFORE any side effect.
-    if ! jq -e --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" --arg c "$real_cwd" --arg w "$ws" --arg n "$name" \
-        '.request_id==$r and .sha256==$s and .bytes==($b|tonumber) and .provider=="claude" and .cwd==$c and .workspace==$w and .name==$n' \
+    # workspace, name, interaction profile) under a reused request id conflicts loudly BEFORE any side effect.
+    # A pre-profile record carries no .profile field and is read as the profile it was launched with: human.
+    if ! jq -e --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" \
+        '.request_id==$r and .sha256==$s and .bytes==($b|tonumber) and .provider=="claude" and .cwd==$c and .workspace==$w and .name==$n and ((.profile // "human")==$ip)' \
         <<<"$prior" >/dev/null; then
       echo "cockpit-spawn: seed request '$req_id' was already reserved with different material" >&2; exit 5
     fi
@@ -149,9 +173,9 @@ if (( seeded )); then
   else
     # Durable reservation FIRST (prompt-free), then the producer-owned protected staging copy of the prompt.
     cockpit_seed_write "$record" "$(jq -cn --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" \
-      --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg t "$(date +%s)" \
+      --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" --arg t "$(date +%s)" \
       '{contract:1,request_id:$r,sha256:$s,bytes:($b|tonumber),provider:"claude",cwd:$c,workspace:$w,name:$n,
-        status:"pending",pane_id:"",session_id:"",accepted_at:"",error_code:"",created_at:$t}')" \
+        profile:$ip,status:"pending",pane_id:"",session_id:"",accepted_at:"",error_code:"",created_at:$t}')" \
       || { echo "cockpit-spawn: could not reserve seed request" >&2; exit 1; }
     stage_prompt "$staging" \
       || { cockpit_seed_update "$record" '.status="failed" | .error_code="prompt-material-unavailable"' >/dev/null
@@ -168,7 +192,7 @@ W=$(cockpit_resolve_workspace "$ws")
 # A SEEDED launch goes through cockpit-seed-exec: only trusted, %q-quoted PATHS cross the shell hop — the
 # prompt itself is read from the protected staging file inside the pane and passed as a direct argv element.
 if (( seeded )); then
-  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "${COCKPIT_CLAUDE_BIN:-claude}")"
+  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "${COCKPIT_CLAUDE_BIN:-claude}") $(printf %q "$profile")"
 else case "$agent" in
   codex) launch="exec codex";;
   shell) launch="exec bash -l";;

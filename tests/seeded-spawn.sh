@@ -15,6 +15,9 @@
 #   8  provider exit before acceptance fails with a bounded content-free code              → t_exit_before_accept
 #   9  non-seeded claude/codex/shell spawns and state JSON stay compatible                 → t_unseeded_compat
 #  10  invalid/partial flags and hostile prompt files fail before side effects             → t_validation
+#  14  interaction profile (RELEASE-AMEND-001): agent launches carry EXACTLY the agent argv/env delta;
+#      human/default launches carry none of it (byte-identical argv); the profile is bound into request
+#      identity (drift conflicts, zero extra panes/starts); typed validation fails closed  → t_profile
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 root=$(mktemp -d)
@@ -37,6 +40,7 @@ OUT="$root/out"; REPO="$REPO"; SOCKET="$socket"
 hook() { printf '%s' "\$2" | COCKPIT_SOCKET_NAME="\$SOCKET" XDG_STATE_HOME="$root/state" COCKPIT_SEED_DIR="$root/state/cockpit/seeds" "\$REPO/cockpit-hook" "\$1"; }
 echo start >> "\$OUT/starts"
 : > "\$OUT/argv"; for a in "\$@"; do printf '%s\0' "\$a" >> "\$OUT/argv"; done
+printf '%s' "\${AGENT_DRIVEN:-}" > "\$OUT/agent_driven"
 mode=\$(cat "\$OUT/mode" 2>/dev/null || echo hold)
 prompt="\${@: -1}"
 sid="11111111-2222-3333-4444-555555555555"
@@ -63,7 +67,7 @@ SHA=$(sha256sum < "$PROMPT_FILE" | cut -d' ' -f1)
 BYTES=$(wc -c < "$PROMPT_FILE")
 spawn() { "$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace seedws --name seed-demo \
   --request-id "$1" --initial-prompt-file "${2:-$PROMPT_FILE}" \
-  --initial-prompt-sha256 "${3:-$SHA}" --initial-prompt-bytes "${4:-$BYTES}"; }
+  --initial-prompt-sha256 "${3:-$SHA}" --initial-prompt-bytes "${4:-$BYTES}" "${@:5}"; }
 record_of() { XDG_STATE_HOME="$root/state" COCKPIT_SEED_DIR="$root/state/cockpit/seeds" \
   bash -c "source '$REPO/lib.sh'; cockpit_seed_record_path '$1'"; }
 field() { jq -r ".$2" "$(record_of "$1")"; }
@@ -304,5 +308,79 @@ n=$(pane_count)
 [[ $(pane_count) -eq $n && $(starts) -eq 1 ]]                   # …zero extra panes/starts
 [[ "$(field req-amb status)" == pending ]]
 echo "ok 13 ambiguous-window-binds-and-reconciles"
+
+# ── 14: interaction profile — exact agent-only argv/env delta, human/default byte-identical, identity-bound ─
+# (a) agent profile: EXACT argv delta + AGENT_DRIVEN=1, and the unchanged prompt/acceptance contract on top.
+echo full > "$root/out/mode"; : > "$root/out/starts"
+paneAg=$(spawn req-prof-agent "$PROMPT_FILE" "$SHA" "$BYTES" --interaction-profile agent)
+[[ "$paneAg" == %* ]]
+wait_for '[[ "$(field req-prof-agent status)" == accepted ]]'   # acceptance contract unaffected by profile
+[[ "$(field req-prof-agent profile)" == agent ]]
+[[ "$(cat "$root/out/agent_driven")" == 1 ]]
+python3 - "$root/out/argv" "$PROMPT_FILE" <<'PY'
+import sys
+argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
+prompt = open(sys.argv[2],'rb').read()
+assert argv[:2] == [b'--remote-control', b'seed-demo'], argv[:2]
+assert argv[2:8] == [b'--permission-mode', b'bypassPermissions',
+                     b'--disallowedTools', b'AskUserQuestion', b'EnterPlanMode',
+                     b'--append-system-prompt'], argv[2:8]
+text = argv[8]
+assert b'another AI agent' in text and b'BLOCKED:' in text, text
+assert argv[9:] == [b'--', prompt], argv[9:]
+assert len(argv) == 11, argv          # exactly the agent delta — nothing more, nothing less
+PY
+# (b) same request + same profile replays onto the same pane with zero extra starts
+: > "$root/out/starts"
+[[ "$(spawn req-prof-agent "$PROMPT_FILE" "$SHA" "$BYTES" --interaction-profile agent)" == "$paneAg" ]]
+[[ $(starts) -eq 0 ]]
+# (c) profile drift under the reused request id conflicts BEFORE any spawn — zero extra panes/starts
+n=$(pane_count)
+set +e; spawn req-prof-agent >/dev/null 2>&1; rc=$?; set -e                                   # omitted → human
+[[ $rc -eq 5 ]]
+set +e; spawn req-prof-agent "$PROMPT_FILE" "$SHA" "$BYTES" --interaction-profile human >/dev/null 2>&1; rc=$?; set -e
+[[ $rc -eq 5 ]]
+[[ $(pane_count) -eq $n && $(starts) -eq 0 ]]
+# (d) explicit human: argv byte-identical to the pre-profile launch, no AGENT_DRIVEN, profile bound as human
+echo hold > "$root/out/mode"; : > "$root/out/starts"
+paneH=$(spawn req-prof-human "$PROMPT_FILE" "$SHA" "$BYTES" --interaction-profile human)
+wait_for '[[ $(starts) -eq 1 ]]'
+[[ "$(field req-prof-human profile)" == human ]]
+[[ -z "$(cat "$root/out/agent_driven")" ]]
+python3 - "$root/out/argv" "$PROMPT_FILE" <<'PY'
+import sys
+argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
+prompt = open(sys.argv[2],'rb').read()
+assert argv == [b'--remote-control', b'seed-demo', b'--', prompt], argv
+PY
+# (e) omitted profile: defaults to human — same byte-identical argv, and the record says so
+: > "$root/out/starts"
+spawn req-prof-default >/dev/null
+wait_for '[[ $(starts) -eq 1 ]]'
+[[ "$(field req-prof-default profile)" == human ]]
+[[ -z "$(cat "$root/out/agent_driven")" ]]
+python3 - "$root/out/argv" "$PROMPT_FILE" <<'PY'
+import sys
+argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
+prompt = open(sys.argv[2],'rb').read()
+assert argv == [b'--remote-control', b'seed-demo', b'--', prompt], argv
+PY
+# …and a human-by-default request replayed as agent is drift too (both directions conflict)
+n=$(pane_count); : > "$root/out/starts"
+set +e; spawn req-prof-default "$PROMPT_FILE" "$SHA" "$BYTES" --interaction-profile agent >/dev/null 2>&1; rc=$?; set -e
+[[ $rc -eq 5 ]]
+[[ $(pane_count) -eq $n && $(starts) -eq 0 ]]
+# (f) typed validation fails closed before side effects; the flag is seeded-contract-only
+n=$(pane_count)
+refused "${base[@]}" --request-id req-prof-v1 --initial-prompt-file "$PROMPT_FILE" \
+  --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" --interaction-profile bogus
+refused "${base[@]}" --request-id req-prof-v2 --initial-prompt-file "$PROMPT_FILE" \
+  --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" --interaction-profile ""
+refused "${base[@]}" --interaction-profile agent            # no seeded contract → refused, not ignored
+for r in req-prof-v1 req-prof-v2; do
+  [[ ! -f "$(record_of "$r")" ]] || { echo "record leaked for $r" >&2; exit 1; }
+done
+[[ $(pane_count) -eq $n && $(starts) -eq 0 ]]
+echo "ok 14 interaction-profile-selective-and-identity-bound"
 
 echo "ALL SEEDED-SPAWN CHECKS PASSED"
