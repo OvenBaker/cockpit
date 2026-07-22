@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/gareth/cockpit-core/internal/coord"
 )
 
 type daemon struct {
@@ -42,6 +44,7 @@ type daemon struct {
 	subMu                sync.Mutex
 	eventSeq             uint64
 	eventRing            []eventSummary
+	coord                *coord.Service
 }
 type watcher struct {
 	paneRef      string
@@ -177,6 +180,20 @@ func newDaemon(root, socket, tmuxSocket string, auth *authenticator, liveCockpit
 		return nil, e
 	}
 	d := &daemon{root: clean, socket: socket, epoch: id("cpe_"), st: s, tm: t, auth: auth, lock: lf, serverLock: slf, paneLocks: map[string]*sync.Mutex{}, watchers: map[string]*watcher{}, subs: map[string]*subscription{}}
+	// The coordination domain shares the controller's database and root but
+	// owns no tmux mechanics. The seeded launcher is an external pinned
+	// producer; without explicit configuration, delivery fails closed.
+	var launcher coord.Launcher
+	if path := os.Getenv("COCKPIT_SEED_LAUNCHER"); path != "" && filepath.IsAbs(path) {
+		launcher = coord.ExecLauncher{Path: path}
+	}
+	cs, e := coord.New(s.db, clean, launcher)
+	if e != nil {
+		leaseTransferred = true
+		d.Close()
+		return nil, e
+	}
+	d.coord = cs
 	if e = d.reconcile(); e != nil {
 		leaseTransferred = true
 		d.Close()
@@ -519,7 +536,7 @@ func (d *daemon) handle(c net.Conn) {
 		}
 		ownedMu.Unlock()
 	}()
-	profile, caller, capabilities, ok := d.open(c, writer)
+	profile, caller, capabilities, fixedIdentity, ok := d.open(c, writer)
 	if !ok {
 		return
 	}
@@ -572,7 +589,7 @@ func (d *daemon) handle(c net.Conn) {
 			_ = writer.write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"cancelled": cancel != nil}})
 			continue
 		}
-		isWait := req.Method == "wait.for_change"
+		isWait := req.Method == "wait.for_change" || req.Method == "coordination.wait"
 		if isWait {
 			pendingMu.Lock()
 			if _, exists := pending[key]; exists {
@@ -614,7 +631,7 @@ func (d *daemon) handle(c net.Conn) {
 				pendingMu.Unlock()
 				cancel()
 			}()
-			result, err := d.dispatch(ctx, profile, caller, capabilities, req)
+			result, err := d.dispatch(ctx, profile, caller, capabilities, fixedIdentity, req)
 			if err != nil {
 				_ = writer.write(d.errorResponse(req.ID, err))
 				return
@@ -664,44 +681,48 @@ func (d *daemon) handle(c net.Conn) {
 		}(req, key, isWait)
 	}
 }
-func (d *daemon) open(r io.Reader, w *frameWriter) (string, string, []string, bool) {
+func (d *daemon) open(r io.Reader, w *frameWriter) (string, string, []string, bool, bool) {
 	raw, e := readFrame(r)
 	if e != nil {
-		return "", "", nil, false
+		return "", "", nil, false, false
 	}
 	if !utf8.Valid(raw) || !json.Valid(raw) {
 		_ = w.write(rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: -32700, Message: "parse error"}})
-		return "", "", nil, false
+		return "", "", nil, false, false
 	}
 	var req rpcRequest
 	if strictJSON(raw, &req) != nil || req.JSONRPC != "2.0" || req.Method != "session.open" {
 		_ = w.write(rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: -32600, Message: "invalid request"}})
-		return "", "", nil, false
+		return "", "", nil, false, false
 	}
 	if _, ok := requestIDFromRaw(req.ID); !ok {
 		_ = w.write(rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: -32600, Message: "invalid request"}})
-		return "", "", nil, false
+		return "", "", nil, false, false
 	}
 	var p sessionParams
 	if strict(req.Params, &p) != nil || p.Protocol == "" || p.ClientID == "" || utf8.RuneCountInString(p.ClientID) > 128 || p.ClaimedProfile == "" || !validClaimedProfile(p.ClaimedProfile) || p.Credential == "" || utf8.RuneCountInString(p.Credential) > 512 {
 		_ = w.write(d.errorResponse(req.ID, rpcStandard(-32602, "invalid params")))
-		return "", "", nil, false
+		return "", "", nil, false, false
 	}
 	if p.Protocol != Protocol {
 		_ = w.write(d.errorResponse(req.ID, derr("UNSUPPORTED_PROTOCOL", "protocol 1.0 required")))
-		return "", "", nil, false
+		return "", "", nil, false, false
 	}
 	grant, authenticated := d.auth.verify(p.Credential, p.ClientID, p.ClaimedProfile)
 	if !authenticated {
 		_ = w.write(d.errorResponse(req.ID, derr("UNAUTHENTICATED", "invalid credential")))
-		return "", "", nil, false
+		return "", "", nil, false, false
 	}
+	// fixedIdentity reports whether the client id was pinned by the credential
+	// grant itself rather than merely claimed by the peer. Coordination role
+	// bindings only trust pinned identities.
+	fixedIdentity := grant.ClientID != ""
 	caller := grant.ClientID
 	if caller == "" {
 		caller = p.ClientID
 	}
 	_ = w.write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"protocol": Protocol, "controllerEpoch": d.epoch, "clientId": caller, "profile": grant.Profile, "ready": true, "capabilities": grant.Capabilities}})
-	return grant.Profile, caller, grant.Capabilities, true
+	return grant.Profile, caller, grant.Capabilities, fixedIdentity, true
 }
 func validClaimedProfile(profile string) bool {
 	switch profile {
@@ -739,9 +760,18 @@ func requestIDFromRaw(raw json.RawMessage) (string, bool) {
 	return "", false
 }
 
-func (d *daemon) dispatch(ctx context.Context, profile, caller string, capabilities []string, r rpcRequest) (any, error) {
+func (d *daemon) dispatch(ctx context.Context, profile, caller string, capabilities []string, fixedIdentity bool, r rpcRequest) (any, error) {
 	if spec, known := specForMethod(r.Method); known && spec.Capability != "" && !has(capabilities, spec.Capability) {
 		return nil, derr("PERMISSION_DENIED", "capability absent")
+	}
+	// Coordination methods are registry-gated above and then delegated to the
+	// coordination domain service. MCP and CLI never gain their own policy:
+	// they reach the identical authenticated dispatch.
+	if strings.HasPrefix(r.Method, "coordination.") {
+		if _, known := specForMethod(r.Method); !known {
+			return nil, rpcStandard(-32601, "method not found")
+		}
+		return d.coord.Dispatch(ctx, coord.Session{Caller: caller, Fixed: fixedIdentity, Profile: profile}, r.Method, r.Params)
 	}
 	switch r.Method {
 	case "controller.health":
@@ -969,7 +999,7 @@ func (d *daemon) resolveCanonical(canonical string) (any, error) {
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		f := strings.Split(line, "\t")
 		if len(f) == 2 && f[0] == canonical && f[1] != "" {
-			return d.dispatch(context.Background(), "resolver", "resolver", []string{"state:read"}, rpcRequest{Method: "pane.inspect", Params: json.RawMessage(fmt.Sprintf(`{"paneRef":%q}`, f[1]))})
+			return d.dispatch(context.Background(), "resolver", "resolver", []string{"state:read"}, false, rpcRequest{Method: "pane.inspect", Params: json.RawMessage(fmt.Sprintf(`{"paneRef":%q}`, f[1]))})
 		}
 	}
 	return nil, derr("TARGET_NOT_FOUND", "canonical pane locator not found")
@@ -993,6 +1023,10 @@ func (d *daemon) errorResponse(id json.RawMessage, e error) rpcResponse {
 	de := &domainError{}
 	if errors.As(e, &de) {
 		return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32001, Message: de.Code, Data: map[string]string{"code": de.Code, "message": de.Message}}}
+	}
+	ce := &coord.Error{}
+	if errors.As(e, &ce) {
+		return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32001, Message: ce.Code, Data: map[string]string{"code": ce.Code, "message": ce.Message}}}
 	}
 	return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -32001, Message: "INTERNAL", Data: map[string]string{"code": "INTERNAL"}}}
 }

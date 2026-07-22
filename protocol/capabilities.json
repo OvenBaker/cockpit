@@ -1,4 +1,5 @@
 [
   "state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write",
-  "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume"
+  "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume",
+  "coord:admin", "coord:read", "coord:write"
 ]

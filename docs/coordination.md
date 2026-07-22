@@ -1,0 +1,180 @@
+# Structured Workstream Coordination (Coordination Core v0)
+
+The coordination domain (`internal/coord`) replaces pane scraping for one
+bounded cycle: **task publish → builder claim/lease → builder handoff →
+exact-SHA review → acceptance → release handoff**. Semantic state lives only
+in immutable typed records and controller events. Terminal text, pane titles,
+captures, copy mode, and scrolling are never semantic inputs; the package has
+no tmux access at all (enforced by `TestCoordinationHasNoTerminalAuthority`).
+
+It extends the existing `cockpit-core` resident controller: one daemon, one
+authenticated method registry, one SQLite store (schema version 2), one
+CLI/MCP translation boundary. MCP and ctl reach identical controller methods
+and error codes; neither owns policy or state.
+
+## Records
+
+Every record is strict JSON (unknown fields rejected), bounded
+(≤128 KiB, lists ≤64 items), and stored immutably in a controller-private
+content-addressed area (`<root>/coord/artifacts/<aa>/<sha256>`). SHA-256 is
+computed over the exact stored canonical bytes (the transmitted `record`
+value, surrounding whitespace trimmed). Publication stages + fsyncs the body,
+hard-links it with no-replace semantics, then commits metadata, state
+transition, event, projection bump, and idempotency result in **one**
+transaction. Startup reconciliation verifies every committed body digest and
+prunes never-committed orphans.
+
+Caller-authored record types (validated schemas, `coord.<type>.v0`):
+
+| recordType            | authored by  | drives transition                |
+|-----------------------|--------------|----------------------------------|
+| `workstream-contract` | operator     | workstream creation, role binding |
+| `task-assignment`     | orchestrator | task publish / single correction |
+| `builder-handoff`     | builder      | claimed → handoff-submitted      |
+| `review-request`      | orchestrator | handoff-submitted → review-requested |
+| `review-result`       | reviewer     | review-requested → reviewed-pass / reviewed-changes-requested |
+| `final-acceptance`    | orchestrator | reviewed-pass → accepted         |
+| `release-handoff`     | orchestrator | accepted → released              |
+| `lease-transfer`      | orchestrator | scoped reviewer small-fix lease  |
+| `plan-reference`      | orchestrator | none (supporting artifact)       |
+
+Controller-authored records: `task-claim`, `write-lease`,
+`task-acknowledgement`, `lease-return`, `workspace-checkpoint`. Bounded read
+shapes: `coord.status.v0` (compact projection), `coord.event.v0`.
+
+The live coord workstream's own `BUILD-001` envelope is the golden fixture
+(`internal/coord/testdata/task-assignment-live.json`).
+
+## Roles and authority
+
+Roles (`orchestrator`, `builder`, `reviewer`, `release-conductor`) are bound
+to **credential-pinned client ids** at workstream creation. A mutation payload
+can never claim or escalate a role; the service resolves the caller's role
+server-side, and mutations from identities not pinned by a credential grant
+are refused outright. Enforced invariants:
+
+- Exactly one active write lease per workstream (partial unique index).
+- Only the assigned builder can claim a task and acquire the lease; the
+  orchestrator and reviewer are refused.
+- The lease releases automatically on a valid builder handoff.
+- The reviewer is read-only unless an orchestrator-published `lease-transfer`
+  record grants a scoped (paths inside the task worktree, ≤24 h) lease; a
+  verdict is refused while any lease is active, so the transfer must be
+  returned (`lease_return`) first.
+- Handoff/review/acceptance/release bind exact 40-hex head/base SHAs, the
+  pinned plan hash, and prior record hashes; any mismatch fails with no
+  mutation.
+- Exactly one correction loop: revision 1 must reference revision 0's
+  `review-result` findings; revision 2 is unrepresentable.
+
+## Operations
+
+All via `cockpit-core ctl --socket S --credential-file F [--client-id ID
+--profile P] METHOD JSON` or the MCP tools in parentheses. Mutations carry
+`workstreamId`, `expectedRevision` (projection CAS), and `idempotencyKey`
+(`ik_<unix>_<32hex>`; same key + same intent replays the original result,
+same key + different intent fails with `IDEMPOTENCY_CONFLICT`).
+
+| method                            | capability  | role         | MCP tool |
+|-----------------------------------|-------------|--------------|----------|
+| `coordination.workstream_create`  | coord:admin | operator     | — |
+| `coordination.task_publish`       | coord:write | orchestrator | `coord_task_publish` |
+| `coordination.task_deliver`       | coord:write | orchestrator | — |
+| `coordination.task_acknowledge`   | coord:write | builder      | `coord_task_acknowledge` |
+| `coordination.task_claim`         | coord:write | builder      | `coord_task_claim` |
+| `coordination.artifact_publish`   | coord:write | per record   | `coord_artifact_publish` |
+| `coordination.artifact_read`      | coord:read  | any          | `coord_artifact_read` |
+| `coordination.handoff_submit`     | coord:write | builder      | `coord_handoff_submit` |
+| `coordination.review_request`     | coord:write | orchestrator | `coord_review_request` |
+| `coordination.review_submit`      | coord:write | reviewer     | `coord_review_submit` |
+| `coordination.lease_transfer`     | coord:write | orchestrator | — |
+| `coordination.lease_return`       | coord:write | reviewer     | — |
+| `coordination.acceptance_submit`  | coord:write | orchestrator | `coord_acceptance_submit` |
+| `coordination.release_submit`     | coord:write | orchestrator | `coord_release_submit` |
+| `coordination.checkpoint_emit`    | coord:write | orchestrator | — |
+| `coordination.status_get`         | coord:read  | any          | `coord_status` |
+| `coordination.events_list`        | coord:read  | any          | `coord_events` |
+| `coordination.wait`               | coord:read  | any          | `coord_wait` |
+
+`events_list` is cursor-based (`afterSeq`, limit ≤200) over a durable
+append-only per-workstream log — no gaps, no pruning. `wait` is a one-shot
+bounded wait (deadline ≤10 min) for any event past a cursor; waiters are
+always removed on wake, deadline, or cancellation, and count against the
+connection's wait limit. Release-conductor monitoring needs only
+`status_get` + `events_list` + `wait`.
+
+Error codes reuse the existing protocol vocabulary: `INVALID_REQUEST`,
+`PERMISSION_DENIED`, `TARGET_NOT_FOUND`, `CONFLICT_VERSION` (stale
+`expectedRevision`), `CONFLICT_MATERIAL_STATE` (wrong status / hash / SHA /
+lease / delivery material), `IDEMPOTENCY_CONFLICT`, `DEADLINE_EXCEEDED`,
+`CANCELLED`, `CAPABILITY_ABSENT`, `CONTROLLER_NOT_READY`.
+
+## Provider-native task pointer delivery
+
+`task_deliver` writes a private prompt file (`<root>/coord/seeds/<requestId>.prompt`,
+0600, no-replace) containing only the typed pointer envelope:
+
+```
+coord.task-pointer.v0 workstreamId=… taskId=… revision=… requestId=… artifactPath=… artifactHash=…
+```
+
+and invokes the **pinned external seeded first-turn producer** (the
+`fix/cockpit-seeded-spawn` capability) through the four-flag interface
+`--request-id --initial-prompt-file --initial-prompt-sha256
+--initial-prompt-bytes` (plus `--cwd`/`--name` launch context). The launcher
+path comes from `COCKPIT_SEED_LAUNCHER` (absolute); unset means delivery
+fails closed (`CAPABILITY_ABSENT`). There is no send-keys or shell-injection
+path, and the coordination package cannot express one.
+
+Delivery is two-phase and durable: reservation (status `prepared`) commits
+before any launch side effect; the launch outcome (`launched`/`failed` with
+the producer's terminal exit codes 2/4/5) commits after. Replaying the same
+request id with identical material reconciles to the one canonical pane;
+changed material conflicts before any side effect. The prompt file is
+re-verified (regular, non-symlink, private, exact digest/length) immediately
+before every launch. Acknowledgement (`task_acknowledge`) is a structured
+builder record bound by request id + task identity + exact artifact hash —
+wrong hash is refused without mutation.
+
+## Durability
+
+SQLite WAL + `synchronous=FULL` + foreign keys, one connection. Every
+mutation is a single transaction; crash/restart preserves artifacts, tasks,
+claims, leases, deliveries, the event cursor, the projection, and idempotency
+results (covered by in-process restart tests and a hard process-kill in the
+rehearsal). Artifact bodies are content-addressed, so replayed publication is
+naturally idempotent; corruption of a committed body fails controller startup
+(`CONTROLLER_NOT_READY`).
+
+## Choir-flow rehearsal and cutover runbook
+
+- `TestCoordRehearsalFullCycle` is the deterministic isolated rehearsal: a
+  real daemon process, throwaway tmux server, isolated git repo/worktree, and
+  fake seeded launcher drive the complete cycle, including a mid-cycle crash
+  and terminal-noise injection.
+- `coordination.checkpoint_emit` is the characterization wrapper for a
+  current Cockpit workspace: it emits an immutable
+  `workspace-checkpoint` record built **only** from the durable controller
+  projection (workspace/pane identity rows — refs, generations, versions,
+  badges, fences). It never reads pane output and cannot interrupt a live
+  turn.
+- Live cutover procedure (release-conductor sequenced, out of scope here):
+  1. Wait for an externally verified clean handoff on the target workstream.
+  2. `checkpoint_emit` the workspace as provenance.
+  3. Create the workstream/contract, publish the task envelope pinned to a
+     refreshed base SHA, and deliver via the seeded capability once it is in
+     the deployed `main`.
+  4. Never migrate a workspace mid-turn; absent a verified clean checkpoint,
+     stay on the deterministic rehearsal.
+
+## Test map
+
+- Schemas / golden corpus: `internal/coord/records_test.go` (live `BUILD-001`
+  fixture + invalid corpus).
+- Fail-closed matrix (roles, stale revisions, hash mismatches, duplicate
+  lease, idempotency conflicts — all no-mutation): `service_test.go`.
+- Delivery, hash-bound acknowledgement, prompt drift/symlink, launcher exit
+  codes: `seed_test.go`.
+- Static authority boundary: `authority_test.go`.
+- End-to-end rehearsal, crash/restart, CLI/MCP parity, terminal-noise
+  immunity, no-send-keys proof: `internal/core/coord_rehearsal_test.go`.

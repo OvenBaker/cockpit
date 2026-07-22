@@ -1,0 +1,192 @@
+{
+  "schemaVersion": "coord.task-assignment.v0",
+  "recordType": "task-assignment",
+  "workstreamId": "coord",
+  "taskId": "BUILD-001",
+  "revision": 0,
+  "status": "published",
+  "createdAt": "2026-07-22T12:48:46+02:00",
+  "createdByRole": "orchestrator",
+  "assignedRole": "builder",
+  "assignee": {
+    "provider": "claude",
+    "model": "claude-opus-4.8",
+    "effort": "high",
+    "approvalMode": "auto"
+  },
+  "authority": {
+    "repository": "/home/gareth/repos/cockpit",
+    "repositoryAuthority": "sole-writer-in-assigned-isolated-worktree",
+    "worktree": "/home/gareth/workspaces/lean/.worktrees/coord-core",
+    "branch": "feat/structured-workstream-coordination",
+    "allowedWrites": [
+      "/home/gareth/workspaces/lean/.worktrees/coord-core"
+    ],
+    "forbiddenWrites": [
+      "/home/gareth/repos/cockpit",
+      "/home/gareth/workspaces/lean/.coord/coord"
+    ],
+    "may": [
+      "edit-assigned-worktree",
+      "run-focused-tests",
+      "commit"
+    ],
+    "mayNot": [
+      "modify-live-checkout",
+      "write-coordination-artifacts-directly",
+      "merge",
+      "install",
+      "deploy",
+      "migrate-active-workstreams",
+      "create-subagents",
+      "open-ended-watch"
+    ],
+    "writeLease": {
+      "leaseId": "LEASE-BUILD-001-r0",
+      "scope": "/home/gareth/workspaces/lean/.worktrees/coord-core",
+      "holderRole": "builder",
+      "exclusive": true,
+      "acquireOnStructuredAcknowledgement": true,
+      "releaseOnValidHandoff": true
+    }
+  },
+  "pins": {
+    "plan": {
+      "path": "/home/gareth/workspaces/lean/.coord/coord/artifacts/plans/PLAN-001.r0.json",
+      "sha256": "b6d5f20304b2b51e31cdfb03a4f7407020c2624689aa2d31735b15a0be2fde84",
+      "revision": 0
+    },
+    "ownerReset": {
+      "path": "/home/gareth/workspaces/lean/.coord/reset-20260722/coord.md",
+      "sha256": "9524c69e187d27966c77c350f1f770248486e5e85ee943003fa50da52575a051"
+    },
+    "base": {
+      "ref": "origin/main",
+      "refreshedAt": "2026-07-22T12:48:46+02:00",
+      "sha": "390d2bf021d97abf13a456bc8d6d25618eb534c2"
+    },
+    "seededInputCapability": {
+      "ref": "origin/fix/cockpit-seeded-spawn",
+      "sha": "fb7fedb6b0ea7d276207c07069192635a6d6598a",
+      "interface": [
+        "--request-id",
+        "--initial-prompt-file",
+        "--initial-prompt-sha256",
+        "--initial-prompt-bytes"
+      ],
+      "integrationPolicy": "Treat this as an external pinned producer capability. Do not cherry-pick it into this task and do not implement a competing send-keys or shell-input path. Coordination code may consume or characterize this interface behind a narrow adapter and fake it in tests."
+    }
+  },
+  "objective": "Implement the bounded Coordination Core vertical slice that replaces pane scraping for one structured task to builder handoff to exact-SHA review to acceptance cycle, with durable status/events and provider-native pointer delivery integration.",
+  "scope": {
+    "required": [
+      "Versioned strict record schemas and validation for workstream/role contract, plan reference, task assignment/claim, exclusive write lease, builder handoff, exact-SHA review request/result, one correction task reference, final acceptance, release handoff, append-only event, and compact current status.",
+      "Controller-owned durable SQLite state and private immutable content-hashed artifacts with transactional publication/transition semantics, restart recovery, and idempotent mutation outcomes.",
+      "Role/capability enforcement proving exactly one builder lease; orchestrator cannot hold it or submit review; reviewer is read-only unless an explicit scoped small-fix transfer is recorded.",
+      "Controller operations and cockpit-core ctl plus mcp-stdio tools sufficient for task publish/claim, artifact read/publish, handoff submit, review request/submit, acceptance submit, release-handoff submit, status, bounded event list, and one-shot wait.",
+      "Exact full Git SHA and artifact-hash binding from builder handoff through review and acceptance; stale base/head/hash/role/revision transitions fail without mutation.",
+      "A narrow provider-native seeded first-turn adapter that passes a protected prompt-file pointer envelope using the pinned four-flag interface and records acknowledgement as structured state. Terminal text, titles, captures, copy mode, and scrolling are never semantic inputs.",
+      "A deterministic isolated rehearsal exercising one complete builder-to-reviewer-to-acceptance cycle and a characterization/checkpoint wrapper for later Choir-flow cutover. Do not touch an active Choir-flow turn.",
+      "Concise operator/protocol documentation and focused false-pass-resistant tests."
+    ],
+    "explicitlyOutOfScope": [
+      "Generalized workflow engines or arbitrary workflow execution",
+      "CI orchestration or replacement of release-conductor gates",
+      "Lean Runner functionality",
+      "Wholesale Cockpit rewrite or multi-instance worker fabric",
+      "Raw send-keys delivery, pane scraping, pane titles, or terminal output as semantic authority",
+      "Merging the separate seeded-spawn branch",
+      "Live workstream migration, install, deployment, merge, or production cutover",
+      "More than one builder, one bounded reviewer, or one correction loop"
+    ]
+  },
+  "implementationGuidance": [
+    "Extend the existing cockpit-core Go binary and authenticated controller boundary on the pinned base. Do not create a second daemon, second policy stack, or MCP-owned state.",
+    "Keep coordination domain code separate from pane/tmux mechanics and split files/packages by responsibility instead of growing existing giant files.",
+    "Use strict JSON decoding with unknown-field rejection for mutations, explicit byte/list limits, SHA-256 over stored canonical bytes, no-replace artifact publication, SQLite foreign keys, synchronous durability, and one transaction for transition + event + projection + idempotency result.",
+    "Prefer a minimal coherent vertical API over implementing every future candidate operation. Methods may be coordination-prefixed to avoid collision with the pane-control protocol.",
+    "Use server-authenticated role assignments; never trust a role claimed in mutation payloads.",
+    "Use isolated temporary roots, repositories, and fake seeded launcher/provider in tests. Never connect tests to the live cockpit tmux socket or mutate the protected checkout.",
+    "If a design choice would expand scope or conflict with the pinned seeded-input interface, stop and report the exact structured decision needed rather than improvising."
+  ],
+  "acceptanceCriteria": [
+    {
+      "id": "B1",
+      "criterion": "A complete task, claim/lease, handoff, review, acceptance, and release-handoff rehearsal is driven only by structured controller records and events."
+    },
+    {
+      "id": "B2",
+      "criterion": "Plausible partial/truncated terminal text cannot transition state or produce completion."
+    },
+    {
+      "id": "B3",
+      "criterion": "Provider-native prompt-file pointer delivery is hash/byte/request bound and independent of copy mode or scrolling; no send-keys route exists."
+    },
+    {
+      "id": "B4",
+      "criterion": "Builder handoff, review request/result, acceptance, and release handoff bind to one exact full head SHA and declared artifact hashes."
+    },
+    {
+      "id": "B5",
+      "criterion": "Wrong role, stale revision/base/head, wrong artifact hash, reused idempotency key with changed intent, and duplicate lease all fail without repository or workstream mutation."
+    },
+    {
+      "id": "B6",
+      "criterion": "Orchestrator cannot hold the builder lease or submit review; reviewer cannot write absent a recorded scoped lease transfer."
+    },
+    {
+      "id": "B7",
+      "criterion": "Compact status, cursor-based bounded events, and one-shot wait are sufficient for release-conductor monitoring and leak no watcher."
+    },
+    {
+      "id": "B8",
+      "criterion": "Crash/restart preserves artifacts, claims, lease, event cursor, projection, and idempotent outcomes without duplicate publication/effect."
+    },
+    {
+      "id": "B9",
+      "criterion": "Existing focused Cockpit tests remain green; the task adds no generalized workflow, CI, or Lean Runner surface."
+    },
+    {
+      "id": "B10",
+      "criterion": "A committed clean-worktree handoff supplies exact base/head, bounded diff summary, focused checks, known limitations, and output hashes."
+    }
+  ],
+  "focusedVerification": [
+    "Run relevant new Go unit/integration tests while iterating.",
+    "Run targeted protocol/golden corpus checks for new schemas and CLI/MCP parity.",
+    "Run the deterministic end-to-end rehearsal and crash/idempotency fault tests.",
+    "Run existing directly affected package and Bash characterization tests.",
+    "Run git diff --check before handoff."
+  ],
+  "requiredOutputs": {
+    "repository": [
+      "Committed implementation and focused tests on feat/structured-workstream-coordination",
+      "No uncommitted changes at handoff"
+    ],
+    "handoff": {
+      "delivery": "Return the structured handoff payload in the final response for orchestrator publication; do not write coordination artifacts directly.",
+      "requiredFields": [
+        "taskId",
+        "taskRevision",
+        "planSha256",
+        "baseSha",
+        "headSha",
+        "branch",
+        "worktree",
+        "commitSummary",
+        "diffSummary",
+        "checks",
+        "knownLimitations",
+        "outputArtifactsAndSha256",
+        "worktreeClean",
+        "seededInputDependencySha"
+      ]
+    }
+  },
+  "stopConditions": [
+    "Stop after one committed, clean, structured builder handoff.",
+    "Stop and report a precise blocker if the pinned base, assigned worktree, sole-writer lease, source pins, or seeded-input dependency cannot be honored.",
+    "Do not run a consolidated pre-deployment gate; release-conductor owns it.",
+    "Do not merge, install, deploy, or start a live cutover."
+  ]
+}
