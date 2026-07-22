@@ -74,7 +74,7 @@ func TestLiveCockpitAdmissionParityOnEquivalentSocket(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		result, err := d.dispatch(context.Background(), grant.Profile, grant.ClientID, grant.Capabilities, rpcRequest{Method: method, Params: raw})
+		result, err := d.dispatch(context.Background(), grant.Profile, grant.ClientID, grant.Capabilities, grant.ClientID != "", rpcRequest{Method: method, Params: raw})
 		if err != nil {
 			t.Fatalf("%s: %v", method, err)
 		}

@@ -44,12 +44,15 @@ func (s *store) migrate() error {
 	if _, err := s.db.Exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL"); err != nil {
 		return err
 	}
+	// Version 1 is the pane-controller schema; versions 2-3 add the
+	// coordination domain (owned by internal/coord.Migrate, applied after
+	// this base step).
 	var version int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
-		return fmt.Errorf("store schema %d is newer than supported version 1", version)
+	if version > 3 {
+		return fmt.Errorf("store schema %d is newer than supported version 3", version)
 	}
 	tx, err := s.db.Begin()
 	if err != nil {

@@ -50,12 +50,19 @@ func mcpStdio(args []string) {
 	if err != nil {
 		fatal("mcp-stdio credential unavailable")
 	}
+	// A credential grant may pin its client id (e.g. a coordination role
+	// identity); the claimed id must then match the grant. The default keeps
+	// the historical cockpit-mcp identity.
+	clientID := os.Getenv("COCKPIT_MCP_CLIENT_ID")
+	if clientID == "" {
+		clientID = "cockpit-mcp"
+	}
 	c, err := net.Dial("unix", *socket)
 	if err != nil {
 		fatal(err.Error())
 	}
 	defer c.Close()
-	if err = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp", "claimedProfile": "mcp-local", "credential": credential}}); err != nil {
+	if err = writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": clientID, "claimedProfile": "mcp-local", "credential": credential}}); err != nil {
 		fatal(err.Error())
 	}
 	opened, err := readFrame(c)
@@ -126,7 +133,7 @@ func mcpStdio(args []string) {
 		if !ok || loc == "" {
 			return nil, errors.New("paneRef or canonical locator is required")
 		}
-		return resolvePane(*socket, credential, loc)
+		return resolvePane(*socket, credential, clientID, loc)
 	}
 	s := bufio.NewScanner(os.Stdin)
 	s.Buffer(make([]byte, 4096), maxFrame)
@@ -186,7 +193,9 @@ func mcpStdio(args []string) {
 			continue
 		}
 		operationOnlyWait := method == "wait.for_change" && call.Arguments["operationRef"] != nil && call.Arguments["paneRef"] == nil && call.Arguments["locator"] == nil
-		if method != "state.snapshot" && method != "capabilities.get" && !operationOnlyWait {
+		// Coordination tools address workstreams, not panes; they bypass pane
+		// locator resolution entirely.
+		if method != "state.snapshot" && method != "capabilities.get" && !operationOnlyWait && !strings.HasPrefix(method, "coordination.") {
 			if target, e := resolve(call.Arguments); e != nil {
 				write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": map[string]any{"content": []map[string]string{{"type": "text", "text": e.Error()}}, "isError": true}})
 				continue
@@ -239,13 +248,13 @@ func privateCredentialFile(path string) (string, error) {
 	return credential, nil
 }
 
-func resolvePane(socket, credential, locator string) (map[string]any, error) {
+func resolvePane(socket, credential, clientID, locator string) (map[string]any, error) {
 	c, err := net.Dial("unix", socket)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
-	open := map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpit-mcp", "claimedProfile": "mcp-local", "credential": credential}}
+	open := map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": clientID, "claimedProfile": "mcp-local", "credential": credential}}
 	if err = writeFrame(c, open); err != nil {
 		return nil, err
 	}
@@ -323,6 +332,11 @@ func ctl(args []string) {
 	fs := flag.NewFlagSet("ctl", flag.ExitOnError)
 	socket := fs.String("socket", "", "control socket")
 	credentialFile := fs.String("credential-file", "", "private controller credential file")
+	// A credential grant may pin a client id and profile; ctl must be able to
+	// present the matching claim. Identity authority stays server-side: the
+	// controller only admits the pair the credential registry grants.
+	clientID := fs.String("client-id", "cockpitctl", "client id to claim")
+	profile := fs.String("profile", "local-operator", "profile to claim")
 	fs.Parse(args)
 	if *socket == "" || *credentialFile == "" || fs.NArg() < 1 {
 		fatal("ctl requires --socket --credential-file METHOD [JSON params]")
@@ -340,11 +354,18 @@ func ctl(args []string) {
 		fatal(err.Error())
 	}
 	defer c.Close()
-	if err := writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": "cockpitctl", "claimedProfile": "local-operator", "credential": credential}}); err != nil {
+	if err := writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "open", "method": "session.open", "params": map[string]any{"protocol": "1.0", "clientId": *clientID, "claimedProfile": *profile, "credential": credential}}); err != nil {
 		fatal(err.Error())
 	}
-	if _, err := readFrame(c); err != nil {
+	opened, err := readFrame(c)
+	if err != nil {
 		fatal(err.Error())
+	}
+	var openedResponse struct {
+		Error any `json:"error"`
+	}
+	if json.Unmarshal(opened, &openedResponse) != nil || openedResponse.Error != nil {
+		fatal("ctl controller session denied")
 	}
 	if err := writeFrame(c, map[string]any{"jsonrpc": "2.0", "id": "ctl", "method": fs.Arg(0), "params": params}); err != nil {
 		fatal(err.Error())

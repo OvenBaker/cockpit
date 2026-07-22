@@ -74,11 +74,11 @@ func (a *authenticator) verify(credential, clientID, claimedProfile string) (cre
 func profileCapabilities(profile string) []string {
 	switch profile {
 	case "local-operator":
-		return []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume"}
+		return []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume", "coord:admin", "coord:read", "coord:write"}
 	case "mcp-local":
-		return []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume"}
+		return []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume", "coord:read", "coord:write"}
 	case "read-only":
-		return []string{"state:read", "operations:read", "events:wait"}
+		return []string{"state:read", "operations:read", "events:wait", "coord:read"}
 	default:
 		return []string{}
 	}

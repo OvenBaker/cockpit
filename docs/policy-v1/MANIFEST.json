@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "coord.policy-assets-manifest.v0",
+  "packageVersion": "policy-v1",
+  "briefPackageSha256": "17679f6a0228b4cf3ecd67a07307704db44ec783f7acb02945443444b6d88f06",
+  "briefPackageSourcePath": "/home/gareth/workspaces/lean/.coord/coord/artifacts/briefs/BUILD-001.brief-package.v1.json",
+  "disposition": "These five Markdown files are byte-for-byte copies of the frozen policy-v1 inputs from the BUILD-001 build-a-brief package. The package is the complete primary builder input and the scope ceiling; later findings cannot amend it. TestPolicyAssetsMatchManifest verifies every copy against these digests.",
+  "assets": [
+    {
+      "role": "operating-policy",
+      "path": "docs/policy-v1/operating-contract.md",
+      "sourcePath": "/home/gareth/workspaces/lean/.coord/policy-v1/operating-contract.md",
+      "sha256": "5284a6f53066ba0c747302936d07f06fae9cec26697f979dac580f7e02033489"
+    },
+    {
+      "role": "orchestrator-guiding-prompt",
+      "path": "docs/policy-v1/orchestrator-prompt.md",
+      "sourcePath": "/home/gareth/workspaces/lean/.coord/policy-v1/orchestrator-prompt.md",
+      "sha256": "de8765c29d99bd537367293f8d7b2a1bc2276d62c72d572bb26925fde5d8a2f6"
+    },
+    {
+      "role": "builder-guiding-prompt",
+      "path": "docs/policy-v1/builder-prompt.md",
+      "sourcePath": "/home/gareth/workspaces/lean/.coord/policy-v1/builder-prompt.md",
+      "sha256": "62a6b9639729d04bfc1daa73c7942893bcca7be9d8ac97ceec4b798db46f4292"
+    },
+    {
+      "role": "reviewer-guiding-prompt",
+      "path": "docs/policy-v1/reviewer-prompt.md",
+      "sourcePath": "/home/gareth/workspaces/lean/.coord/policy-v1/reviewer-prompt.md",
+      "sha256": "f4334cf9a60aff5f9f1fbf39a9f24cf9b14d6e964d9673a4885360e87950da15"
+    },
+    {
+      "role": "release-conductor-guiding-prompt",
+      "path": "docs/policy-v1/release-conductor-prompt.md",
+      "sourcePath": "/home/gareth/workspaces/lean/.coord/policy-v1/release-conductor-prompt.md",
+      "sha256": "736df850baffcf8967746b4a54bc36f1f61746151ee0e75d008d2286e98d1929"
+    }
+  ]
+}
