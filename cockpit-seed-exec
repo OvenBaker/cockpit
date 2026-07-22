@@ -28,7 +28,7 @@ fail() {
 
 [[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [claude-bin]"
 [[ -n "${TMUX_PANE:-}" ]] || die "not inside a tmux pane"
-[[ -f "$record" ]] || die "seed record is unavailable"
+[[ -f "$record" && ! -L "$record" ]] || die "seed record is unavailable or unsafe"
 
 # Bind this pane to the request under the record lock: first pane in wins; a different already-bound pane
 # means a duplicate launch attempt and this pane must NOT start a provider or touch the seed.

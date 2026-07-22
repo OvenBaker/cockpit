@@ -34,8 +34,8 @@ wins_tsv=$($TMUX list-windows -t "$COCKPIT_SESSION" \
 seed_map='{}'
 while IFS="$TAB" read -r pid _win _wname _sid _cwd _label _agent _state _badge _orderly seedreq; do
   [[ -n "$pid" && "$seedreq" != "$NIL" && -n "$seedreq" ]] || continue
-  rec=$(cockpit_seed_record_path "$seedreq")
-  if [[ -f "$rec" ]]; then
+  rec=$(cockpit_seed_record_path "$seedreq") || rec=""
+  if [[ -n "$rec" && -f "$rec" && ! -L "$rec" ]]; then
     row=$(jq -c '{contract:1,request_id,sha256,bytes,status,session_id,accepted_at,error_code}' "$rec" 2>/dev/null) || row=""
   else row=""; fi
   [[ -n "$row" ]] || row=$(jq -cn --arg r "$seedreq" \

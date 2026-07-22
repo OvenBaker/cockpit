@@ -241,4 +241,68 @@ done
 [[ $(pane_count) -eq $n && $(starts) -eq 0 ]]
 echo "ok 10 validation-before-side-effects"
 
+# ── 11: symlink victim traces — a planted state leaf must NEVER redirect a write onto an external file ─────
+victim="$root/victim.txt"; printf 'VICTIM-CONTENT\n' > "$victim"
+vsha=$(sha256sum < "$victim" | cut -d' ' -f1)
+seed_path() { XDG_STATE_HOME="$root/state" COCKPIT_SEED_DIR="$root/state/cockpit/seeds" \
+  bash -c "source '$REPO/lib.sh'; cockpit_seed_${2}_path '$1'"; }
+n=$(pane_count); : > "$root/out/starts"
+# (a) the reviewer's exact trace: pre-planted <request-hash>.prompt symlink → victim
+ln -s "$victim" "$(seed_path req-sym-staging staging)"
+set +e; spawn req-sym-staging >/dev/null 2>&1; rc=$?; set -e
+[[ $rc -eq 2 ]]
+[[ "$(sha256sum < "$victim" | cut -d' ' -f1)" == "$vsha" ]]   # victim byte-identical — never overwritten
+# (b) planted record symlink
+ln -s "$victim" "$(seed_path req-sym-record record)"
+set +e; spawn req-sym-record >/dev/null 2>&1; rc=$?; set -e
+[[ $rc -eq 2 ]]
+[[ "$(sha256sum < "$victim" | cut -d' ' -f1)" == "$vsha" ]]
+# (c) planted spawn-lock symlink
+( set -C; : > /dev/null ) 2>/dev/null
+ln -s "$victim" "$(seed_path req-sym-lock record).spawn.lock"
+set +e; spawn req-sym-lock >/dev/null 2>&1; rc=$?; set -e
+[[ $rc -eq 2 ]]
+[[ "$(sha256sum < "$victim" | cut -d' ' -f1)" == "$vsha" ]]
+# (d) the seed state DIR itself is a symlink → fail closed before anything
+ln -s "$root/elsewhere" "$root/dirlink"; mkdir -p "$root/elsewhere"
+set +e; COCKPIT_SEED_DIR="$root/dirlink" spawn req-sym-dir >/dev/null 2>&1; rc=$?; set -e
+[[ $rc -eq 2 ]]
+[[ $(pane_count) -eq $n && $(starts) -eq 0 ]]
+echo "ok 11 symlink-victim-never-written"
+
+# ── 12: concurrent same-request barrier — one canonical pane identity, one provider start ──────────────────
+echo hold > "$root/out/mode"; : > "$root/out/starts"; : > "$root/out/conc"
+n=$(pane_count)
+for i in $(seq 1 30); do ( spawn req-conc >> "$root/out/conc" 2>/dev/null ) & done
+wait
+[[ $(wc -l < "$root/out/conc") -eq 30 ]]                       # every caller succeeded with an identity
+[[ $(sort -u "$root/out/conc" | wc -l) -eq 1 ]]                # …and it is the SAME pane for all 30
+grep -qx "$(sort -u "$root/out/conc")" <(tmux -L "$socket" list-panes -s -t cockpit -F '#{pane_id}')
+[[ $(pane_count) -eq $((n+1)) ]]                               # exactly one new pane
+wait_for '[[ $(starts) -eq 1 ]]'                               # exactly one provider start
+[[ "$(field req-conc pane_id)" == "$(sort -u "$root/out/conc")" ]]
+echo "ok 12 concurrent-single-identity"
+
+# ── 13: ambiguous crash window — pane created and launcher ran, but the SPAWNER died before its own binding ─
+echo hold > "$root/out/mode"; : > "$root/out/starts"
+XDG_STATE_HOME="$root/state" COCKPIT_SEED_DIR="$root/state/cockpit/seeds" bash -c "
+  source '$REPO/lib.sh'
+  rec=\$(cockpit_seed_record_path req-amb)
+  cockpit_seed_write \"\$rec\" \"\$(jq -cn --arg s '$SHA' --arg b '$BYTES' --arg c \"\$(realpath '$root/cwd')\" \
+    '{contract:1,request_id:\"req-amb\",sha256:\$s,bytes:(\$b|tonumber),provider:\"claude\",cwd:\$c,workspace:\"seedws\",name:\"seed-demo\",status:\"pending\",pane_id:\"\",session_id:\"\",accepted_at:\"\",error_code:\"\",created_at:\"0\"}')\"
+  cp '$PROMPT_FILE' \"\$(cockpit_seed_staging_path req-amb)\"; chmod 600 \"\$(cockpit_seed_staging_path req-amb)\"
+"
+ambrec=$(seed_path req-amb record); ambstage=$(seed_path req-amb staging)
+# Simulate the spawner crashing right after split-window: the pane + launcher exist, the spawner never set
+# pane options or updated the record. The IN-PANE launcher must bind the pane to the request by itself.
+ambpane=$(tmux -L "$socket" split-window -t cockpit -P -F '#{pane_id}' \
+  "bash -lc 'cd $(printf %q "$root/cwd") && exec $(printf %q "$REPO/cockpit-seed-exec") $(printf %q "$ambrec") $(printf %q "$ambstage") seed-demo $(printf %q "$root/cwd") $(printf %q "$root/bin/fake-claude")'")
+wait_for '[[ "$(field req-amb pane_id)" == "$ambpane" ]]'      # launcher-side binding closed the window
+wait_for '[[ $(starts) -eq 1 ]]'
+n=$(pane_count)
+[[ "$(spawn req-amb)" == "$ambpane" ]]                          # replay reconciles onto THAT pane…
+[[ $(pane_count) -eq $n && $(starts) -eq 1 ]]                   # …zero extra panes/starts
+[[ "$(field req-amb status)" == pending ]]
+echo "ok 13 ambiguous-window-binds-and-reconciles"
+
 echo "ALL SEEDED-SPAWN CHECKS PASSED"

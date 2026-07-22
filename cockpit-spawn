@@ -81,9 +81,33 @@ $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "cockpit-spawn: no
 
 # ── seeded reservation / same-request reconciliation (before any tmux side effect) ─────────────────────────
 if (( seeded )); then
-  real_cwd=$(realpath "$cwd" 2>/dev/null) || { echo "cockpit-spawn: cannot resolve --cwd" >&2; exit 2; }
-  record=$(cockpit_seed_record_path "$req_id")
-  staging=$(cockpit_seed_staging_path "$req_id")
+  real_cwd=$(realpath "$cwd" 2>/dev/null) || refuse "cannot resolve --cwd"
+  record=$(cockpit_seed_record_path "$req_id") || refuse "seed state directory is unavailable or unsafe"
+  staging=$(cockpit_seed_staging_path "$req_id") || refuse "seed state directory is unavailable or unsafe"
+  # Copy the caller's prompt into a PRIVATE temp first and re-verify the declared material on that copy — the
+  # copy is the only bytes ever used from here on, so a caller-side swap between validation and use can only
+  # produce a drift refusal, never different launched content (validate→copy TOCTOU closed).
+  stage_prompt() {  # $1 = destination — writes the verified private copy via rename (never follows a leaf)
+    local dst="$1" tmp
+    tmp=$(umask 077; mktemp "$(dirname "$dst")/.stage.XXXXXXXX") || return 1
+    cat -- "$prompt_file" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    if [[ "$(sha256sum < "$tmp" | cut -d' ' -f1)" != "$prompt_sha" || "$(wc -c < "$tmp")" -ne "$prompt_bytes" ]]; then
+      rm -f "$tmp"; return 1
+    fi
+    [[ -L "$dst" ]] && { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$dst"
+  }
+  # SERIALIZE the whole reservation → reconciliation → spawn critical section per request: every concurrent
+  # or replayed caller of the same request id passes through this one exclusive lock (held to process exit)
+  # and therefore observes/returns the ONE canonical pane — never a split identity, never an extra provider
+  # start. The lock file itself is claimed symlink-safely.
+  cockpit_seed_locksafe "$record.spawn.lock" || refuse "seed state leaf is unsafe (symlinked lock)"
+  exec 9<"$record.spawn.lock"
+  flock -x 9 || { echo "cockpit-spawn: could not serialize seed request" >&2; exit 1; }
+  # Leaf discipline under the lock: a pre-planted symlink at the record or staging path is refused outright —
+  # no write is ever created through, or redirected by, an attacker-controlled leaf.
+  [[ -L "$record" ]] && refuse "seed state leaf is unsafe (symlinked record)"
+  [[ -L "$staging" ]] && refuse "seed state leaf is unsafe (symlinked staging)"
   if [[ -f "$record" ]]; then
     prior=$(cat "$record")
     # Material binding: identical material replays/reconciles; ANY drift (prompt digest/bytes, provider, cwd,
@@ -117,10 +141,10 @@ if (( seeded )); then
       echo "cockpit-spawn: seed request '$req_id' pane $pane_prior is gone before acceptance" >&2; exit 4
     fi
     # Reserved but no pane anywhere (crash before split): recover the staging material and launch below.
-    if [[ ! -f "$staging" ]]; then
-      cp -T -- "$prompt_file" "$staging" 2>/dev/null && chmod 600 "$staging" 2>/dev/null \
+    if [[ ! -f "$staging" || -L "$staging" ]]; then
+      stage_prompt "$staging" \
         || { cockpit_seed_update "$record" 'if .status=="pending" then .status="failed" | .error_code="prompt-material-unavailable" else . end' >/dev/null
-             echo "cockpit-spawn: seed request '$req_id' prompt material is unavailable" >&2; exit 4; }
+             echo "cockpit-spawn: seed request '$req_id' prompt material is unavailable or drifted" >&2; exit 4; }
     fi
   else
     # Durable reservation FIRST (prompt-free), then the producer-owned protected staging copy of the prompt.
@@ -129,9 +153,9 @@ if (( seeded )); then
       '{contract:1,request_id:$r,sha256:$s,bytes:($b|tonumber),provider:"claude",cwd:$c,workspace:$w,name:$n,
         status:"pending",pane_id:"",session_id:"",accepted_at:"",error_code:"",created_at:$t}')" \
       || { echo "cockpit-spawn: could not reserve seed request" >&2; exit 1; }
-    ( umask 077; cp -T -- "$prompt_file" "$staging" ) \
+    stage_prompt "$staging" \
       || { cockpit_seed_update "$record" '.status="failed" | .error_code="prompt-material-unavailable"' >/dev/null
-           echo "cockpit-spawn: could not stage prompt material" >&2; exit 1; }
+           echo "cockpit-spawn: could not stage prompt material (unavailable or drifted during staging)" >&2; exit 1; }
   fi
 fi
 

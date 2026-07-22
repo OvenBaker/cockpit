@@ -87,8 +87,8 @@ seed_touch() {  # $1 = working|session-end   (never exits; state stamping contin
   [[ -n "$req" ]] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
-  rec=$(cockpit_seed_record_path "$req")
-  [[ -f "$rec" ]] || return 0
+  rec=$(cockpit_seed_record_path "$req") || return 0   # unavailable/unsafe state dir → leave pending (fail-safe)
+  [[ -f "$rec" && ! -L "$rec" ]] || return 0
   if [[ "$1" == working ]]; then
     local sha bytes sid
     # Digest the EXACT submitted bytes: jq -j emits the raw string with no added newline, and the pipeline

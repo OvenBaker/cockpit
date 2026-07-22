@@ -123,34 +123,59 @@ cockpit_stamp_pending_agent() { # pane cwd label agent
 # must never influence a filesystem path). NO prompt content is ever stored
 # here — only identity, digest/byte material, binding, and status.
 COCKPIT_SEED_DIR_DEFAULT="${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/seeds"
+# The seed state dir must be a REAL directory (never a symlink) OWNED by the current user, private (0700).
+# Everything below fails closed when it is not — a symlinked or foreign-owned state dir would let a planted
+# leaf redirect record/staging writes onto an external victim file.
 cockpit_seed_dir() {
   local d="${COCKPIT_SEED_DIR:-$COCKPIT_SEED_DIR_DEFAULT}"
-  mkdir -p "$d" 2>/dev/null; chmod 700 "$d" 2>/dev/null
+  [[ -L "$d" ]] && return 1
+  mkdir -p "$d" 2>/dev/null || true
+  [[ ! -L "$d" && -d "$d" && -O "$d" ]] || return 1
+  chmod 700 "$d" 2>/dev/null || return 1
   printf '%s' "$d"
 }
-cockpit_seed_record_path() {  # $1 = request id
-  printf '%s/%s.json' "$(cockpit_seed_dir)" "$(printf '%s' "$1" | sha256sum | cut -c1-40)"
+cockpit_seed_record_path() {  # $1 = request id — fails when the state dir is unavailable/unsafe
+  local d; d=$(cockpit_seed_dir) || return 1
+  printf '%s/%s.json' "$d" "$(printf '%s' "$1" | sha256sum | cut -c1-40)"
 }
 cockpit_seed_staging_path() { # $1 = request id — producer-owned protected prompt staging (unlinked at launch)
-  printf '%s/%s.prompt' "$(cockpit_seed_dir)" "$(printf '%s' "$1" | sha256sum | cut -c1-40)"
+  local d; d=$(cockpit_seed_dir) || return 1
+  printf '%s/%s.prompt' "$d" "$(printf '%s' "$1" | sha256sum | cut -c1-40)"
 }
-cockpit_seed_write() {        # $1 = path, $2 = one-line json — atomic (tmp+mv), 0600
-  local path="$1" json="$2" tmp="$1.tmp.$$"
-  ( umask 077; printf '%s\n' "$json" > "$tmp" ) && mv -f "$tmp" "$path"
+# Every leaf write goes through a private mktemp (O_EXCL, 0600, unpredictable name) followed by rename():
+# rename replaces a (possibly attacker-planted) leaf ITSELF and never follows it, so no write can ever be
+# redirected through a symlink. Leaves are additionally refused outright when symlinked.
+cockpit_seed_write() {        # $1 = path, $2 = one-line json — atomic, symlink-safe, 0600
+  local path="$1" json="$2" tmp
+  [[ -L "$path" ]] && return 1
+  tmp=$(umask 077; mktemp "$(dirname "$path")/.tmp.XXXXXXXX") || return 1
+  printf '%s\n' "$json" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$path"
+}
+# Claim a lock file safely: refuse a symlink leaf; create-if-absent with noclobber (O_EXCL — refuses to
+# follow even a dangling planted symlink); verify a plain regular file remains.
+cockpit_seed_locksafe() {     # $1 = lock path
+  local lock="$1"
+  [[ -L "$lock" ]] && return 1
+  if [[ ! -e "$lock" ]]; then ( set -C; umask 077; : > "$lock" ) 2>/dev/null || true; fi
+  [[ -f "$lock" && ! -L "$lock" ]]
 }
 # flock'd read-modify-write: apply a jq filter (with --arg pairs) to the record
 # and persist atomically; echoes the new JSON. Serializes spawn / in-pane
 # launcher / hook writers so a status transition can never be torn or doubled.
 cockpit_seed_update() {       # $1 = path, $2 = jq filter, rest = jq args
   local path="$1" filter="$2"; shift 2
+  [[ -L "$path" ]] && return 1
+  cockpit_seed_locksafe "$path.lock" || return 1
   (
     flock -x 9 || exit 1
     local cur new
+    [[ -L "$path" ]] && exit 1
     cur=$(cat "$path" 2>/dev/null) || exit 1
     new=$(printf '%s' "$cur" | jq -c "$filter" "$@") || exit 1
     cockpit_seed_write "$path" "$new" || exit 1
     printf '%s' "$new"
-  ) 9>"$path.lock"
+  ) 9<"$path.lock"
 }
 
 # --- session selection ------------------------------------------------------
