@@ -322,14 +322,15 @@ import sys
 argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
 prompt = open(sys.argv[2],'rb').read()
 assert argv[:2] == [b'--remote-control', b'seed-demo'], argv[:2]
-assert argv[2:9] == [b'--permission-mode', b'bypassPermissions',
-                     b'--dangerously-skip-permissions',   # fresh interactive bypass launch must not stall on the ack dialog
-                     b'--disallowedTools', b'AskUserQuestion', b'EnterPlanMode',
-                     b'--append-system-prompt'], argv[2:9]
-text = argv[9]
+assert argv[2:10] == [b'--permission-mode', b'bypassPermissions',
+                      # per-invocation flag setting suppresses the bypass ack dialog; never written to user settings
+                      b'--settings', b'{"skipDangerousModePermissionPrompt":true}',
+                      b'--disallowedTools', b'AskUserQuestion', b'EnterPlanMode',
+                      b'--append-system-prompt'], argv[2:10]
+text = argv[10]
 assert b'another AI agent' in text and b'BLOCKED:' in text, text
-assert argv[10:] == [b'--', prompt], argv[10:]
-assert len(argv) == 12, argv          # exactly the agent delta — nothing more, nothing less
+assert argv[11:] == [b'--', prompt], argv[11:]
+assert len(argv) == 13, argv          # exactly the agent delta — nothing more, nothing less
 PY
 # (b) same request + same profile replays onto the same pane with zero extra starts
 : > "$root/out/starts"

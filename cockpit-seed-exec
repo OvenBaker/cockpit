@@ -17,14 +17,16 @@
 # and every pre-profile launch) execs exactly the pre-profile argv. `agent` marks the session as driven by
 # another AI agent: it sets AGENT_DRIVEN=1 in the provider environment and appends ONLY
 #   --permission-mode bypassPermissions
-#   --dangerously-skip-permissions
+#   --settings '{"skipDangerousModePermissionPrompt":true}'
 #   --disallowedTools AskUserQuestion EnterPlanMode
 #   --append-system-prompt <agent system text below>
 # to this one invocation's argv. Global Claude settings are never read or modified; non-seeded and human
-# launches carry none of these flags. --dangerously-skip-permissions accompanies the owner-required
-# bypassPermissions mode because Claude 2.1.217 treats them as distinct facts: without it, a FRESH
-# interactive launch in bypassPermissions mode stalls on the Bypass Permissions acknowledgement dialog
-# before the seeded prompt can ever be submitted — a stall no agent counterpart can dismiss.
+# launches carry none of these flags. The inline --settings object accompanies the owner-required
+# bypassPermissions mode because Claude 2.1.217 gates the Bypass Permissions acknowledgement dialog on
+# flagSettings.skipDangerousModePermissionPrompt (hV()); the dialog persists that key to USER settings only
+# after a human accepts it, so a fresh agent-driven launch would otherwise stall on a dialog no agent
+# counterpart can dismiss. Passing it as an inline per-invocation flag setting suppresses the dialog for
+# THIS launch only — ~/.claude/settings.json is never written.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 
@@ -90,7 +92,7 @@ args=()
 if [[ "$profile" == agent ]]; then
   export AGENT_DRIVEN=1
   args+=(--permission-mode bypassPermissions)
-  args+=(--dangerously-skip-permissions)   # suppresses the interactive bypass acknowledgement dialog (see header)
+  args+=(--settings '{"skipDangerousModePermissionPrompt":true}')   # per-invocation dialog suppression (see header)
   args+=(--disallowedTools AskUserQuestion EnterPlanMode)
   args+=(--append-system-prompt "$AGENT_SYSTEM_TEXT")
 fi
