@@ -73,12 +73,49 @@ stamp() {  # $1 = state (empty clears → poller falls back to classify)
   exit 0
 }
 
+# ── seeded first-turn acceptance (cockpit-spawn --request-id …) ─────────────────────────────────────────────
+# Provider acceptance is THIS hook's authority alone: only the first UserPromptSubmit of the bound seeded
+# process — whose exact UTF-8 bytes and SHA-256 match the durable expectation — moves the request from
+# pending to accepted. session-start, transcript adoption, pane state, and model work never accept a seed. A
+# mismatched first prompt fails terminally with a content-free code; once accepted or failed, later prompt
+# events cannot rewrite the result (the flock'd update transitions only from `pending`). A session ending
+# while the seed is still pending is provider death before acceptance → terminal failure. No prompt content
+# ever reaches the record, pane options, or output.
+seed_touch() {  # $1 = working|session-end   (never exits; state stamping continues after)
+  local req rec new
+  req=$("${T[@]}" display -p -t "$TMUX_PANE" '#{?@seed_request_id,#{@seed_request_id},}' 2>/dev/null || true)
+  [[ -n "$req" ]] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+  rec=$(cockpit_seed_record_path "$req")
+  [[ -f "$rec" ]] || return 0
+  if [[ "$1" == working ]]; then
+    local sha bytes sid
+    # Digest the EXACT submitted bytes: jq -j emits the raw string with no added newline, and the pipeline
+    # (unlike $(…) capture, which strips trailing newlines) preserves every byte on its way into the hash.
+    sha=$(printf '%s' "$INPUT" | jq -rj '.prompt // empty' 2>/dev/null | sha256sum | cut -d' ' -f1)
+    bytes=$(printf '%s' "$INPUT" | jq -rj '.prompt // empty' 2>/dev/null | wc -c)
+    sid=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+    new=$(cockpit_seed_update "$rec" '
+      if .status=="pending" and .pane_id==$p then
+        if (.sha256==$sha and .bytes==($bytes|tonumber)) then .status="accepted" | .session_id=$sid | .accepted_at=$at
+        else .status="failed" | .error_code="first-prompt-mismatch" end
+      else . end' \
+      --arg p "$TMUX_PANE" --arg sha "$sha" --arg bytes "$bytes" --arg sid "$sid" --arg at "$(date -u +%FT%TZ)") || return 0
+  else
+    new=$(cockpit_seed_update "$rec" '
+      if .status=="pending" then .status="failed" | .error_code="provider-exited-before-acceptance" else . end') || return 0
+  fi
+  "${T[@]}" set -p -t "$TMUX_PANE" @seed_status "$(jq -r .status <<<"$new")" 2>/dev/null || true
+  return 0
+}
+
 case "$ev" in
-  working)        stamp working;;
+  working)        seed_touch working; stamp working;;
   idle|stop)      stamp idle;;
   needs-input)    stamp needs-input;;
   session-start)  stamp idle;;       # fresh/resumed session waiting for a prompt
-  session-end)    stamp "";;          # clear → poller reclassifies (pane likely a shell now)
+  session-end)    seed_touch session-end; stamp "";;   # clear → poller reclassifies (pane likely a shell now)
   notification)
     # Only permission/idle-style notifications mean "waiting on the human"; ignore
     # informational ones (auth_success, etc.). Reuse the stdin JSON read above.

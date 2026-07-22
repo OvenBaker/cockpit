@@ -116,6 +116,43 @@ cockpit_stamp_pending_agent() { # pane cwd label agent
   $tmux set -p -t "$pane" @badge "starting"
 }
 
+# --- seeded first-turn requests (cockpit-spawn --request-id …) ---------------
+# Durable, prompt-free request records for atomically-seeded Claude launches.
+# One compact mode-0600 JSON file per request under a mode-0700 state dir; the
+# file name is a digest of the caller's request id (ids may carry ':' etc. and
+# must never influence a filesystem path). NO prompt content is ever stored
+# here — only identity, digest/byte material, binding, and status.
+COCKPIT_SEED_DIR_DEFAULT="${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/seeds"
+cockpit_seed_dir() {
+  local d="${COCKPIT_SEED_DIR:-$COCKPIT_SEED_DIR_DEFAULT}"
+  mkdir -p "$d" 2>/dev/null; chmod 700 "$d" 2>/dev/null
+  printf '%s' "$d"
+}
+cockpit_seed_record_path() {  # $1 = request id
+  printf '%s/%s.json' "$(cockpit_seed_dir)" "$(printf '%s' "$1" | sha256sum | cut -c1-40)"
+}
+cockpit_seed_staging_path() { # $1 = request id — producer-owned protected prompt staging (unlinked at launch)
+  printf '%s/%s.prompt' "$(cockpit_seed_dir)" "$(printf '%s' "$1" | sha256sum | cut -c1-40)"
+}
+cockpit_seed_write() {        # $1 = path, $2 = one-line json — atomic (tmp+mv), 0600
+  local path="$1" json="$2" tmp="$1.tmp.$$"
+  ( umask 077; printf '%s\n' "$json" > "$tmp" ) && mv -f "$tmp" "$path"
+}
+# flock'd read-modify-write: apply a jq filter (with --arg pairs) to the record
+# and persist atomically; echoes the new JSON. Serializes spawn / in-pane
+# launcher / hook writers so a status transition can never be torn or doubled.
+cockpit_seed_update() {       # $1 = path, $2 = jq filter, rest = jq args
+  local path="$1" filter="$2"; shift 2
+  (
+    flock -x 9 || exit 1
+    local cur new
+    cur=$(cat "$path" 2>/dev/null) || exit 1
+    new=$(printf '%s' "$cur" | jq -c "$filter" "$@") || exit 1
+    cockpit_seed_write "$path" "$new" || exit 1
+    printf '%s' "$new"
+  ) 9>"$path.lock"
+}
+
 # --- session selection ------------------------------------------------------
 
 # Encode a cwd to its ~/.claude/projects directory name (Claude replaces / and . with -)

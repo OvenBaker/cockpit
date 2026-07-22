@@ -4,11 +4,23 @@
 # web/remote surface can open a session without driving the interactive picker.
 #
 #   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME]
+#                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N]
 #
 # claude panes come up with Remote Control on (via lib.sh), so the session shows
 # in the Claude app under NAME and you can steer it from your phone. No id is
 # stamped — the poller adopts the transcript once the agent writes it (@born).
 # Prints the new pane id on success.
+#
+# SEEDED launches (contract 1, Claude only): the four --request-id/--initial-prompt-* flags are all-or-none.
+# The request is durably reserved (prompt-free record + digest/byte material binding) BEFORE any tmux side
+# effect; the pane starts the provider atomically via cockpit-seed-exec with the prompt as Claude's positional
+# interactive prompt — never send-keys, never shell-interpolated. Replaying the same request with identical
+# material returns/reconciles the same pane with zero additional starts or submissions; changed material under
+# a reused request id conflicts before any spawn. Acceptance is a separate asynchronous fact owned by the
+# Claude UserPromptSubmit hook (see cockpit-hook); nothing here marks a seed accepted.
+#
+# Exit codes: 0 ok (pane id on stdout) · 1 no grid/workspace · 2 validation refused ·
+#             4 seed terminally failed (bounded code on stderr) · 5 seed request conflict (changed material).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
@@ -18,19 +30,110 @@ TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 export COCKPIT_REMOTE_CONTROL=1
 
 cwd=""; ws=""; agent="claude"; name=""
+req_id=""; prompt_file=""; prompt_sha=""; prompt_bytes=""
 while [[ $# -gt 0 ]]; do case "$1" in
   --cwd)       cwd="${2:-}"; shift;;
   --workspace) ws="${2:-}"; shift;;
   --agent)     agent="${2:-claude}"; shift;;
   --name)      name="${2:-}"; shift;;
+  --request-id)            req_id="${2:-}"; shift;;
+  --initial-prompt-file)   prompt_file="${2:-}"; shift;;
+  --initial-prompt-sha256) prompt_sha="${2:-}"; shift;;
+  --initial-prompt-bytes)  prompt_bytes="${2:-}"; shift;;
   *) echo "cockpit-spawn: unknown arg: $1" >&2; exit 2;;
 esac; shift; done
 
 cwd="${cwd/#\~/$HOME}"
 [[ -n "$cwd" && -d "$cwd" ]] || { echo "cockpit-spawn: --cwd must be an existing directory (got '${cwd:-<empty>}')" >&2; exit 2; }
 case "$agent" in claude|codex|shell) ;; *) echo "cockpit-spawn: --agent must be claude|codex|shell" >&2; exit 2;; esac
+
+# ── seeded-mode validation: ALL before any reservation or tmux side effect ──────────────────────────────────
+MAX_SEED_PROMPT_BYTES="${COCKPIT_SEED_MAX_BYTES:-65536}"
+seeded=0
+if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
+  refuse() { echo "cockpit-spawn: $1" >&2; exit 2; }
+  [[ -n "$req_id" && -n "$prompt_file" && -n "$prompt_sha" && -n "$prompt_bytes" ]] \
+    || refuse "seeded launch flags are all-or-none (--request-id --initial-prompt-file --initial-prompt-sha256 --initial-prompt-bytes)"
+  [[ "$agent" == claude ]] || refuse "seeded launch supports --agent claude only"
+  [[ "$req_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$ ]] || refuse "unsafe --request-id"
+  [[ "$prompt_sha" =~ ^[0-9a-f]{64}$ ]] || refuse "--initial-prompt-sha256 must be 64 lowercase hex"
+  [[ "$prompt_bytes" =~ ^[1-9][0-9]{0,6}$ ]] || refuse "--initial-prompt-bytes must be a positive decimal"
+  (( prompt_bytes <= MAX_SEED_PROMPT_BYTES )) || refuse "initial prompt exceeds ${MAX_SEED_PROMPT_BYTES} bytes"
+  [[ "$prompt_file" == /* ]] || refuse "--initial-prompt-file must be an absolute path"
+  [[ ! -L "$prompt_file" ]] || refuse "--initial-prompt-file must not be a symlink"
+  [[ -f "$prompt_file" ]] || refuse "--initial-prompt-file must be an existing regular file"
+  # Byte truth from the file itself: size, digest, UTF-8 validity, and character discipline. NUL and C0
+  # controls other than \t and \n (and DEL) are refused — a prompt is text, not a terminal escape carrier.
+  actual_bytes=$(wc -c < "$prompt_file")
+  [[ "$actual_bytes" -eq "$prompt_bytes" ]] || refuse "initial prompt byte count drift (declared $prompt_bytes, file has $actual_bytes)"
+  actual_sha=$(sha256sum < "$prompt_file" | cut -d' ' -f1)
+  [[ "$actual_sha" == "$prompt_sha" ]] || refuse "initial prompt digest drift"
+  iconv -f UTF-8 -t UTF-8 "$prompt_file" >/dev/null 2>&1 || refuse "initial prompt is not valid UTF-8"
+  if LC_ALL=C grep -qP '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]' "$prompt_file" 2>/dev/null; then
+    refuse "initial prompt contains disallowed control characters"
+  fi
+  case "$name$ws" in *$'\n'*|*$'\t'*|*$'\r'*) refuse "workspace/name must not contain control characters";; esac
+  seeded=1
+fi
+
 $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "cockpit-spawn: no cockpit grid running" >&2; exit 1; }
 [[ -n "$name" ]] || name="$(basename "$cwd")"
+
+# ── seeded reservation / same-request reconciliation (before any tmux side effect) ─────────────────────────
+if (( seeded )); then
+  real_cwd=$(realpath "$cwd" 2>/dev/null) || { echo "cockpit-spawn: cannot resolve --cwd" >&2; exit 2; }
+  record=$(cockpit_seed_record_path "$req_id")
+  staging=$(cockpit_seed_staging_path "$req_id")
+  if [[ -f "$record" ]]; then
+    prior=$(cat "$record")
+    # Material binding: identical material replays/reconciles; ANY drift (prompt digest/bytes, provider, cwd,
+    # workspace, name) under a reused request id conflicts loudly BEFORE any side effect.
+    if ! jq -e --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" --arg c "$real_cwd" --arg w "$ws" --arg n "$name" \
+        '.request_id==$r and .sha256==$s and .bytes==($b|tonumber) and .provider=="claude" and .cwd==$c and .workspace==$w and .name==$n' \
+        <<<"$prior" >/dev/null; then
+      echo "cockpit-spawn: seed request '$req_id' was already reserved with different material" >&2; exit 5
+    fi
+    status=$(jq -r .status <<<"$prior"); pane_prior=$(jq -r .pane_id <<<"$prior")
+    if [[ "$status" == failed ]]; then
+      echo "cockpit-spawn: seed request '$req_id' already failed: $(jq -r .error_code <<<"$prior")" >&2; exit 4
+    fi
+    # Reconcile by request binding + pane metadata — NEVER a blind respawn. The launcher stamps
+    # @seed_request_id from inside the pane before the provider starts, so a pane created by a crashed
+    # invocation is still discoverable here even if the record missed its pane id.
+    if [[ -z "$pane_prior" ]]; then
+      TAB=$'\t'
+      pane_prior=$($TMUX list-panes -s -t "$COCKPIT_SESSION" \
+        -F "#{pane_id}${TAB}#{?@seed_request_id,#{@seed_request_id},}" 2>/dev/null | awk -F'\t' -v r="$req_id" '$2==r{print $1; exit}')
+      [[ -n "$pane_prior" ]] && cockpit_seed_update "$record" \
+        'if .pane_id=="" then .pane_id=$p else . end' --arg p "$pane_prior" >/dev/null
+    fi
+    if [[ -n "$pane_prior" ]]; then
+      if $TMUX list-panes -s -t "$COCKPIT_SESSION" -F '#{pane_id}' 2>/dev/null | grep -qx "$pane_prior"; then
+        echo "$pane_prior"; exit 0     # same request + same material → the SAME pane; zero starts, zero submissions
+      fi
+      # The bound pane is gone while the seed never reached acceptance → terminal failure, no blind respawn.
+      cockpit_seed_update "$record" \
+        'if .status=="pending" then .status="failed" | .error_code="provider-exited-before-acceptance" else . end' >/dev/null
+      echo "cockpit-spawn: seed request '$req_id' pane $pane_prior is gone before acceptance" >&2; exit 4
+    fi
+    # Reserved but no pane anywhere (crash before split): recover the staging material and launch below.
+    if [[ ! -f "$staging" ]]; then
+      cp -T -- "$prompt_file" "$staging" 2>/dev/null && chmod 600 "$staging" 2>/dev/null \
+        || { cockpit_seed_update "$record" 'if .status=="pending" then .status="failed" | .error_code="prompt-material-unavailable" else . end' >/dev/null
+             echo "cockpit-spawn: seed request '$req_id' prompt material is unavailable" >&2; exit 4; }
+    fi
+  else
+    # Durable reservation FIRST (prompt-free), then the producer-owned protected staging copy of the prompt.
+    cockpit_seed_write "$record" "$(jq -cn --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" \
+      --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg t "$(date +%s)" \
+      '{contract:1,request_id:$r,sha256:$s,bytes:($b|tonumber),provider:"claude",cwd:$c,workspace:$w,name:$n,
+        status:"pending",pane_id:"",session_id:"",accepted_at:"",error_code:"",created_at:$t}')" \
+      || { echo "cockpit-spawn: could not reserve seed request" >&2; exit 1; }
+    ( umask 077; cp -T -- "$prompt_file" "$staging" ) \
+      || { cockpit_seed_update "$record" '.status="failed" | .error_code="prompt-material-unavailable"' >/dev/null
+           echo "cockpit-spawn: could not stage prompt material" >&2; exit 1; }
+  fi
+fi
 
 # Land in the target workspace (named → reuse/create; empty → current view).
 W=$(cockpit_resolve_workspace "$ws")
@@ -38,11 +141,15 @@ W=$(cockpit_resolve_workspace "$ws")
 
 # Build the launch. claude/codex are tracked (poller adopts via @born); a bare
 # shell is not. Mirrors cockpit-pick spawn_new, kept in sync via cockpit_rc_args.
-case "$agent" in
+# A SEEDED launch goes through cockpit-seed-exec: only trusted, %q-quoted PATHS cross the shell hop — the
+# prompt itself is read from the protected staging file inside the pane and passed as a direct argv element.
+if (( seeded )); then
+  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "${COCKPIT_CLAUDE_BIN:-claude}")"
+else case "$agent" in
   codex) launch="exec codex";;
   shell) launch="exec bash -l";;
   *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;
-esac
+esac; fi
 cmd="cd $(printf %q "$cwd") && $launch"
 
 # Reuse a bare untracked shell if the workspace's active pane is one (e.g. a
@@ -65,6 +172,13 @@ if [[ "$agent" == shell ]]; then
   $TMUX set -p -t "$pane" @badge "shell"
 else
   cockpit_stamp_pending_agent "$pane" "$cwd" "$name" "$agent"
+fi
+if (( seeded )); then
+  # Bind pane → request in both directions (the launcher does the same from inside the pane, whichever runs
+  # first; the record update is flock-serialized and first-writer-wins).
+  $TMUX set -p -t "$pane" @seed_request_id "$req_id"
+  $TMUX set -p -t "$pane" @seed_status pending
+  cockpit_seed_update "$record" 'if .pane_id=="" then .pane_id=$p else . end' --arg p "$pane" >/dev/null
 fi
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 echo "$pane"

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# cockpit-seed-exec — the in-pane launcher for a SEEDED Claude spawn (cockpit-spawn --request-id …).
+#
+#   cockpit-seed-exec <record.json> <staging-prompt-file> <name> <cwd> [claude-bin]
+#
+# Runs INSIDE the freshly-created tmux pane. It binds this pane to the durable seed request (closing the
+# crash window between split-window and the spawner's own record update — $TMUX_PANE is authoritative here),
+# stamps the pending seed metadata onto the pane BEFORE the provider can emit any lifecycle event, reads and
+# re-validates the exact prompt bytes from the producer-owned protected staging file, unlinks it, and then
+# directly execs an argv array:  claude [remote-control args] -- <exact prompt>.
+#
+# The prompt is DATA only: it is never interpolated into a shell command, never passed through tmux
+# send-keys/paste buffers, and never written to the durable record, pane options, stdout/stderr, or logs.
+# Any failure before exec marks the still-pending request failed with a bounded, content-free code.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+
+record="${1:-}"; staging="${2:-}"; name="${3:-}"; cwd="${4:-}"; claude_bin="${5:-claude}"
+
+die() { echo "cockpit-seed-exec: $1" >&2; exit 3; }
+# Mark the request failed (only while still pending) with a bounded code, then die. Prompt-free by design.
+fail() {
+  cockpit_seed_update "$record" \
+    'if .status=="pending" then .status="failed" | .error_code=$c else . end' --arg c "$1" >/dev/null 2>&1 || true
+  [[ -n "${TMUX_PANE:-}" ]] && tmux set -p -t "$TMUX_PANE" @seed_status failed 2>/dev/null || true
+  die "$1"
+}
+
+[[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [claude-bin]"
+[[ -n "${TMUX_PANE:-}" ]] || die "not inside a tmux pane"
+[[ -f "$record" ]] || die "seed record is unavailable"
+
+# Bind this pane to the request under the record lock: first pane in wins; a different already-bound pane
+# means a duplicate launch attempt and this pane must NOT start a provider or touch the seed.
+json=$(cockpit_seed_update "$record" \
+  'if .pane_id=="" or .pane_id==$p then .pane_id=$p else . end' --arg p "$TMUX_PANE") || die "seed record update failed"
+[[ "$(jq -r .pane_id <<<"$json")" == "$TMUX_PANE" ]] || die "seed request is bound to another pane"
+[[ "$(jq -r .status <<<"$json")" == "pending" ]] || die "seed request is not pending"
+expect_sha=$(jq -r .sha256 <<<"$json"); expect_bytes=$(jq -r .bytes <<<"$json"); request_id=$(jq -r .request_id <<<"$json")
+
+# Pending seed metadata is on the pane BEFORE the provider starts, so the very first hook event can already
+# see which request this pane serves. Acceptance is NEVER granted here — only the UserPromptSubmit hook may
+# move pending → accepted, and only on exact digest/byte match.
+tmux set -p -t "$TMUX_PANE" @seed_request_id "$request_id" 2>/dev/null || true
+tmux set -p -t "$TMUX_PANE" @seed_status pending 2>/dev/null || true
+
+# Re-validate the protected staging file at the moment of use (untrusted despite being producer-created).
+[[ -e "$staging" ]] || fail "prompt-material-unavailable"
+[[ ! -L "$staging" && -f "$staging" ]] || fail "prompt-material-unavailable"
+actual_sha=$(sha256sum < "$staging" | cut -d' ' -f1)
+actual_bytes=$(wc -c < "$staging")
+[[ "$actual_sha" == "$expect_sha" ]] || fail "prompt-material-drift"
+[[ "$actual_bytes" -eq "$expect_bytes" ]] || fail "prompt-material-drift"
+
+# Materialize the EXACT bytes as one argv element. `read -rd ''` preserves interior and trailing newlines;
+# NUL bytes are impossible (validated at spawn). Verify the materialized byte count before trusting it.
+prompt=""
+IFS= read -rd '' prompt < "$staging" || true
+[[ "$(printf '%s' "$prompt" | wc -c)" -eq "$expect_bytes" ]] || fail "prompt-materialization-drift"
+rm -f "$staging" 2>/dev/null || true
+
+cd "$cwd" || fail "cwd-unavailable"
+args=()
+# Seeded spawns are always remote-controlled (cockpit-spawn forces RC on); same 48-char app-title bound as
+# cockpit_rc_args, but built as a real argv array — no shell hop exists between here and the provider.
+[[ "${COCKPIT_REMOTE_CONTROL:-1}" == 1 ]] && args+=(--remote-control "${name:0:48}")
+exec "$claude_bin" "${args[@]}" -- "$prompt"
