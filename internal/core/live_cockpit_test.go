@@ -167,9 +167,129 @@ func TestLiveCockpitAdmissionParityOnEquivalentSocket(t *testing.T) {
 	}
 }
 
+func TestLiveCockpitRebindsRestoredPaneReferencesAfterServerReplacement(t *testing.T) {
+	root := t.TempDir()
+	registry := filepath.Join(root, "clients.json")
+	credential := "live-rebind-mcp"
+	b, err := json.Marshal(map[string]any{"version": 1, "clients": []any{map[string]any{
+		"credential": credential, "clientId": "cockpit-mcp", "profile": "mcp-local", "capabilities": []string{"state:read"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(registry, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := loadAuthenticator(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmuxSocket := fmt.Sprintf("cp-live-rebind-%d", time.Now().UnixNano())
+	defer func() { _ = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run() }()
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-session", "-d", "-s", "restored", "sleep 600")
+
+	d, err := newDaemon(root, filepath.Join(root, "control.sock"), tmuxSocket, auth, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	panes, err := d.st.panes()
+	if err != nil || len(panes) != 1 {
+		d.Close()
+		t.Fatalf("initial controller inventory: %#v %v", panes, err)
+	}
+	original := panes[0]
+	originalFP, err := d.tm.globalOption("@cockpit_server_fingerprint")
+	if err != nil || originalFP == "" {
+		d.Close()
+		t.Fatalf("initial fingerprint: %q %v", originalFP, err)
+	}
+	d.Close()
+	if err = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-session", "-d", "-s", "restored", "sleep 600")
+	newPane := strings.TrimSpace(liveEquivalentOutput(t, "tmux", "-L", tmuxSocket, "list-panes", "-t", "restored", "-F", "#{pane_id}"))
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-w", "-t", "restored:0", "@cockpit_workspace_ref", original.WorkspaceRef)
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_ref", original.Ref)
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_generation", fmt.Sprint(original.Generation))
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_version", fmt.Sprint(original.Version))
+
+	rebound, err := newDaemon(root, filepath.Join(root, "control.sock"), tmuxSocket, auth, true)
+	if err != nil {
+		t.Fatalf("restored Cockpit grid was not rebound: %v", err)
+	}
+	defer rebound.Close()
+	got, err := rebound.st.pane(original.Ref)
+	if err != nil || got.PaneID != newPane || got.WorkspaceRef != original.WorkspaceRef {
+		t.Fatalf("restored pane was not rebound to its live locator: %#v %v", got, err)
+	}
+	reboundFP, err := rebound.tm.globalOption("@cockpit_server_fingerprint")
+	if err != nil || reboundFP == "" || reboundFP == originalFP {
+		t.Fatalf("replacement Cockpit server did not receive a fresh fingerprint: %q %v", reboundFP, err)
+	}
+}
+
+func TestLiveCockpitRejectsReplacementMissingDurablePaneReference(t *testing.T) {
+	root := t.TempDir()
+	registry := filepath.Join(root, "clients.json")
+	b, err := json.Marshal(map[string]any{"version": 1, "clients": []any{map[string]any{
+		"credential": "live-rebind-reject", "clientId": "cockpit-mcp", "profile": "mcp-local", "capabilities": []string{"state:read"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(registry, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := loadAuthenticator(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmuxSocket := fmt.Sprintf("cp-live-rebind-missing-%d", time.Now().UnixNano())
+	defer func() { _ = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run() }()
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-session", "-d", "-s", "restored", "sleep 600")
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-window", "-d", "-t", "restored", "-n", "second", "sleep 600")
+
+	d, err := newDaemon(root, filepath.Join(root, "control.sock"), tmuxSocket, auth, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	panes, err := d.st.panes()
+	if err != nil || len(panes) != 2 {
+		d.Close()
+		t.Fatalf("initial controller inventory: %#v %v", panes, err)
+	}
+	original := panes[0]
+	d.Close()
+	if err = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-session", "-d", "-s", "restored", "sleep 600")
+	newPane := strings.TrimSpace(liveEquivalentOutput(t, "tmux", "-L", tmuxSocket, "list-panes", "-t", "restored", "-F", "#{pane_id}"))
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-w", "-t", "restored:0", "@cockpit_workspace_ref", original.WorkspaceRef)
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_ref", original.Ref)
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_generation", fmt.Sprint(original.Generation))
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_version", fmt.Sprint(original.Version))
+
+	if _, err = newDaemon(root, filepath.Join(root, "control.sock"), tmuxSocket, auth, true); err == nil || !strings.Contains(err.Error(), "missing a durable pane reference") {
+		t.Fatalf("partial restored grid was admitted: %v", err)
+	}
+}
+
 func runLiveEquivalent(t *testing.T, name string, args ...string) {
 	t.Helper()
 	if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
 		t.Fatalf("%s %v: %v: %s", name, args, err, out)
 	}
+}
+
+func liveEquivalentOutput(t *testing.T, name string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(name, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v: %v: %s", name, args, err, out)
+	}
+	return string(out)
 }

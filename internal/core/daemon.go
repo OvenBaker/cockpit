@@ -152,7 +152,7 @@ func newDaemon(root, socket, tmuxSocket string, auth *authenticator, liveCockpit
 		return nil, dbErr
 	} else if serverFP != "" {
 		rootFP, err := readExistingFingerprint(filepath.Join(clean, "control.db"))
-		if err != nil || rootFP != serverFP {
+		if err != nil || (rootFP != serverFP && !liveCockpit) {
 			return nil, derr("CONTROLLER_NOT_READY", "tmux server is already controller-stamped")
 		}
 	}
@@ -298,6 +298,10 @@ func (d *daemon) Serve() error {
 func (d *daemon) reconcile() error {
 	d.reconcileMu.Lock()
 	defer d.reconcileMu.Unlock()
+	b, e := d.tm.run("list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{@cockpit_workspace_ref}\t#{@cockpit_pane_ref}\t#{@cockpit_pane_generation}\t#{@cockpit_pane_version}\t#{@cockpit_badge}\t#{@agent}\t#{@state}")
+	if e != nil {
+		return e
+	}
 	fp, e := d.st.meta("fingerprint")
 	if e == sql.ErrNoRows {
 		if existing, ge := d.tm.globalOption("@cockpit_server_fingerprint"); ge != nil || existing != "" {
@@ -316,11 +320,23 @@ func (d *daemon) reconcile() error {
 	} else if e != nil {
 		return e
 	} else if got, ge := d.tm.globalOption("@cockpit_server_fingerprint"); ge != nil || got != fp {
-		return derr("CONTROLLER_NOT_READY", "tmux server fingerprint does not match durable controller")
-	}
-	b, e := d.tm.run("list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{@cockpit_workspace_ref}\t#{@cockpit_pane_ref}\t#{@cockpit_pane_generation}\t#{@cockpit_pane_version}\t#{@cockpit_badge}\t#{@agent}\t#{@state}")
-	if e != nil {
-		return e
+		if ge != nil {
+			return ge
+		}
+		if !d.tm.allowLiveCockpit {
+			return derr("CONTROLLER_NOT_READY", "tmux server fingerprint does not match durable controller")
+		}
+		if e = d.validateFingerprintSuccessor(b); e != nil {
+			return e
+		}
+		next := id("cpf_")
+		if e = d.st.setMeta("fingerprint", next); e != nil {
+			return e
+		}
+		if e = d.tm.setGlobal("@cockpit_server_fingerprint", next); e != nil {
+			_ = d.st.setMeta("fingerprint", fp)
+			return e
+		}
 	}
 	// A window stamp is shared by every captured pane. Resolve every missing
 	// workspace ref before writing any pane so the first multi-pane inventory
@@ -433,6 +449,84 @@ func (d *daemon) reconcile() error {
 	}
 	return d.recoverPrepared()
 }
+
+// validateFingerprintSuccessor admits only a deliberate Cockpit replacement
+// that restored every stable pane stamp from this controller's durable
+// projection. It performs no tmux or database writes: an untagged, partial,
+// duplicate, or changed-generation grid remains fenced instead of being
+// matched by display position or label.
+func (d *daemon) validateFingerprintSuccessor(inventory []byte) error {
+	var prepared int
+	if err := d.st.db.QueryRow("SELECT count(*) FROM operations WHERE status='prepared'").Scan(&prepared); err != nil {
+		return err
+	}
+	if prepared != 0 {
+		return derr("CONTROLLER_NOT_READY", "prepared operations prevent controller rebind")
+	}
+
+	type expectedPane struct {
+		workspaceRef string
+		generation   int64
+		version      int64
+	}
+	expected := map[string]expectedPane{}
+	rows, err := d.st.db.Query("SELECT ref,workspace_ref,generation,version FROM panes")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref string
+		var pane expectedPane
+		if err = rows.Scan(&ref, &pane.workspaceRef, &pane.generation, &pane.version); err != nil {
+			return err
+		}
+		expected[ref] = pane
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+
+	found := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(inventory), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) != 10 {
+			return fmt.Errorf("unexpected tmux inventory")
+		}
+		workspaceRef, paneRef := f[3], f[4]
+		if paneRef == "" {
+			continue
+		}
+		pane, known := expected[paneRef]
+		if !known {
+			continue
+		}
+		var generation, version int64
+		if _, err = fmt.Sscan(f[5], &generation); err != nil || generation != pane.generation {
+			return derr("CONTROLLER_NOT_READY", "restored pane generation does not match durable projection")
+		}
+		if _, err = fmt.Sscan(f[6], &version); err != nil || version != pane.version {
+			return derr("CONTROLLER_NOT_READY", "restored pane version does not match durable projection")
+		}
+		if workspaceRef != pane.workspaceRef {
+			return derr("CONTROLLER_NOT_READY", "restored pane workspace does not match durable projection")
+		}
+		if found[paneRef] {
+			return derr("CONTROLLER_NOT_READY", "restored pane reference appears on multiple panes")
+		}
+		found[paneRef] = true
+	}
+	for ref := range expected {
+		if !found[ref] {
+			return derr("CONTROLLER_NOT_READY", "restored Cockpit grid is missing a durable pane reference")
+		}
+	}
+	return nil
+}
+
 func (d *daemon) recoverPrepared() error {
 	rows, e := d.st.db.Query("SELECT ref,caller,pane_ref,badge,target_version FROM operations WHERE status='prepared'")
 	if e != nil {
