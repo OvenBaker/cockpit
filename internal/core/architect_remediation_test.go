@@ -20,7 +20,7 @@ func TestFreshRootCannotAdoptStampedServer(t *testing.T) {
 	defer f.close()
 	root := t.TempDir()
 	sock := filepath.Join(root, "control.sock")
-	bad := exec.Command(f.bin, "daemon", "--test-root", root, "--socket", sock, "--tmux-socket", f.tmux)
+	bad := exec.Command(f.bin, "daemon", "--test-root", root, "--socket", sock, "--tmux-socket", f.tmux, "--credentials-file", f.credentials)
 	out, err := bad.CombinedOutput()
 	if err == nil || (!strings.Contains(string(out), "already controller-stamped") && !strings.Contains(string(out), "server lease unavailable")) {
 		t.Fatalf("fresh root adopted stamped server: %v %s", err, out)
@@ -108,7 +108,7 @@ func TestConflictingIdentityStampsFenceBeforeAdoption(t *testing.T) {
 				w := strings.TrimSpace(string(mustOutput(t, "tmux", "-L", f.tmux, "display-message", "-p", "-t", "slice:0", "#{@cockpit_workspace_ref}")))
 				run(t, "tmux", "-L", f.tmux, "set-option", "-w", "-t", "slice:1", tc.option, w)
 			}
-			bad := exec.Command(f.bin, "daemon", "--test-root", f.root, "--socket", f.socket, "--tmux-socket", f.tmux)
+			bad := exec.Command(f.bin, "daemon", "--test-root", f.root, "--socket", f.socket, "--tmux-socket", f.tmux, "--credentials-file", f.credentials)
 			if out, err := bad.CombinedOutput(); err == nil || !strings.Contains(string(out), "CONTROLLER_NOT_READY") {
 				t.Fatalf("conflicting stamp adopted: %v %s", err, out)
 			}

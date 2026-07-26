@@ -55,7 +55,7 @@ func TestStableIdentityMultiPaneAndStampFence(t *testing.T) {
 	}
 	f.stop()
 	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", "slice:0.1", "@cockpit_pane_version", "999")
-	bad := exec.Command(f.bin, "daemon", "--test-root", f.root, "--socket", f.socket, "--tmux-socket", f.tmux)
+	bad := exec.Command(f.bin, "daemon", "--test-root", f.root, "--socket", f.socket, "--tmux-socket", f.tmux, "--credentials-file", f.credentials)
 	if out, err := bad.CombinedOutput(); err == nil || !bytes.Contains(out, []byte("CONTROLLER_NOT_READY")) {
 		t.Fatalf("stamp drift was not fenced: %v %s", err, out)
 	}
@@ -536,7 +536,13 @@ func (f *fixture) crashRecovery(t *testing.T) {
 	if err = db.QueryRow("SELECT caller FROM audit WHERE pane_ref=? AND method='metadata.set_display' ORDER BY seq DESC LIMIT 1", f.pane["paneRef"]).Scan(&caller); err != nil {
 		t.Fatal(err)
 	}
-	if count != beforeAudits+1 || caller != "test-local-operator" {
+	// The property under test is that recovery adds EXACTLY ONE audit row and attributes it to the caller that
+	// ORIGINATED the operation — never to the recovering daemon or a system actor. The expected identity is the
+	// originating ctl session's claimed clientId, which is ctl's `cockpitctl` default: this fixture's
+	// local-operator grant pins no clientId, so the claim is what authenticates and what the audit records.
+	// (The former "test-local-operator" predates credential-file auth arriving in this fixture and matches
+	// nothing the auth model now produces; COCKPIT_TEST_ACTOR only writes store.trace, never the caller.)
+	if count != beforeAudits+1 || caller != "cockpitctl" {
 		t.Fatalf("R6 recovery audit caller/count = %q/%d (before %d)", caller, count, beforeAudits)
 	}
 }
@@ -548,7 +554,7 @@ func (f *fixture) leaseAndSocketSafety(t *testing.T) {
 	run(t, "tmux", "-L", l1tmux, "new-session", "-d", "-s", "slice", "sleep 600")
 	defer exec.Command("tmux", "-L", l1tmux, "kill-server").Run()
 	start := func(actor string) *exec.Cmd {
-		c := exec.Command(f.bin, "daemon", "--test-root", l1root, "--socket", l1sock, "--tmux-socket", l1tmux)
+		c := exec.Command(f.bin, "daemon", "--test-root", l1root, "--socket", l1sock, "--tmux-socket", l1tmux, "--credentials-file", f.credentials)
 		c.Env = append(os.Environ(), "COCKPIT_TEST_ACTOR="+actor)
 		if err := c.Start(); err != nil {
 			t.Fatal(err)
@@ -593,7 +599,7 @@ func (f *fixture) leaseAndSocketSafety(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(l2root, "cockpit.pid"), []byte("999999"), 0600)
-	l2 := exec.Command(f.bin, "daemon", "--test-root", l2root, "--socket", l2sock, "--tmux-socket", l2tmux)
+	l2 := exec.Command(f.bin, "daemon", "--test-root", l2root, "--socket", l2sock, "--tmux-socket", l2tmux, "--credentials-file", f.credentials)
 	if err := l2.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +632,7 @@ func (f *fixture) leaseAndSocketSafety(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	liveBad := exec.Command(f.bin, "daemon", "--test-root", liveRoot, "--socket", liveSock, "--tmux-socket", l2tmux)
+	liveBad := exec.Command(f.bin, "daemon", "--test-root", liveRoot, "--socket", liveSock, "--tmux-socket", l2tmux, "--credentials-file", f.credentials)
 	if err := liveBad.Run(); err == nil {
 		t.Fatal("L2 accepted a connectable foreign socket")
 	}
@@ -646,7 +652,7 @@ func (f *fixture) leaseAndSocketSafety(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		bad := exec.Command(f.bin, "daemon", "--test-root", root, "--socket", sock, "--tmux-socket", f.tmux)
+		bad := exec.Command(f.bin, "daemon", "--test-root", root, "--socket", sock, "--tmux-socket", f.tmux, "--credentials-file", f.credentials)
 		if err := bad.Run(); err == nil {
 			t.Fatalf("L3 accepted %s", kind)
 		}
@@ -746,9 +752,18 @@ func (f *fixture) protocolAndWait(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(bad), "UNSUPPORTED_PROTOCOL") {
 		t.Fatalf("P2: %#v", bad)
 	}
+	// P3: a credential is bound to its grant's profile, so claiming a different one must be REFUSED rather than
+	// honoured at the claimed profile. The refusal is deliberately generic and must NOT name the profile the
+	// credential is really bound to — disclosing that to an unauthenticated caller would be an oracle, the same
+	// concern that drives the constant-time comparison in verify(). An earlier revision asserted the error text
+	// contained "local-operator"; the non-disclosing refusal that replaced it is the stronger behaviour, so this
+	// now checks the refusal AND the absence of disclosure.
 	bound := rawOpen(t, f.socket, map[string]any{"protocol": "1.0", "clientId": "x", "claimedProfile": "read-only", "credential": "test-local"})
-	if !strings.Contains(fmt.Sprint(bound), "local-operator") {
+	if !strings.Contains(fmt.Sprint(bound), "UNAUTHENTICATED") {
 		t.Fatalf("P3 profile not credential-bound: %#v", bound)
+	}
+	if strings.Contains(fmt.Sprint(bound), "local-operator") {
+		t.Fatalf("P3 refusal disclosed the credential's bound profile: %#v", bound)
 	}
 	oldEpoch := health["result"].(map[string]any)["controllerEpoch"]
 	f.stop()

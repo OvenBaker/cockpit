@@ -24,6 +24,8 @@ func TestServerLeaseTwoFreshRootsProcess(t *testing.T) {
 	run(t, "tmux", "-L", tmuxSocket, "new-session", "-d", "-s", "slice", "sleep 600")
 	defer exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run()
 	bin := buildTestBinary(t)
+	// Outside every contender root: the loser-isolation assertions below check what a rejected root contains.
+	credentials := writeTestCredentials(t, t.TempDir())
 	roots := []string{t.TempDir(), t.TempDir()}
 	cmds := make([]*exec.Cmd, 2)
 	var wg sync.WaitGroup
@@ -31,7 +33,7 @@ func TestServerLeaseTwoFreshRootsProcess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			cmds[i] = daemonProcess(bin, roots[i], tmuxSocket)
+			cmds[i] = daemonProcess(bin, roots[i], tmuxSocket, credentials)
 			if err := cmds[i].Start(); err != nil {
 				t.Errorf("start contender %d: %v", i, err)
 			}
@@ -86,7 +88,7 @@ func TestServerLeaseTwoFreshRootsProcess(t *testing.T) {
 	_ = cmds[ready].Wait()
 
 	third := t.TempDir()
-	bad := daemonProcess(bin, third, tmuxSocket)
+	bad := daemonProcess(bin, third, tmuxSocket, credentials)
 	out, err := bad.CombinedOutput()
 	if err == nil || !bytes.Contains(out, []byte("already controller-stamped")) {
 		t.Fatalf("third root was not rejected by persisted fingerprint: %v %s", err, out)
@@ -104,7 +106,7 @@ func TestServerLeaseTwoFreshRootsProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
-	bad = daemonProcess(bin, empty, tmuxSocket)
+	bad = daemonProcess(bin, empty, tmuxSocket, credentials)
 	out, err = bad.CombinedOutput()
 	if err == nil || !bytes.Contains(out, []byte("already controller-stamped")) {
 		t.Fatalf("precreated empty DB did not fail closed on fingerprint: %v %s", err, out)
@@ -125,8 +127,12 @@ func buildTestBinary(t *testing.T) string {
 	}
 	return bin
 }
-func daemonProcess(bin, root, tmuxSocket string) *exec.Cmd {
-	c := exec.Command(bin, "daemon", "--test-root", root, "--socket", filepath.Join(root, "control.sock"), "--tmux-socket", tmuxSocket)
+// credentials is the daemon's registry (--credentials-file), which the daemon requires: without it the process
+// exits on usage before reaching the lease and fingerprint guards these tests exist to check. Callers write it
+// outside every contender root so it cannot disturb the loser-isolation assertions about root contents.
+func daemonProcess(bin, root, tmuxSocket, credentials string) *exec.Cmd {
+	c := exec.Command(bin, "daemon", "--test-root", root, "--socket", filepath.Join(root, "control.sock"),
+		"--tmux-socket", tmuxSocket, "--credentials-file", credentials)
 	c.Env = append(os.Environ(), "COCKPIT_TEST_BARRIER_DIR="+filepath.Join(root, "barriers"))
 	return c
 }
