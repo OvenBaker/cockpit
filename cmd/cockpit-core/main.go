@@ -22,7 +22,7 @@ const maxFrame = 1 << 20
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: cockpit-core daemon|ctl|mcp-stdio")
+		fatal("usage: cockpit-core daemon|ctl|mcp-stdio|reset-panes")
 	}
 	switch os.Args[1] {
 	case "daemon":
@@ -31,8 +31,38 @@ func main() {
 		ctl(os.Args[2:])
 	case "mcp-stdio":
 		mcpStdio(os.Args[2:])
+	case "reset-panes":
+		resetPanes(os.Args[2:])
 	default:
-		fatal("usage: cockpit-core daemon|ctl|mcp-stdio")
+		fatal("usage: cockpit-core daemon|ctl|mcp-stdio|reset-panes")
+	}
+}
+
+// reset-panes is OFFLINE by necessity: it exists for the case where the daemon cannot start, so there is no
+// socket to call and it cannot be a ctl method. It is a thin flag parser over core.ResetPanes — no policy
+// lives here. Without --confirm it mutates nothing and only reports, so the operator reads the count before
+// authorising it.
+func resetPanes(args []string) {
+	fs := flag.NewFlagSet("reset-panes", flag.ExitOnError)
+	root := fs.String("runtime-root", "", "controller runtime root (absolute)")
+	confirm := fs.Int("confirm", -1, "pane-row count being authorised for retirement; omit for a dry run")
+	operator := fs.String("operator", "", "operator identity recorded as the author of the retirement")
+	fs.Parse(args)
+	if *root == "" {
+		fatal("reset-panes requires --runtime-root")
+	}
+	var confirmed *int
+	if *confirm >= 0 {
+		confirmed = confirm
+	}
+	report, err := core.ResetPanes(*root, confirmed, *operator)
+	if err != nil {
+		fatal(err.Error())
+	}
+	fmt.Println(report.String())
+	if report.DryRun {
+		fmt.Printf("dry run — no changes made. To authorise: reset-panes --runtime-root %s --operator <you> --confirm %d\n",
+			*root, report.Panes)
 	}
 }
 
