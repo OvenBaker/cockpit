@@ -5,6 +5,13 @@
 #                                 intact) into a detached holding window, re-tile,
 #                                 and reap it after a grace period. Alt-u brings it
 #                                 back. Refuses the last pane in a workspace.
+#   cockpit-pane release <pane>   release a NAMED pane: same recoverable model, but
+#                                 resolved against the TARGET pane's own window rather
+#                                 than the one in view, correct for a sole-pane
+#                                 workspace, and HONEST about its exit code.
+#   cockpit-pane release --capability
+#                                 print the release capability token and exit 0 — the
+#                                 positive probe an older checkout cannot answer.
 #   cockpit-pane undo             join the most-recent soft-killed pane back
 #   cockpit-pane reap <win> <tok> (internal) hard-kill the holding window after grace
 #   cockpit-pane add              (back-compat) → `cockpit-pick add` in a popup
@@ -13,11 +20,39 @@
 # break-pane moves the still-running pane to a detached window we kill after GRACE
 # unless undone; undo join-panes it back where it came from — same recoverable
 # model as cockpit-ws, but per-pane and with the live process preserved.
+#
+# `remove` and `release` differ in exactly three ways, and each is why `release` exists
+# rather than a correction to `remove` (which brief-workshop teardown depends on):
+#   • `remove` measures its "last pane" guard against cockpit_cur_window — whatever
+#     window the operator happens to be VIEWING — and so refuses (or acts) on the wrong
+#     window whenever the target is elsewhere. `release` resolves the target pane's OWN
+#     window and never consults the current one except to decide whether to switch away.
+#   • `remove` exits 0 when it refuses, so a caller records a success for a teardown that
+#     did nothing. `release` exits 0 only when the named pane is COMMITTED TO REAPING,
+#     and names on stdout which outcome it established (released | already-marked |
+#     already-absent). Every refusal is non-zero, inert, and carries its cause on stderr.
+#   • `remove` cannot handle a pane that is the SOLE pane of its workspace — the common
+#     arrangement for an Orbital delivery execution. `release` closes that window through
+#     cockpit-ws's own state shape and reaper, so Alt-u routes through the untouched
+#     `cockpit-ws undo` rather than a third recovery model.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 GRACE="${COCKPIT_CLOSE_GRACE:-10}"
 wopt() { $TMUX show -wqv -t "$1" "$2" 2>/dev/null; }   # window option (quiet, value-only)
+
+# The positive capability token. An older checkout answers an unknown subcommand with the
+# usage fall-through (stderr, exit 2), which is observably identical to a refusal — so a
+# caller cannot tell "release is absent" from "release refused" without a token only a
+# checkout that HAS the subcommand can print.
+RELEASE_CAPABILITY="cockpit-pane-release/1"
+# Refusal exit codes, pairwise distinct and none equal to 2 (the usage fall-through), so a
+# caller can tell a missing subcommand from every way a present one can decline.
+RELEASE_E_NOARG=3      # no pane argument
+RELEASE_E_FOREIGN=4    # names a pane of the server, but not of the cockpit session
+RELEASE_E_LASTWIN=5    # sole-pane target whose window is the session's last window
+RELEASE_E_NOTMUX=6     # tmux server unreachable
+RELEASE_E_BREAK=7      # break-pane itself failed (nothing written)
 
 case "${1:-remove}" in
   add)   # kept for back-compat; the real path is `cockpit-pick add` in a popup
@@ -45,6 +80,90 @@ case "${1:-remove}" in
     setsid nohup "$HERE/cockpit-pane" reap "$hold" "$tok" >/dev/null 2>&1 &
     ;;
 
+  release)
+    # A NAMED pane, committed to reaping. Every check runs before anything is written, so a
+    # refusal leaves every pane, window, window option, layout and undo global exactly as it
+    # found them. There is deliberately no current-pane fallback: an explicit release with a
+    # missing argument is a caller bug, and silently acting on whatever is in view is how a
+    # working agent gets killed.
+    if [[ "${2:-}" == "--capability" ]]; then echo "$RELEASE_CAPABILITY"; exit 0; fi
+    pane="${2:-}"
+    if [[ -z "$pane" || "$pane" == *'#{'* ]]; then
+      echo "cockpit-pane release: a pane id is required (there is no current-pane fallback)" >&2
+      exit "$RELEASE_E_NOARG"
+    fi
+    # Server reachability first: with no server every later lookup returns empty, which would
+    # read as "the pane is gone" and converge a release that never happened.
+    if ! server_panes=$($TMUX list-panes -a -F '#{pane_id}' 2>/dev/null); then
+      echo "cockpit-pane release: tmux is unreachable ($TMUX)" >&2
+      exit "$RELEASE_E_NOTMUX"
+    fi
+    # Naming NOTHING at all is convergence, not a refusal: a pane reaped by a grid restart is
+    # already in the state a release establishes, and a caller that could never record it
+    # would keep offering a release that can only ever fail.
+    if ! grep -qxF -- "$pane" <<<"$server_panes"; then echo "already-absent"; exit 0; fi
+    # Naming a pane of ANOTHER session is a wrong target, and fails closed.
+    session_panes=$($TMUX list-panes -s -t "$COCKPIT_SESSION" -F '#{pane_id}' 2>/dev/null)
+    if ! grep -qxF -- "$pane" <<<"$session_panes"; then
+      echo "cockpit-pane release: $pane is not a pane of the '$COCKPIT_SESSION' session" >&2
+      exit "$RELEASE_E_FOREIGN"
+    fi
+    win=$($TMUX display -p -t "$pane" '#{window_id}' 2>/dev/null)
+    if [[ -z "$win" ]]; then
+      echo "cockpit-pane release: could not resolve the window of $pane" >&2
+      exit "$RELEASE_E_FOREIGN"
+    fi
+    # Already committed — by THIS caller, by `remove`, by `cockpit-ws close`, or by anyone
+    # else. A pane already broken out lives in a holding window carrying @graveyard, and a
+    # window already counting down carries @closing; both are inside the session, which is
+    # why either still shows up in the observation. Re-marking would mint a second token and
+    # invalidate the undo the first one published, so this writes nothing and says so.
+    if [[ -n "$(wopt "$win" @graveyard)" || -n "$(wopt "$win" @closing)" ]]; then
+      echo "already-marked"; exit 0
+    fi
+    tok="$(date +%s)-$$"
+    if (( $($TMUX list-panes -t "$win" -F x 2>/dev/null | wc -l) > 1 )); then
+      # SHARED WINDOW → the pane model, byte-for-byte as `remove` writes it, but measured on
+      # the target's own window. Only that window is re-tiled; the viewed window is untouched.
+      label=$($TMUX show -pqv -t "$pane" @label 2>/dev/null)
+      if ! held=$($TMUX break-pane -d -s "$pane" -P -F '#{pane_id}' 2>/dev/null); then
+        echo "cockpit-pane release: could not break $pane out of $win" >&2
+        exit "$RELEASE_E_BREAK"
+      fi
+      hold=$($TMUX display -p -t "$held" '#{window_id}')
+      $TMUX set -w -t "$hold" @graveyard "$tok"
+      $TMUX set -w -t "$hold" @from_win  "$win"
+      $TMUX set -w -t "$hold" @held_pane "$held"
+      $TMUX set -w -t "$hold" @held_label "${label:-pane}"
+      $TMUX rename-window -t "$hold" "✗ ${label:-pane}"
+      $TMUX set -g @undo_kind pane; $TMUX set -g @undo_pane "$hold"; $TMUX set -g @undo_pane_tok "$tok"
+      $TMUX select-layout -t "$win" "$COCKPIT_LAYOUT" 2>/dev/null || true
+      setsid nohup "$HERE/cockpit-pane" reap "$hold" "$tok" >/dev/null 2>&1 &
+    else
+      # SOLE PANE → breaking it out would leave an empty husk, so the WINDOW is what closes.
+      # That is cockpit-ws's model, so this writes cockpit-ws's state shape, declares the `ws`
+      # undo kind and detaches cockpit-ws's OWN reaper — the dispatcher routes on @undo_kind,
+      # so pane-shaped state under the ws kind would leave Alt-u inert with no visible cause.
+      if (( $($TMUX list-windows -t "$COCKPIT_SESSION" -F x 2>/dev/null | wc -l) <= 1 )); then
+        echo "cockpit-pane release: $win is the last window in '$COCKPIT_SESSION'" >&2
+        exit "$RELEASE_E_LASTWIN"
+      fi
+      name=$($TMUX display -p -t "$win" '#{window_name}')
+      $TMUX set -w -t "$win" @origname "$name"
+      $TMUX set -w -t "$win" @closing  "$tok"
+      $TMUX rename-window -t "$win" "✗ $name"
+      $TMUX set -g @undo_kind ws; $TMUX set -g @undo_win "$win"; $TMUX set -g @undo_tok "$tok"
+      # Switch away ONLY when the released window is the one in view. A release fired from
+      # Orbital routinely targets a workspace nobody is looking at; moving the operator's
+      # view then would be a surprise with no cause they can see.
+      if [[ "$(cockpit_cur_window)" == "$win" ]]; then
+        $TMUX previous-window -t "$COCKPIT_SESSION" 2>/dev/null || true
+      fi
+      setsid nohup "$HERE/cockpit-ws" reap "$win" "$tok" >/dev/null 2>&1 &
+    fi
+    echo "released"
+    ;;
+
   reap)
     hold="${2:-}"; tok="${3:-}"
     sleep "$GRACE"
@@ -68,5 +187,5 @@ case "${1:-remove}" in
     $TMUX display-message "recovered ${label:-pane}"
     ;;
 
-  *) echo "usage: cockpit-pane {remove [pane]|undo}" >&2; exit 2;;
+  *) echo "usage: cockpit-pane {remove [pane]|release <pane>|undo}" >&2; exit 2;;
 esac
