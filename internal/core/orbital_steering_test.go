@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -263,4 +264,70 @@ func restoreStrandedGrid(t *testing.T, tmuxSocket string, original pane, version
 	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_ref", original.Ref)
 	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_generation", fmt.Sprint(original.Generation))
 	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", newPane, "@cockpit_pane_version", fmt.Sprint(version))
+}
+
+// The read views must report what the interaction contract acts on. `provider` and `observedState` are not
+// persisted — the poller owns that projection in tmux options — so a durable row on its own reports every
+// pane `unknown`, and `capabilities` derives from those two fields. state.snapshot and pane.inspect used to
+// skip the observation entirely, so a client reading either was told no pane on the grid could be interacted
+// with, however the grid actually looked, while interaction.* would have accepted the very same pane.
+func TestReadViewsObserveProviderAndState(t *testing.T) {
+	root := t.TempDir()
+	auth := orbitalTestAuth(t, root, "observe-read-views")
+	tmuxSocket := fmt.Sprintf("cp-observe-%d", time.Now().UnixNano())
+	defer func() { _ = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run() }()
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-session", "-d", "-s", "observed", "sleep 600")
+
+	d, err := newDaemon(root, filepath.Join(root, "control.sock"), tmuxSocket, auth, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	panes, err := d.st.panes()
+	if err != nil || len(panes) != 1 {
+		t.Fatalf("initial inventory: %#v %v", panes, err)
+	}
+	pane := panes[0]
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", pane.PaneID, "@agent", "claude")
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", pane.PaneID, "@state", "just-finished")
+
+	view := func(method string) map[string]any {
+		t.Helper()
+		params := json.RawMessage(`{}`)
+		if method == "pane.inspect" {
+			params = json.RawMessage(fmt.Sprintf(`{"paneRef":%q}`, pane.Ref))
+		}
+		result, e := d.dispatch(context.Background(), "orbital", "orbital-brief-studio",
+			[]string{"state:read", "capture:sanitized", "interaction:nudge"}, true,
+			rpcRequest{Method: method, Params: params})
+		if e != nil {
+			t.Fatalf("%s: %v", method, e)
+		}
+		if method == "pane.inspect" {
+			return result.(map[string]any)
+		}
+		return result.(map[string]any)["panes"].([]any)[0].(map[string]any)
+	}
+
+	for _, method := range []string{"state.snapshot", "pane.inspect"} {
+		got := view(method)
+		if got["provider"] != "claude" {
+			t.Fatalf("%s reports provider %v; the poller stamped claude", method, got["provider"])
+		}
+		// `just-finished` is a settled provider turn and shares `waiting` with `idle` — that is the state
+		// the whole reply path is gated on.
+		if got["observedState"] != "waiting" {
+			t.Fatalf("%s reports observedState %v; the poller stamped just-finished", method, got["observedState"])
+		}
+		if !has(got["capabilities"].([]string), "interaction:nudge") {
+			t.Fatalf("%s advertises no nudge capability on a waiting claude pane: %v", method, got["capabilities"])
+		}
+	}
+
+	// An unclassified pane still fails closed as unsupported — observing must never widen what is reachable.
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", pane.PaneID, "@state", "dead")
+	unclassified := view("state.snapshot")
+	if unclassified["observedState"] != "unknown" || has(unclassified["capabilities"].([]string), "interaction:nudge") {
+		t.Fatalf("a dead pane was advertised as interactable: %#v", unclassified)
+	}
 }

@@ -1019,8 +1019,17 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, capabilit
 		if e != nil {
 			return nil, e
 		}
-		out := make([]any, 0, len(ps))
-		for _, p := range ps {
+		// Observe before viewing. Provider and observed state are not persisted — the poller owns that
+		// projection in tmux options — so a durable row on its own reports every pane `unknown`, and
+		// `capabilities` derives from those two fields. A snapshot that skipped this advertised no
+		// interaction on any pane however the grid actually looked, which made the read views disagree with
+		// interaction.* about the same pane at the same instant.
+		observed, oe := d.observeAll(ps)
+		if oe != nil {
+			return nil, oe
+		}
+		out := make([]any, 0, len(observed))
+		for _, p := range observed {
 			out = append(out, p.view())
 		}
 		return map[string]any{"controllerEpoch": d.epoch, "eventSeq": d.currentEventSeq(), "panes": out}, nil
@@ -1041,7 +1050,7 @@ func (d *daemon) dispatch(ctx context.Context, profile, caller string, capabilit
 		if e != nil {
 			return nil, e
 		}
-		return x.view(), nil
+		return d.observePane(x).view(), nil
 	case "pane.status":
 		var p struct {
 			PaneRef string `json:"paneRef"`
@@ -1206,6 +1215,45 @@ func (d *daemon) observePane(p pane) pane {
 		p.State = "unknown"
 	}
 	return p
+}
+
+// observeAll applies observePane's mapping to a whole inventory from ONE tmux read rather than two option
+// reads per pane. A grid of forty panes is an ordinary size here, so the per-pane form would turn every
+// snapshot into eighty subprocess round-trips.
+func (d *daemon) observeAll(ps []pane) ([]pane, error) {
+	b, err := d.tm.run("list-panes", "-a", "-F", "#{@cockpit_pane_ref}\t#{@agent}\t#{@state}")
+	if err != nil {
+		return nil, err
+	}
+	type observation struct{ provider, state string }
+	live := map[string]observation{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 3 || f[0] == "" {
+			continue
+		}
+		live[f[0]] = observation{provider: f[1], state: f[2]}
+	}
+	out := make([]pane, 0, len(ps))
+	for _, p := range ps {
+		got, known := live[p.Ref]
+		// Exactly observePane's rules: an unknown provider and an unrecognised or missing state fail closed
+		// as unsupported, so a pane the poller has not classified is never advertised as interactable.
+		if known && (got.provider == "claude" || got.provider == "codex") {
+			p.Provider = got.provider
+		} else {
+			p.Provider = "unknown"
+		}
+		if known && (got.state == "idle" || got.state == "just-finished") {
+			p.State = "waiting"
+		} else if known && (got.state == "working" || got.state == "paused") {
+			p.State = got.state
+		} else {
+			p.State = "unknown"
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 func (d *daemon) resolveCanonical(canonical string) (any, error) {

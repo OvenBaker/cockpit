@@ -675,7 +675,7 @@ func (f *fixture) protocolAndWait(t *testing.T) {
 	}
 	defer db.Close()
 	beforeAdmission := operationCount(t, db)
-	beforeTrace, _ := os.ReadFile(filepath.Join(f.root, "driver.trace"))
+	// (the trace baseline for the refused mutation is taken immediately before it, below)
 	c, e := net.Dial("unix", f.socket)
 	if e != nil {
 		t.Fatal(e)
@@ -734,10 +734,15 @@ func (f *fixture) protocolAndWait(t *testing.T) {
 	f.refresh()
 	unknownMutation := f.badgeParams("schema", ik(0, 28), f.pane["resourceVersion"].(float64))
 	unknownMutation["forbidden"] = true
+	// The claim under test is that the refused MUTATION effected nothing, so the trace baseline is taken
+	// immediately before it. It used to be taken far earlier and carried across an intervening read; reads
+	// legitimately consult tmux (pane.inspect observes the pane, and state.snapshot reconciles it), so a
+	// baseline spanning one would have started failing the moment any read did.
+	beforeMutationTrace := mustRead(t, filepath.Join(f.root, "driver.trace"))
 	if r := f.call("metadata.set_display", unknownMutation); !strings.Contains(fmt.Sprint(r), "-32602") {
 		t.Fatalf("P1 unknown mutation field was accepted: %#v", r)
 	}
-	if operationCount(t, db) != beforeAdmission || !bytes.Equal(beforeTrace, mustRead(t, filepath.Join(f.root, "driver.trace"))) {
+	if operationCount(t, db) != beforeAdmission || !bytes.Equal(beforeMutationTrace, mustRead(t, filepath.Join(f.root, "driver.trace"))) {
 		t.Fatal("P1 unknown field admitted or effected a mutation")
 	}
 	if r := f.call("pane.inspect", map[string]any{"paneRef": f.pane["paneRef"], "forbidden": true}); !strings.Contains(fmt.Sprint(r), "-32602") {
