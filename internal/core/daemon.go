@@ -302,6 +302,15 @@ func (d *daemon) reconcile() error {
 	if e != nil {
 		return e
 	}
+	// Strand recovery runs FIRST, before any validation that would refuse on the residues it clears. An
+	// interrupted operation leaves up to three of them — a `prepared` operations row, a one-version pane
+	// divergence, and (on the effect-error path) a fenced pane — and every later step here treats all three
+	// as evidence of an untrustworthy grid. Recovering last, as this used to, meant a controller that
+	// refused at validation never reached its own recovery routine, and with no daemon there is no socket to
+	// call one either: the fence was permanent and needed manual database surgery.
+	if e = d.recoverPrepared(b); e != nil {
+		return e
+	}
 	fp, e := d.st.meta("fingerprint")
 	if e == sql.ErrNoRows {
 		if existing, ge := d.tm.globalOption("@cockpit_server_fingerprint"); ge != nil || existing != "" {
@@ -431,10 +440,14 @@ func (d *daemon) reconcile() error {
 		var dbPane string
 		err := d.st.db.QueryRow("SELECT pane_id,generation,version FROM panes WHERE ref=?", pref).Scan(&dbPane, &dbGen, &dbVer)
 		if err == nil && (dbGen != gen || dbVer != ver || dbPane != pid) {
-			// The only permitted one-version divergence is a durable prepared
-			// badge intent whose two tmux effects landed before process death.
+			// The only permitted one-version divergence is a durable prepared intent whose tmux effects
+			// landed before process death: a badge intent (matched on its badge) or an INTERACTION intent
+			// (a nudge, whose operations row carries no badge at all). Without the interaction arm a
+			// stranded nudge refused on EVERY startup, not just a successor one.
 			var n int
-			pe := d.st.db.QueryRow("SELECT count(*) FROM operations WHERE status='prepared' AND pane_ref=? AND badge=?", pref, f[7]).Scan(&n)
+			pe := d.st.db.QueryRow(
+				"SELECT count(*) FROM operations WHERE status='prepared' AND pane_ref=? AND ((method='metadata.set_display' AND badge=?) OR method LIKE 'interaction.%')",
+				pref, f[7]).Scan(&n)
 			if dbPane != pid || dbGen != gen || dbVer+1 != ver || pe != nil || n != 1 {
 				return derr("CONTROLLER_NOT_READY", "tmux pane stamp does not match durable projection")
 			}
@@ -447,7 +460,7 @@ func (d *daemon) reconcile() error {
 			return e
 		}
 	}
-	return d.recoverPrepared()
+	return nil
 }
 
 // validateFingerprintSuccessor admits only a deliberate Cockpit replacement
@@ -455,14 +468,12 @@ func (d *daemon) reconcile() error {
 // projection. It performs no tmux or database writes: an untagged, partial,
 // duplicate, or changed-generation grid remains fenced instead of being
 // matched by display position or label.
+//
+// It no longer refuses over an outstanding `prepared` operation: recoverPrepared
+// now runs at the top of reconcile, BEFORE this validation, so a strand it can
+// resolve is already gone by the time we get here and one it cannot resolve has
+// fenced its own pane. Refusing here as well only made the recovery unreachable.
 func (d *daemon) validateFingerprintSuccessor(inventory []byte) error {
-	var prepared int
-	if err := d.st.db.QueryRow("SELECT count(*) FROM operations WHERE status='prepared'").Scan(&prepared); err != nil {
-		return err
-	}
-	if prepared != 0 {
-		return derr("CONTROLLER_NOT_READY", "prepared operations prevent controller rebind")
-	}
 
 	type expectedPane struct {
 		workspaceRef string
@@ -509,7 +520,17 @@ func (d *daemon) validateFingerprintSuccessor(inventory []byte) error {
 			return derr("CONTROLLER_NOT_READY", "restored pane generation does not match durable projection")
 		}
 		if _, err = fmt.Sscan(f[6], &version); err != nil || version != pane.version {
-			return derr("CONTROLLER_NOT_READY", "restored pane version does not match durable projection")
+			// A stranded nudge IS a one-version divergence, so refusing every changed version here
+			// contradicted the strand recovery: a strand coinciding with a Cockpit replacement fenced
+			// permanently. Exactly one version ahead, accompanied by this pane's OWN prepared interaction
+			// operation, is a recoverable strand. Anything larger, or unaccompanied, still fences.
+			var strands int
+			pe := d.st.db.QueryRow(
+				"SELECT count(*) FROM operations WHERE status='prepared' AND pane_ref=? AND method LIKE 'interaction.%'",
+				paneRef).Scan(&strands)
+			if err != nil || pe != nil || strands == 0 || version != pane.version+1 {
+				return derr("CONTROLLER_NOT_READY", "restored pane version does not match durable projection")
+			}
 		}
 		if workspaceRef != pane.workspaceRef {
 			return derr("CONTROLLER_NOT_READY", "restored pane workspace does not match durable projection")
@@ -527,23 +548,47 @@ func (d *daemon) validateFingerprintSuccessor(inventory []byte) error {
 	return nil
 }
 
-func (d *daemon) recoverPrepared() error {
-	rows, e := d.st.db.Query("SELECT ref,caller,pane_ref,badge,target_version FROM operations WHERE status='prepared'")
+// paneIDsByRef maps each stamped pane reference in a tmux inventory to the pane id currently carrying it.
+// Recovery runs before the stamp loop refreshes `panes.pane_id`, so after a Cockpit replacement the durable
+// row's pane id can be stale; the live stamp is the authority for WHICH pane to read.
+func paneIDsByRef(inventory []byte) map[string]string {
+	live := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(inventory), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) != 10 || f[4] == "" {
+			continue
+		}
+		live[f[4]] = f[2]
+	}
+	return live
+}
+
+// recoverPrepared resolves every operation stranded mid-effect, before any validation that would refuse on
+// what it leaves behind. Two intents strand: a `metadata.set_display` badge write (the original case), and an
+// `interaction.*` typed notice — whose residues are a prepared row, a one-version pane divergence, and, on
+// the effect-error path, a FENCED pane that nothing else in the controller ever clears. A fenced pane that
+// stays fenced would let the reply path permanently disable the very pane it exists to reach.
+func (d *daemon) recoverPrepared(inventory []byte) error {
+	rows, e := d.st.db.Query("SELECT ref,caller,method,pane_ref,badge,target_version,status FROM operations WHERE status IN ('prepared','recovery-required')")
 	if e != nil {
 		return e
 	}
 	type prepared struct {
-		ref, caller, paneRef, badge string
-		targetVersion               int64
+		ref, caller, method, paneRef, badge, status string
+		targetVersion                               int64
 	}
 	var pending []prepared
 	for rows.Next() {
-		var ref, caller, pr, badge string
+		var ref, caller, method, pr, badge, status string
 		var target int64
-		if e = rows.Scan(&ref, &caller, &pr, &badge, &target); e != nil {
+		if e = rows.Scan(&ref, &caller, &method, &pr, &badge, &target, &status); e != nil {
+			_ = rows.Close()
 			return e
 		}
-		pending = append(pending, prepared{ref: ref, caller: caller, paneRef: pr, badge: badge, targetVersion: target})
+		pending = append(pending, prepared{ref: ref, caller: caller, method: method, paneRef: pr, badge: badge, targetVersion: target, status: status})
 	}
 	if e = rows.Err(); e != nil {
 		_ = rows.Close()
@@ -552,19 +597,40 @@ func (d *daemon) recoverPrepared() error {
 	if e = rows.Close(); e != nil {
 		return e
 	}
+	live := paneIDsByRef(inventory)
 	for _, item := range pending {
 		ref, pr, badge := item.ref, item.paneRef, item.badge
+		interaction := strings.HasPrefix(item.method, "interaction.")
+		// Only the badge intent's ORIGINAL prepared case, and any interaction intent, are recoverable here.
+		// A recovery-required badge operation keeps today's behaviour: untouched, still fenced.
+		if !interaction && (item.status != "prepared" || item.method != "metadata.set_display") {
+			continue
+		}
 		p, e := d.st.pane(pr)
 		if e != nil {
 			return e
 		}
-		got, e := d.tm.paneOption(p.PaneID, "@cockpit_badge")
+		paneID := p.PaneID
+		if id, ok := live[pr]; ok {
+			paneID = id
+		} else if interaction {
+			// The pane carrying this strand is not in the live grid at all. There is nothing to reconcile
+			// and nothing to unfence: leave the row exactly as it is rather than guessing at a vanished pane.
+			continue
+		}
+		if interaction {
+			if e = d.recoverInteraction(item.ref, item.caller, item.method, p, paneID, item.targetVersion); e != nil {
+				return e
+			}
+			continue
+		}
+		got, e := d.tm.paneOption(paneID, "@cockpit_badge")
 		if e != nil {
 			return e
 		}
-		stamp, se := d.tm.paneOption(p.PaneID, "@cockpit_pane_version")
-		refStamp, re := d.tm.paneOption(p.PaneID, "@cockpit_pane_ref")
-		genStamp, ge := d.tm.paneOption(p.PaneID, "@cockpit_pane_generation")
+		stamp, se := d.tm.paneOption(paneID, "@cockpit_pane_version")
+		refStamp, re := d.tm.paneOption(paneID, "@cockpit_pane_ref")
+		genStamp, ge := d.tm.paneOption(paneID, "@cockpit_pane_generation")
 		if got != badge || se != nil || stamp != fmt.Sprint(item.targetVersion) || re != nil || ge != nil || refStamp != p.Ref || genStamp != fmt.Sprint(p.Generation) {
 			e = d.markRecoveryRequired(ref, pr)
 			if e != nil {
@@ -596,6 +662,63 @@ func (d *daemon) recoverPrepared() error {
 	}
 	return nil
 }
+
+// recoverInteraction resolves ONE stranded interaction operation against the pane's live tmux stamps, and
+// clears the fence on every path it can decide. targetVersion is the pane version recorded when the
+// operation was prepared — i.e. before the effect — so the live stamp says what actually happened:
+//
+//	targetVersion+1  the text was typed AND the version bump landed; the durable outcome is the same
+//	                 effect-delivered-unconfirmed the caller would have received. Delivery is not completion.
+//	targetVersion    the effect never became durable; the operation failed. Nothing is claimed about it.
+//	anything else    a genuinely untrustworthy grid — stay fenced, exactly as today.
+func (d *daemon) recoverInteraction(operationRef, caller, method string, p pane, paneID string, targetVersion int64) error {
+	stamp, se := d.tm.paneOption(paneID, "@cockpit_pane_version")
+	refStamp, re := d.tm.paneOption(paneID, "@cockpit_pane_ref")
+	genStamp, ge := d.tm.paneOption(paneID, "@cockpit_pane_generation")
+	if se != nil || re != nil || ge != nil || refStamp != p.Ref || genStamp != fmt.Sprint(p.Generation) {
+		return d.markRecoveryRequired(operationRef, p.Ref)
+	}
+	var live int64
+	if _, err := fmt.Sscan(stamp, &live); err != nil {
+		return d.markRecoveryRequired(operationRef, p.Ref)
+	}
+	var version int64
+	var status string
+	switch live {
+	case targetVersion + 1:
+		version, status = live, "effect-delivered-unconfirmed"
+	case targetVersion:
+		version, status = targetVersion, "failed"
+	default:
+		return d.markRecoveryRequired(operationRef, p.Ref)
+	}
+	result := map[string]any{"operationRef": operationRef, "status": status, "paneRef": p.Ref,
+		"generation": p.Generation, "resourceVersion": version, "provider": p.Provider, "recovered": true}
+	rb, _ := json.Marshal(result)
+	tx, err := d.st.db.Begin()
+	if err != nil {
+		return err
+	}
+	// Unfencing is the point: a pane fenced by a strand this routine has just decided must accept a typed
+	// interaction again, with no operator step and no manual database surgery (INV-12).
+	if err = mustTx(tx, "UPDATE panes SET version=?,fenced=0 WHERE ref=?", version, p.Ref); err == nil {
+		err = mustTx(tx, "UPDATE operations SET status=?,result=? WHERE ref=?", status, string(rb), operationRef)
+	}
+	if err == nil {
+		err = mustTx(tx, "INSERT INTO audit(at,caller,method,pane_ref,before_digest,after_digest) VALUES(?,?,?,?,?,?)",
+			time.Now().Unix(), caller, method, p.Ref, fmt.Sprintf("v%d", targetVersion), fmt.Sprintf("recovered:%s", status))
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	d.publishEvent(p.Ref, version, "operation."+status, operationRef)
+	return nil
+}
+
 func (d *daemon) markRecoveryRequired(operationRef, paneRef string) error {
 	tx, err := d.st.db.Begin()
 	if err != nil {

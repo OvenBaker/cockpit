@@ -385,4 +385,75 @@ done
 [[ $(pane_count) -eq $n && $(starts) -eq 0 ]]
 echo "ok 14 interaction-profile-selective-and-identity-bound"
 
+
+
+# ── 15: brief-studio profile (BRF-042 / BRF-044 / BRF-055) ─────────────────────────────────────────────────
+# The one part of the spawn contract this brief changes, in exactly three bounded ways: startup gates
+# suppressed by per-invocation configuration only, brief-studio system text in place of the agent profile's,
+# and the `orb` MCP server provisioned so the session actually has somewhere to ask.
+ORB_SPEC="$root/orb-server.json"
+jq -cn --arg c "$(command -v cat)" '{command:$c,args:["--orb"],env:{ORB_TOKEN_FILE:"/dev/null",ORB_BASE_URL:"https://orbital.example"}}' > "$ORB_SPEC"
+
+# (a) a brief-studio launch with no reachable server refuses BY NAME rather than spawning a mute session
+n=$(pane_count); : > "$root/out/starts"
+refused "${base[@]}" --request-id req-bs-noserver --initial-prompt-file "$PROMPT_FILE" \
+  --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" --interaction-profile brief-studio
+refused "${base[@]}" --request-id req-bs-badserver --initial-prompt-file "$PROMPT_FILE" \
+  --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" --interaction-profile brief-studio \
+  --orb-server-file "$root/does-not-exist.json"
+[[ ! -f "$(record_of req-bs-noserver)" ]]
+[[ $(pane_count) -eq $n && $(starts) -eq 0 ]]
+
+# (b) the launched argv: menu + plan-mode tools still disallowed, brief-studio system text, orb provisioned,
+#     and NONE of the agent profile's three wrong clauses.
+echo hold > "$root/out/mode"; : > "$root/out/starts"
+spawn req-bs-1 "$PROMPT_FILE" "$SHA" "$BYTES" --interaction-profile brief-studio --orb-server-file "$ORB_SPEC" >/dev/null
+wait_for '[[ $(starts) -eq 1 ]]'
+[[ "$(field req-bs-1 profile)" == brief-studio ]]
+python3 - "$root/out/argv" "$PROMPT_FILE" <<'PY'
+import json, sys
+argv = [a.decode() for a in open(sys.argv[1],'rb').read().split(b'\0')[:-1]]
+prompt = open(sys.argv[2],'rb').read().decode()
+assert argv[-2:] == ['--', prompt], argv[-2:]
+def value(flag):
+    return argv[argv.index(flag) + 1]
+assert '--permission-mode' in argv and value('--permission-mode') == 'bypassPermissions', argv
+assert json.loads(value('--settings'))['skipDangerousModePermissionPrompt'] is True, argv
+i = argv.index('--disallowedTools')
+assert argv[i+1:i+3] == ['AskUserQuestion', 'EnterPlanMode'], argv
+system = value('--append-system-prompt')
+assert 'orb_ask' in system and 'orb_fetch' in system, system
+assert 'END YOUR TURN' in system, system
+for forbidden in ['Treat the supplied brief as complete and as a scope ceiling',
+                  'Your counterpart is another AI agent',
+                  'State reasonable assumptions and proceed']:
+    assert forbidden not in system, forbidden
+assert 'not a scope ceiling' in system, system
+assert 'counterpart is the operator' in system, system
+assert 'do not hold any tool call open' in system, system
+mcp = json.loads(value('--mcp-config'))['mcpServers']['orb']
+assert mcp['args'] == ['--orb'] and mcp['env']['ORB_TOKEN_FILE'] == '/dev/null', mcp
+PY
+echo "ok 15a brief-studio-claude-launch"
+
+# (c) Codex: no seeded path exists, so brief-studio applies to the plain spawn — trust asserted from the
+#     LAUNCH CWD at invocation time and the orb server provisioned, with no global provider config written.
+codex_before=$(md5sum "$HOME/.codex/config.toml" 2>/dev/null | cut -d' ' -f1 || echo none)
+codexpane=$("$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace codexws --agent codex \
+  --interaction-profile brief-studio --orb-server-file "$ORB_SPEC")
+# tmux reports the pane's start command with its own escaping, so assert on the tokens that survive it.
+cmdline=$(tmux -L "$socket" display -p -t "$codexpane" '#{pane_start_command}')
+[[ "$cmdline" == *"projects."*"$root/cwd"*"trust_level="*"trusted"* ]]
+[[ "$cmdline" == *"mcp_servers.orb.command="* ]]
+[[ "$cmdline" == *"mcp_servers.orb.args="* ]]
+[[ "$cmdline" == *"mcp_servers.orb.env="*"ORB_TOKEN_FILE="* ]]
+[[ "$(md5sum "$HOME/.codex/config.toml" 2>/dev/null | cut -d' ' -f1 || echo none)" == "$codex_before" ]]
+# a plain codex spawn is unchanged — none of the brief-studio configuration leaks into it
+plainpane=$("$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace codexws --agent codex)
+plaincmd=$(tmux -L "$socket" display -p -t "$plainpane" '#{pane_start_command}')
+[[ "$plaincmd" != *trust_level* && "$plaincmd" != *mcp_servers* ]]
+[[ "$plaincmd" == *codex* ]]
+# an --orb-server-file with no brief-studio profile is refused rather than silently ignored
+refused --cwd "$root/cwd" --workspace codexws --agent codex --orb-server-file "$ORB_SPEC"
+echo "ok 15b brief-studio-codex-launch"
 echo "ALL SEEDED-SPAWN CHECKS PASSED"
