@@ -34,7 +34,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 # agent and how to behave. Passed as ONE argv element to --append-system-prompt — never shell-interpolated.
 AGENT_SYSTEM_TEXT='Your counterpart is another AI agent, not a human. Treat the supplied brief as complete and as a scope ceiling. Do not use option menus, enter plan mode, or ask non-blocking clarifying questions. State reasonable assumptions and proceed. When a material decision prevents safe progress, respond `BLOCKED: <reason>` with one recommended resolution and reasoning. Return concise milestone and final evidence; omit pleasantries and routine progress narration.'
 
-record="${1:-}"; staging="${2:-}"; name="${3:-}"; cwd="${4:-}"; claude_bin="${5:-claude}"; profile="${6:-human}"
+record="${1:-}"; staging="${2:-}"; name="${3:-}"; cwd="${4:-}"; claude_bin="${5:-claude}"; profile="${6:-human}"; orb_file="${7:-}"
 
 die() { echo "cockpit-seed-exec: $1" >&2; exit 3; }
 # Mark the request failed (only while still pending) with a bounded code, then die. Prompt-free by design.
@@ -45,8 +45,8 @@ fail() {
   die "$1"
 }
 
-[[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [claude-bin] [human|agent]"
-case "$profile" in human|agent) ;; *) die "interaction profile must be 'human' or 'agent'";; esac
+[[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [claude-bin] [human|agent|brief-studio] [orb-server-file]"
+case "$profile" in human|agent|brief-studio) ;; *) die "interaction profile must be 'human', 'agent' or 'brief-studio'";; esac
 [[ -n "${TMUX_PANE:-}" ]] || die "not inside a tmux pane"
 [[ -f "$record" && ! -L "$record" ]] || die "seed record is unavailable or unsafe"
 
@@ -95,5 +95,20 @@ if [[ "$profile" == agent ]]; then
   args+=(--settings '{"skipDangerousModePermissionPrompt":true}')   # per-invocation dialog suppression (see header)
   args+=(--disallowedTools AskUserQuestion EnterPlanMode)
   args+=(--append-system-prompt "$AGENT_SYSTEM_TEXT")
+fi
+# Brief-studio profile: the SAME permission posture as `agent` — bypassPermissions with the inline dialog
+# suppression, and the interactive option-menu and plan-mode tools disallowed, because a numbered menu is
+# answerable only by keystrokes in the pane and this whole channel exists to avoid that. What differs is the
+# system text (the brief is being authored, the counterpart is the operator, ambiguity is asked about rather
+# than assumed past) and the per-invocation `orb` MCP server that gives it somewhere to ask.
+if [[ "$profile" == brief-studio ]]; then
+  args+=(--permission-mode bypassPermissions)
+  args+=(--settings '{"skipDangerousModePermissionPrompt":true}')   # per-invocation dialog suppression (see header)
+  args+=(--disallowedTools AskUserQuestion EnterPlanMode)
+  args+=(--append-system-prompt "$COCKPIT_BRIEF_STUDIO_SYSTEM_TEXT")
+  orb_spec=$(cockpit_orb_read_spec "$orb_file") || fail "orb-server-unavailable"
+  # One validated argv element built from the validated spec — never shell-interpolated, and no global
+  # ~/.claude configuration is read or written.
+  args+=(--mcp-config "$(jq -cn --argjson s "$orb_spec" '{mcpServers:{orb:$s}}')")
 fi
 exec "$claude_bin" "${args[@]}" -- "$prompt"

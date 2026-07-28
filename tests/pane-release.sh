@@ -296,11 +296,17 @@ t_pinned() {
        "$(branch_body "$REPO/cockpit-pane" "$branch" | md5sum)" \
        "$(branch_body "$base/cockpit-pane" "$branch" | md5sum)"
   done
-  for f in cockpit-ws cockpit-undo cockpit-spawn; do
+  for f in cockpit-ws cockpit-undo; do
     is "pinned: $f is byte-identical" "$(md5sum < "$REPO/$f")" "$(md5sum < "$base/$f")"
   done
-  is "pinned: exactly one executable changed" \
-     "$(git -C "$REPO" diff --name-only "$BASELINE_COMMIT" -- . ':!tests' | wc -l)" "1"
+  # cockpit-spawn left this list when the brief-studio launch profile landed: that change deliberately edits
+  # the spawn invocation (startup-gate suppression, brief-studio system text, orb server provisioning) and is
+  # covered by tests/seeded-spawn.sh section 15. The count assertion became an explicit CHANGED-SET assertion
+  # for the same reason — it was measuring one particular diff, not a standing invariant, so a later
+  # deliberate change had to state its own name here rather than silently bump a number.
+  is "pinned: only the deliberately-changed executables differ from the baseline" \
+     "$(git -C "$REPO" diff --name-only "$BASELINE_COMMIT" -- . ':!tests' ':!internal' | sort | tr '\n' ' ')" \
+     "cockpit-pane cockpit-seed-exec cockpit-spawn lib.sh "
 }
 
 printf 'cockpit-pane release\n'

@@ -77,6 +77,14 @@ func profileCapabilities(profile string) []string {
 		return []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume", "coord:admin", "coord:read", "coord:write"}
 	case "mcp-local":
 		return []string{"state:read", "operations:read", "events:wait", "capture:sanitized", "metadata:write", "interaction:nudge", "interaction:pause", "interaction:compact", "interaction:resume", "coord:read", "coord:write"}
+	// The `orbital` profile is the narrowest grant that lets Orbital's brief-studio reply path work and
+	// nothing else: read the grid to locate a pane, take a sanitized capture, and type one bounded notice.
+	// It deliberately carries no metadata:write, no operations:read, no events:wait and neither coordination
+	// scope — claiming mcp-local instead would grant all five. The name was ALREADY accepted by
+	// validClaimedProfile while mapping to an empty capability set here, so a grant claiming it failed
+	// credential loading and rejected the WHOLE file, taking controller auth down for every client.
+	case "orbital":
+		return []string{"state:read", "capture:sanitized", "interaction:nudge"}
 	case "read-only":
 		return []string{"state:read", "operations:read", "events:wait", "coord:read"}
 	default:

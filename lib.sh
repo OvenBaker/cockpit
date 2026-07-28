@@ -30,6 +30,55 @@ cockpit_rc_args() {
   printf ' --remote-control %q' "${name:0:48}"
 }
 
+# ── brief-studio launch posture (Orbital's `orb` MCP channel) ───────────────────────────────────────────────
+# A brief-studio pane is a workshop session Orbital launched to develop a brief. Three things make it usable
+# from Orbital and NOTHING else about the spawn contract changes:
+#   1. provider STARTUP trust gates are suppressed — folder trust and new-MCP-server confirmation carry no
+#      decision worth the operator's attention and block a seeded launch before any work begins;
+#   2. the appended system text tells the worker to ask through `orb_ask` and end its turn;
+#   3. the `orb` MCP server is provisioned into the session so it HAS that tool.
+# All three are strictly PER INVOCATION: no user-level provider settings file is read or written, so nothing
+# here follows the operator into his own sessions and nothing goes stale when a repository moves.
+
+# The brief-studio system text. The brief is being AUTHORED here, so this deliberately carries none of the
+# agent profile's three wrong clauses: no scope ceiling, no agent counterpart, no assume-and-proceed.
+COCKPIT_BRIEF_STUDIO_SYSTEM_TEXT='You are developing a brief in the build-a-brief workshop. The brief is being AUTHORED here, not consumed: it is not complete and it is not a scope ceiling. Your counterpart is the operator, a person, reached in this terminal or through Orbital — never another agent. The loop exists to resolve ambiguity WITH him, so when a genuine ambiguity blocks good work do not state an assumption and proceed. Instead call the orb_ask tool: the question in plain text, and where a real choice exists 2 or 3 candidate readings, each with the consequence of taking it. Then END YOUR TURN immediately. orb_ask registers the question and returns a questionId at once. It never blocks, so do not wait on it, do not poll it, and do not hold any tool call open waiting for an answer. When the operator answers, your pane is woken with a notice naming that questionId; call orb_fetch once with it to collect his prose and his selected reading, then carry on. Do not use option menus and do not enter plan mode. Ingest the intake/ notes in the brief directory before asking a question or finishing a loop pass.'
+
+# Read and validate an orb server specification file: {"command": "<abs>", "args": [...], "env": {...}}.
+# Echoes the compact JSON on success; on failure prints nothing and returns 1, so every caller can refuse the
+# launch LOUDLY naming the missing server rather than spawning a session that cannot ask anything.
+cockpit_orb_read_spec() {
+  local file="$1" json
+  [[ "$file" == /* && ! -L "$file" && -f "$file" ]] || return 1
+  json=$(jq -c '
+    if (.command|type)!="string" or ((.command|startswith("/"))|not) then error("command")
+    elif ((.args // []) | type)!="array" or ((.args // []) | length) > 16 then error("args")
+    elif ((.args // []) | map(select(type!="string")) | length) > 0 then error("args")
+    elif ((.env // {}) | type)!="object" or ((.env // {}) | length) > 16 then error("env")
+    elif ((.env // {}) | to_entries | map(select((.key|test("^[A-Za-z_][A-Za-z0-9_]*$")|not) or (.value|type)!="string")) | length) > 0 then error("env")
+    else {command: .command, args: (.args // []), env: (.env // {})} end' -- "$file" 2>/dev/null) || return 1
+  [[ -x "$(jq -r .command <<<"$json")" ]] || return 1
+  printf '%s' "$json"
+}
+
+# Codex per-invocation config overrides for a brief-studio launch, %q-quoted for the one `bash -lc` hop every
+# launcher builds. Trust is asserted from the launch cwd AT INVOCATION TIME (`-c projects."<cwd>"...`) rather
+# than persisted into ~/.codex/config.toml: Codex does NOT inherit trust from a parent entry (operator-verified),
+# and a persisted absolute path would silently stall every Codex-worked brief the moment the repo moves.
+cockpit_codex_brief_studio_args() {
+  local cwd="$1" orb="$2" value
+  # A cwd that cannot be expressed as a TOML basic key is refused by the caller, never quietly dropped.
+  case "$cwd" in *'"'*|*'\'*|*$'\n'*|*$'\t'*|*$'\r'*) return 1;; esac
+  printf ' -c %q' "projects.\"$cwd\".trust_level=\"trusted\""
+  [[ -n "$orb" ]] || return 0
+  printf ' -c %q' "mcp_servers.orb.command=$(jq -r '.command|@json' <<<"$orb")"
+  printf ' -c %q' "mcp_servers.orb.args=$(jq -c '.args' <<<"$orb")"
+  # A TOML inline table of bare keys. The env values are our own paths and tokens, and jq's @json escaping is
+  # exactly TOML basic-string escaping over that charset.
+  value=$(jq -r '.env | to_entries | map(.key + "=" + (.value|@json)) | join(",")' <<<"$orb")
+  printf ' -c %q' "mcp_servers.orb.env={$value}"
+}
+
 # Labels come from arbitrary user text (santa's first_user_text = a session's
 # first prompt), which routinely contains newlines and tabs. Stored raw in
 # @label those break two things: the single-line pane border, and — worse — the

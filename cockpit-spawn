@@ -5,7 +5,8 @@
 #
 #   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME]
 #                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N
-#                  [--interaction-profile human|agent]]
+#                  [--interaction-profile human|agent|brief-studio]]
+#                 [--interaction-profile brief-studio --orb-server-file ABS]   # codex: plain spawn, no seeding
 #
 # claude panes come up with Remote Control on (via lib.sh), so the session shows
 # in the Claude app under NAME and you can steer it from your phone. No id is
@@ -29,6 +30,17 @@
 # cockpit-seed-exec only as a validated argv value — never via prompt text or shell interpolation — and is
 # strictly per invocation: no global Claude settings are read or written.
 #
+# BRIEF-STUDIO PROFILE: a workshop session Orbital launched to develop a brief. It keeps the `agent` profile's
+# permission posture (bypassPermissions + inline dialog suppression, AskUserQuestion/EnterPlanMode disallowed —
+# a numbered menu is answerable only by keystrokes in the pane, which is the modality this whole channel
+# avoids) and changes exactly three things: the appended system text says the brief is being AUTHORED and that
+# ambiguity is put through `orb_ask` and the turn ended; provider STARTUP trust gates are suppressed by
+# PER-INVOCATION configuration only; and the `orb` MCP server named by --orb-server-file is provisioned into
+# the session. It is the one profile that also applies to a plain `--agent codex` spawn, because Codex has no
+# seeded path and no app-side remote control, so its pane is the only way in. A brief-studio launch whose orb
+# server is missing, or whose cwd cannot be asserted trusted, REFUSES by name rather than spawning a session
+# that would sit on a dialog or have nowhere to ask.
+#
 # Exit codes: 0 ok (pane id on stdout) · 1 no grid/workspace · 2 validation refused ·
 #             4 seed terminally failed (bounded code on stderr) · 5 seed request conflict (changed material).
 set -uo pipefail
@@ -41,7 +53,9 @@ export COCKPIT_REMOTE_CONTROL=1
 
 cwd=""; ws=""; agent="claude"; name=""
 req_id=""; prompt_file=""; prompt_sha=""; prompt_bytes=""; profile=""; profile_given=0
+orb_file=""; orb_spec=""
 while [[ $# -gt 0 ]]; do case "$1" in
+  --orb-server-file)       orb_file="${2:-}"; shift;;
   --cwd)       cwd="${2:-}"; shift;;
   --workspace) ws="${2:-}"; shift;;
   --agent)     agent="${2:-claude}"; shift;;
@@ -84,19 +98,33 @@ if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
     refuse "initial prompt contains disallowed control characters"
   fi
   case "$name$ws" in *$'\n'*|*$'\t'*|*$'\r'*) refuse "workspace/name must not contain control characters";; esac
-  # Typed interaction profile: exactly `human` or `agent`; omission means `human` (the backward-compatible
-  # default — an unprofiled seeded launch stays byte-identical to the pre-profile contract).
+  # Typed interaction profile: `human`, `agent`, or `brief-studio`; omission means `human` (the
+  # backward-compatible default — an unprofiled seeded launch stays byte-identical to the pre-profile contract).
   if (( profile_given )); then
-    case "$profile" in human|agent) ;; *) refuse "--interaction-profile must be 'human' or 'agent'";; esac
+    case "$profile" in human|agent|brief-studio) ;; *) refuse "--interaction-profile must be 'human', 'agent' or 'brief-studio'";; esac
   else
     profile=human
   fi
   seeded=1
 fi
-# The interaction profile is part of the SEEDED launch contract only; on a plain spawn it has no meaning and
-# is refused rather than silently ignored.
+# `human` and `agent` are part of the SEEDED launch contract only; on a plain spawn they have no meaning and
+# are refused rather than silently ignored. `brief-studio` is the one profile that also applies to a plain
+# Codex spawn, because Codex has no seeded path at all and the pane is the ONLY control surface it has.
 if (( profile_given && ! seeded )); then
-  echo "cockpit-spawn: --interaction-profile requires a seeded launch (--request-id …)" >&2; exit 2
+  if [[ "$profile" == brief-studio && "$agent" == codex ]]; then :
+  else echo "cockpit-spawn: --interaction-profile $profile requires a seeded launch (--request-id …)" >&2; exit 2; fi
+fi
+
+# ── the orb MCP server, provisioned PER INVOCATION (BRF-055) ────────────────────────────────────────────────
+# A brief-studio session that cannot reach `orb` cannot ask a question, which is the whole point of launching
+# it this way — so an absent, unreadable or malformed server specification refuses the launch by name rather
+# than spawning a mute session that then goes quiet on the operator.
+if [[ "$profile" == brief-studio ]]; then
+  [[ -n "$orb_file" ]] || { echo "cockpit-spawn: --interaction-profile brief-studio requires --orb-server-file" >&2; exit 2; }
+  orb_spec=$(cockpit_orb_read_spec "$orb_file") \
+    || { echo "cockpit-spawn: orb MCP server specification is unavailable or invalid: $orb_file" >&2; exit 2; }
+elif [[ -n "$orb_file" ]]; then
+  echo "cockpit-spawn: --orb-server-file requires --interaction-profile brief-studio" >&2; exit 2
 fi
 
 $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "cockpit-spawn: no cockpit grid running" >&2; exit 1; }
@@ -192,9 +220,16 @@ W=$(cockpit_resolve_workspace "$ws")
 # A SEEDED launch goes through cockpit-seed-exec: only trusted, %q-quoted PATHS cross the shell hop — the
 # prompt itself is read from the protected staging file inside the pane and passed as a direct argv element.
 if (( seeded )); then
-  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "${COCKPIT_CLAUDE_BIN:-claude}") $(printf %q "$profile")"
+  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "${COCKPIT_CLAUDE_BIN:-claude}") $(printf %q "$profile") $(printf %q "$orb_file")"
 else case "$agent" in
-  codex) launch="exec codex";;
+  # A brief-studio Codex pane carries its trust assertion and its orb server as per-invocation `-c` overrides.
+  # Codex has no seeded path and no app-side remote control, so this pane is the only way in — which is exactly
+  # why the launch refuses rather than starting a session that would stall on a trust dialog nobody can answer.
+  codex) if [[ "$profile" == brief-studio ]]; then
+           extra=$(cockpit_codex_brief_studio_args "$cwd" "$orb_spec") \
+             || { echo "cockpit-spawn: cannot assert Codex folder trust for --cwd '$cwd' (unquotable path); refusing rather than spawning into a stall" >&2; exit 2; }
+           launch="exec codex$extra"
+         else launch="exec codex"; fi;;
   shell) launch="exec bash -l";;
   *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;
 esac; fi
