@@ -117,11 +117,14 @@ case "$ev" in
   session-start)  stamp idle;;       # fresh/resumed session waiting for a prompt
   session-end)    seed_touch session-end; stamp "";;   # clear → poller reclassifies (pane likely a shell now)
   notification)
-    # Only permission/idle-style notifications mean "waiting on the human"; ignore
-    # informational ones (auth_success, etc.). Reuse the stdin JSON read above.
+    # Only permission-style notifications mean "blocked on the human" (a modal that captures keys, so the
+    # pane must never be typed into). The idle notification is the opposite: a settled turn whose composer
+    # is a plain text box — stamp idle so the pane stays nudgeable (Orbital answer delivery) instead of
+    # spending 15 minutes as needs-input. Ignore informational ones (auth_success, etc.).
     nt=""; command -v jq >/dev/null 2>&1 && nt=$(printf '%s' "$INPUT" | jq -r '.notification_type // .type // empty' 2>/dev/null || true)
     case "$nt" in
-      *permission*|*idle*|"") stamp needs-input;;   # unknown type → assume attention (conservative)
+      *permission*|"") stamp needs-input;;   # unknown type → assume attention (conservative)
+      *idle*) stamp idle;;
       *) exit 0;;
     esac;;
   codex-notify)
