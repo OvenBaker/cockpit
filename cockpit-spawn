@@ -5,7 +5,7 @@
 #
 #   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME]
 #                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N
-#                  [--interaction-profile human|agent|brief-studio]]
+#                  [--interaction-profile human|agent|brief-studio]]   # codex seeds with `human` only
 #                 [--interaction-profile brief-studio --orb-server-file ABS]   # codex: plain spawn, no seeding
 #
 # claude panes come up with Remote Control on (via lib.sh), so the session shows
@@ -13,13 +13,21 @@
 # stamped — the poller adopts the transcript once the agent writes it (@born).
 # Prints the new pane id on success.
 #
-# SEEDED launches (contract 1, Claude only): the four --request-id/--initial-prompt-* flags are all-or-none.
-# The request is durably reserved (prompt-free record + digest/byte material binding) BEFORE any tmux side
-# effect; the pane starts the provider atomically via cockpit-seed-exec with the prompt as Claude's positional
-# interactive prompt — never send-keys, never shell-interpolated. Replaying the same request with identical
-# material returns/reconciles the same pane with zero additional starts or submissions; changed material under
-# a reused request id conflicts before any spawn. Acceptance is a separate asynchronous fact owned by the
-# Claude UserPromptSubmit hook (see cockpit-hook); nothing here marks a seed accepted.
+# SEEDED launches (contract 1, `claude` or `codex`): the four --request-id/--initial-prompt-* flags are
+# all-or-none. The request is durably reserved (prompt-free record + digest/byte material binding) BEFORE any
+# tmux side effect; the pane starts the provider atomically via cockpit-seed-exec with the prompt as the
+# provider's positional interactive prompt — never send-keys, never shell-interpolated. Replaying the same
+# request with identical material returns/reconciles the same pane with zero additional starts or submissions;
+# changed material under a reused request id conflicts before any spawn. Acceptance is a separate asynchronous
+# fact owned by the Claude UserPromptSubmit hook (see cockpit-hook); nothing here marks a seed accepted.
+#
+# The PROVIDER is part of the reservation identity, so replaying a request id under a different provider is
+# material drift and conflicts (exit 5). A seeded Codex launch differs from a seeded Claude one only in what
+# the provider itself dictates: Codex has no app-side remote control and no hook, so its pane carries no
+# --remote-control and its seed has NO acceptance signal — the record stays `pending` for the session's life,
+# which is the honest reading of "the prompt was delivered, its submission was never observed". Codex's
+# STARTUP trust gate is suppressed, per invocation only (see cockpit-seed-exec), because a pane sitting on a
+# trust dialog is a session nobody asked for and, agent-driven, nobody can answer. `shell` is never seedable.
 #
 # INTERACTION PROFILE (seeded contract only): --interaction-profile human|agent selects who is on the other
 # side of the seeded session. Omitted → `human`, which is byte-for-byte the pre-profile launch (existing
@@ -28,7 +36,9 @@
 # validated profile is BOUND into the durable reservation identity: replaying a request id with a different
 # profile is material drift and conflicts (exit 5) before any pane or provider start. The profile crosses to
 # cockpit-seed-exec only as a validated argv value — never via prompt text or shell interpolation — and is
-# strictly per invocation: no global Claude settings are read or written.
+# strictly per invocation: no global Claude settings are read or written. Both non-default profiles are built
+# out of Claude-only argv (--permission-mode, --disallowedTools, --append-system-prompt), so a seeded CODEX
+# launch accepts `human` alone and refuses the others by name rather than accepting a flag it would drop.
 #
 # BRIEF-STUDIO PROFILE: a workshop session Orbital launched to develop a brief. It keeps the `agent` profile's
 # permission posture (bypassPermissions + inline dialog suppression, AskUserQuestion/EnterPlanMode disallowed —
@@ -79,7 +89,7 @@ if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
   refuse() { echo "cockpit-spawn: $1" >&2; exit 2; }
   [[ -n "$req_id" && -n "$prompt_file" && -n "$prompt_sha" && -n "$prompt_bytes" ]] \
     || refuse "seeded launch flags are all-or-none (--request-id --initial-prompt-file --initial-prompt-sha256 --initial-prompt-bytes)"
-  [[ "$agent" == claude ]] || refuse "seeded launch supports --agent claude only"
+  [[ "$agent" == claude || "$agent" == codex ]] || refuse "seeded launch supports --agent claude or codex (a shell pane has no prompt to seed)"
   [[ "$req_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$ ]] || refuse "unsafe --request-id"
   [[ "$prompt_sha" =~ ^[0-9a-f]{64}$ ]] || refuse "--initial-prompt-sha256 must be 64 lowercase hex"
   [[ "$prompt_bytes" =~ ^[1-9][0-9]{0,6}$ ]] || refuse "--initial-prompt-bytes must be a positive decimal"
@@ -104,6 +114,16 @@ if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
     case "$profile" in human|agent|brief-studio) ;; *) refuse "--interaction-profile must be 'human', 'agent' or 'brief-studio'";; esac
   else
     profile=human
+  fi
+  # `agent` and `brief-studio` are composed entirely of Claude-only argv. Refuse them for a seeded Codex launch
+  # rather than reserve a request whose profile the launcher could not honor.
+  [[ "$agent" == claude || "$profile" == human ]] \
+    || refuse "a seeded codex launch supports --interaction-profile human only (the '$profile' profile is Claude-only argv)"
+  # A Codex pane's trust override is the only thing standing between it and a startup dialog, so a cwd that
+  # cannot be expressed as a TOML basic key refuses HERE — before any reservation — rather than in the pane.
+  if [[ "$agent" == codex ]]; then
+    cockpit_codex_trust_value "$cwd" >/dev/null \
+      || refuse "cannot assert Codex folder trust for --cwd '$cwd' (unquotable path); refusing rather than spawning into a stall"
   fi
   seeded=1
 fi
@@ -164,8 +184,10 @@ if (( seeded )); then
     # Material binding: identical material replays/reconciles; ANY drift (prompt digest/bytes, provider, cwd,
     # workspace, name, interaction profile) under a reused request id conflicts loudly BEFORE any side effect.
     # A pre-profile record carries no .profile field and is read as the profile it was launched with: human.
-    if ! jq -e --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" \
-        '.request_id==$r and .sha256==$s and .bytes==($b|tonumber) and .provider=="claude" and .cwd==$c and .workspace==$w and .name==$n and ((.profile // "human")==$ip)' \
+    # Every record ever written carries .provider, so it is compared directly — a request replayed under the
+    # other provider is drift, never a silent switch of which agent picks the work up.
+    if ! jq -e --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" --arg ag "$agent" \
+        '.request_id==$r and .sha256==$s and .bytes==($b|tonumber) and .provider==$ag and .cwd==$c and .workspace==$w and .name==$n and ((.profile // "human")==$ip)' \
         <<<"$prior" >/dev/null; then
       echo "cockpit-spawn: seed request '$req_id' was already reserved with different material" >&2; exit 5
     fi
@@ -201,8 +223,8 @@ if (( seeded )); then
   else
     # Durable reservation FIRST (prompt-free), then the producer-owned protected staging copy of the prompt.
     cockpit_seed_write "$record" "$(jq -cn --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" \
-      --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" --arg t "$(date +%s)" \
-      '{contract:1,request_id:$r,sha256:$s,bytes:($b|tonumber),provider:"claude",cwd:$c,workspace:$w,name:$n,
+      --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" --arg ag "$agent" --arg t "$(date +%s)" \
+      '{contract:1,request_id:$r,sha256:$s,bytes:($b|tonumber),provider:$ag,cwd:$c,workspace:$w,name:$n,
         profile:$ip,status:"pending",pane_id:"",session_id:"",accepted_at:"",error_code:"",created_at:$t}')" \
       || { echo "cockpit-spawn: could not reserve seed request" >&2; exit 1; }
     stage_prompt "$staging" \
@@ -220,7 +242,10 @@ W=$(cockpit_resolve_workspace "$ws")
 # A SEEDED launch goes through cockpit-seed-exec: only trusted, %q-quoted PATHS cross the shell hop — the
 # prompt itself is read from the protected staging file inside the pane and passed as a direct argv element.
 if (( seeded )); then
-  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "${COCKPIT_CLAUDE_BIN:-claude}") $(printf %q "$profile") $(printf %q "$orb_file")"
+  # The provider's own binary rides in the existing bin slot, and the provider NAME follows the orb file so the
+  # positional contract only ever grows. Only trusted, %q-quoted values cross this one shell hop.
+  if [[ "$agent" == codex ]]; then seed_bin="${COCKPIT_CODEX_BIN:-codex}"; else seed_bin="${COCKPIT_CLAUDE_BIN:-claude}"; fi
+  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "$seed_bin") $(printf %q "$profile") $(printf %q "$orb_file") $(printf %q "$agent")"
 else case "$agent" in
   # A brief-studio Codex pane carries its trust assertion and its orb server as per-invocation `-c` overrides.
   # Codex has no seeded path and no app-side remote control, so this pane is the only way in — which is exactly

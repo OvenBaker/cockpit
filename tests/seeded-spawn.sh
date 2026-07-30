@@ -222,7 +222,8 @@ n=$(pane_count); : > "$root/out/starts"
 refused() { set +e; "$REPO/cockpit-spawn" "$@" >/dev/null 2>&1; local rc=$?; set -e; [[ $rc -eq 2 ]]; }
 base=(--cwd "$root/cwd" --workspace seedws --name seed-demo)
 refused "${base[@]}" --request-id req-v1 --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA"   # partial set
-refused "${base[@]}" --agent codex --request-id req-v2 --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES"
+# a shell pane has no prompt to seed; claude and codex are the two seedable providers (see 16)
+refused "${base[@]}" --agent shell --request-id req-v2 --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES"
 refused "${base[@]}" --request-id '../evil' --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES"
 refused "${base[@]}" --request-id req-v3 --initial-prompt-file relative.txt --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES"
 ln -s "$PROMPT_FILE" "$root/link.txt"
@@ -456,4 +457,81 @@ plaincmd=$(tmux -L "$socket" display -p -t "$plainpane" '#{pane_start_command}')
 # an --orb-server-file with no brief-studio profile is refused rather than silently ignored
 refused --cwd "$root/cwd" --workspace codexws --agent codex --orb-server-file "$ORB_SPEC"
 echo "ok 15b brief-studio-codex-launch"
+
+# ── 16: seeded CODEX launch — the same prompt/identity contract, the argv Codex actually takes ──────────────
+# Faithful fake codex: records its exact argv, then holds the pane like a live TUI would. Codex has no hook, so
+# nothing here can accept a seed — which is precisely the fact this test pins.
+cat > "$root/bin/fake-codex" <<FAKECODEX
+#!/usr/bin/env bash
+set -u
+OUT="$root/out"
+echo start >> "\$OUT/codex-starts"
+: > "\$OUT/codex-argv"; for a in "\$@"; do printf '%s\0' "\$a" >> "\$OUT/codex-argv"; done
+exec sleep 300
+FAKECODEX
+chmod +x "$root/bin/fake-codex"
+export COCKPIT_CODEX_BIN="$root/bin/fake-codex"
+codex_starts() { wc -l < "$root/out/codex-starts" 2>/dev/null || echo 0; }
+seed_codex() { "$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace seedcodexws --name seed-codex --agent codex \
+  --request-id "$1" --initial-prompt-file "$PROMPT_FILE" \
+  --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" "${@:2}"; }
+
+# (a) the launched argv: the exact prompt bytes as Codex's positional prompt, behind the one trust override —
+#     and NONE of Claude's argv (no --remote-control, no permission/settings/system-prompt flags).
+: > "$root/out/codex-starts"
+panecx=$(seed_codex req-codex-1)
+[[ "$panecx" == %* ]]
+wait_for '[[ $(codex_starts) -eq 1 ]]'
+CWD_REAL="$root/cwd" python3 - "$root/out/codex-argv" "$PROMPT_FILE" <<'PY'
+import os, sys
+argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
+prompt = open(sys.argv[2],'rb').read()
+trust = ('projects."%s".trust_level="trusted"' % os.environ['CWD_REAL']).encode()
+assert argv == [b'-c', trust, b'--', prompt], argv
+PY
+# the provider is recorded, the pane is stamped codex, and the poller is told to chase a transcript
+[[ "$(field req-codex-1 provider)" == codex ]]
+[[ "$(field req-codex-1 profile)" == human ]]
+[[ "$(tmux -L "$socket" display -p -t "$panecx" '#{@agent}')" == codex ]]
+[[ -n "$(tmux -L "$socket" display -p -t "$panecx" '#{@born}')" ]]
+# (b) no hook exists for Codex, so the seed stays pending — never silently reported accepted
+sleep 0.5
+[[ "$(field req-codex-1 status)" == pending ]]
+[[ "$(tmux -L "$socket" display -p -t "$panecx" '#{@seed_status}')" == pending ]]
+# (c) identical material replays onto the SAME pane with zero additional provider starts
+[[ "$(seed_codex req-codex-1)" == "$panecx" ]]
+[[ $(codex_starts) -eq 1 ]]
+# (d) the PROVIDER is request identity: replaying the same id as claude is drift, before any side effect
+n=$(pane_count); : > "$root/out/starts"
+set +e; "$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace seedcodexws --name seed-codex \
+  --request-id req-codex-1 --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA" \
+  --initial-prompt-bytes "$BYTES" >/dev/null 2>&1; rc=$?; set -e
+[[ $rc -eq 5 ]]
+# …and the reverse: a claude-reserved request replayed as codex conflicts too
+set +e; seed_codex req-prof-human >/dev/null 2>&1; rc=$?; set -e
+[[ $rc -eq 5 ]]
+[[ $(pane_count) -eq $n && $(codex_starts) -eq 1 && $(starts) -eq 0 ]]
+# (e) the Claude-only profiles are refused by name for codex, before any reservation
+refused --cwd "$root/cwd" --workspace seedcodexws --name seed-codex --agent codex --request-id req-codex-v1 \
+  --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" \
+  --interaction-profile agent
+refused --cwd "$root/cwd" --workspace seedcodexws --name seed-codex --agent codex --request-id req-codex-v2 \
+  --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" \
+  --interaction-profile brief-studio --orb-server-file "$ORB_SPEC"
+for r in req-codex-v1 req-codex-v2; do
+  [[ ! -f "$(record_of "$r")" ]] || { echo "record leaked for $r" >&2; exit 1; }
+done
+[[ $(pane_count) -eq $n && $(codex_starts) -eq 1 ]]
+# (f) a seeded claude launch is untouched by all of this — still no trust override, still remote-controlled
+echo hold > "$root/out/mode"; : > "$root/out/starts"
+spawn req-codex-regress >/dev/null
+wait_for '[[ $(starts) -eq 1 ]]'
+[[ "$(field req-codex-regress provider)" == claude ]]
+python3 - "$root/out/argv" "$PROMPT_FILE" <<'PY'
+import sys
+argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
+prompt = open(sys.argv[2],'rb').read()
+assert argv == [b'--remote-control', b'seed-demo', b'--', prompt], argv
+PY
+echo "ok 16 seeded-codex-launch"
 echo "ALL SEEDED-SPAWN CHECKS PASSED"
