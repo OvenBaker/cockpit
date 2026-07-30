@@ -61,15 +61,23 @@ cockpit_orb_read_spec() {
   printf '%s' "$json"
 }
 
-# Codex per-invocation config overrides for a brief-studio launch, %q-quoted for the one `bash -lc` hop every
-# launcher builds. Trust is asserted from the launch cwd AT INVOCATION TIME (`-c projects."<cwd>"...`) rather
-# than persisted into ~/.codex/config.toml: Codex does NOT inherit trust from a parent entry (operator-verified),
-# and a persisted absolute path would silently stall every Codex-worked brief the moment the repo moves.
-cockpit_codex_brief_studio_args() {
-  local cwd="$1" orb="$2" value
-  # A cwd that cannot be expressed as a TOML basic key is refused by the caller, never quietly dropped.
+# The ONE Codex trust override, as a raw `-c` VALUE (no shell quoting). Trust is asserted from the launch cwd
+# AT INVOCATION TIME rather than persisted into ~/.codex/config.toml: Codex does NOT inherit trust from a parent
+# entry (operator-verified), and a persisted absolute path would silently stall every Codex session the moment
+# the repo moves. A cwd that cannot be expressed as a TOML basic key is refused, never quietly dropped.
+# Callers that cross a shell hop quote the result themselves; a real-argv caller uses it verbatim.
+cockpit_codex_trust_value() {
+  local cwd="$1"
   case "$cwd" in *'"'*|*'\'*|*$'\n'*|*$'\t'*|*$'\r'*) return 1;; esac
-  printf ' -c %q' "projects.\"$cwd\".trust_level=\"trusted\""
+  printf 'projects."%s".trust_level="trusted"' "$cwd"
+}
+
+# Codex per-invocation config overrides for a brief-studio launch, %q-quoted for the one `bash -lc` hop every
+# launcher builds.
+cockpit_codex_brief_studio_args() {
+  local cwd="$1" orb="$2" value trust
+  trust=$(cockpit_codex_trust_value "$cwd") || return 1
+  printf ' -c %q' "$trust"
   [[ -n "$orb" ]] || return 0
   printf ' -c %q' "mcp_servers.orb.command=$(jq -r '.command|@json' <<<"$orb")"
   printf ' -c %q' "mcp_servers.orb.args=$(jq -c '.args' <<<"$orb")"
