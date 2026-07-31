@@ -448,6 +448,8 @@ cmdline=$(tmux -L "$socket" display -p -t "$codexpane" '#{pane_start_command}')
 [[ "$cmdline" == *"mcp_servers.orb.command="* ]]
 [[ "$cmdline" == *"mcp_servers.orb.args="* ]]
 [[ "$cmdline" == *"mcp_servers.orb.env="*"ORB_TOKEN_FILE="* ]]
+[[ "$cmdline" == *"mcp_servers.orb.required=true"* ]]
+[[ "$cmdline" == *"developer_instructions="*"orb_ask"* ]]
 [[ "$(md5sum "$HOME/.codex/config.toml" 2>/dev/null | cut -d' ' -f1 || echo none)" == "$codex_before" ]]
 # a plain codex spawn is unchanged — none of the brief-studio configuration leaks into it
 plainpane=$("$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace codexws --agent codex)
@@ -511,18 +513,45 @@ set +e; "$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace seedcodexws --name s
 set +e; seed_codex req-prof-human >/dev/null 2>&1; rc=$?; set -e
 [[ $rc -eq 5 ]]
 [[ $(pane_count) -eq $n && $(codex_starts) -eq 1 && $(starts) -eq 0 ]]
-# (e) the Claude-only profiles are refused by name for codex, before any reservation
+# (e) the Claude-only agent profile is refused by name for codex, before any reservation; brief-studio without
+#     its mandatory orb server is refused at the same pre-reservation boundary.
 refused --cwd "$root/cwd" --workspace seedcodexws --name seed-codex --agent codex --request-id req-codex-v1 \
   --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" \
   --interaction-profile agent
 refused --cwd "$root/cwd" --workspace seedcodexws --name seed-codex --agent codex --request-id req-codex-v2 \
   --initial-prompt-file "$PROMPT_FILE" --initial-prompt-sha256 "$SHA" --initial-prompt-bytes "$BYTES" \
-  --interaction-profile brief-studio --orb-server-file "$ORB_SPEC"
+  --interaction-profile brief-studio
 for r in req-codex-v1 req-codex-v2; do
   [[ ! -f "$(record_of "$r")" ]] || { echo "record leaked for $r" >&2; exit 1; }
 done
 [[ $(pane_count) -eq $n && $(codex_starts) -eq 1 ]]
-# (f) a seeded claude launch is untouched by all of this — still no trust override, still remote-controlled
+# (f) seeded brief-studio Codex carries the exact prompt plus trust, REQUIRED orb MCP config and the workshop
+#     instructions as real argv values. Only the token FILE path is present, and no global config is written.
+codex_before=$(md5sum "$HOME/.codex/config.toml" 2>/dev/null | cut -d' ' -f1 || echo none)
+panebs=$(seed_codex req-codex-bs --interaction-profile brief-studio --orb-server-file "$ORB_SPEC")
+[[ "$panebs" == %* ]]
+wait_for '[[ $(codex_starts) -eq 2 ]]'
+CWD_REAL="$root/cwd" python3 - "$root/out/codex-argv" "$PROMPT_FILE" <<'PY'
+import os, sys
+argv = [a.decode() for a in open(sys.argv[1],'rb').read().split(b'\0')[:-1]]
+prompt = open(sys.argv[2],'rb').read().decode()
+assert argv[-2:] == ['--', prompt], argv[-2:]
+values = [argv[i + 1] for i, arg in enumerate(argv) if arg == '-c']
+trust = 'projects."%s".trust_level="trusted"' % os.environ['CWD_REAL']
+assert trust in values, values
+assert any(v.startswith('mcp_servers.orb.command=') for v in values), values
+assert 'mcp_servers.orb.args=["--orb"]' in values, values
+env = next(v for v in values if v.startswith('mcp_servers.orb.env='))
+assert 'ORB_TOKEN_FILE="/dev/null"' in env and 'ORB_BASE_URL="https://orbital.example"' in env, env
+assert 'mcp_servers.orb.required=true' in values, values
+instructions = next(v for v in values if v.startswith('developer_instructions='))
+assert 'orb_ask' in instructions and 'orb_fetch' in instructions and 'END YOUR TURN' in instructions, instructions
+PY
+[[ "$(field req-codex-bs provider)" == codex ]]
+[[ "$(field req-codex-bs profile)" == brief-studio ]]
+[[ "$(md5sum "$HOME/.codex/config.toml" 2>/dev/null | cut -d' ' -f1 || echo none)" == "$codex_before" ]]
+
+# (g) a seeded claude launch is untouched by all of this — still no trust override, still remote-controlled
 echo hold > "$root/out/mode"; : > "$root/out/starts"
 spawn req-codex-regress >/dev/null
 wait_for '[[ $(starts) -eq 1 ]]'

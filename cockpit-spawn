@@ -5,8 +5,8 @@
 #
 #   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME]
 #                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N
-#                  [--interaction-profile human|agent|brief-studio]]   # codex seeds with `human` only
-#                 [--interaction-profile brief-studio --orb-server-file ABS]   # codex: plain spawn, no seeding
+#                  [--interaction-profile human|agent|brief-studio]]   # codex: human or brief-studio
+#                 [--interaction-profile brief-studio --orb-server-file ABS]
 #
 # claude panes come up with Remote Control on (via lib.sh), so the session shows
 # in the Claude app under NAME and you can steer it from your phone. No id is
@@ -36,9 +36,8 @@
 # validated profile is BOUND into the durable reservation identity: replaying a request id with a different
 # profile is material drift and conflicts (exit 5) before any pane or provider start. The profile crosses to
 # cockpit-seed-exec only as a validated argv value — never via prompt text or shell interpolation — and is
-# strictly per invocation: no global Claude settings are read or written. Both non-default profiles are built
-# out of Claude-only argv (--permission-mode, --disallowedTools, --append-system-prompt), so a seeded CODEX
-# launch accepts `human` alone and refuses the others by name rather than accepting a flag it would drop.
+# strictly per invocation: no global Claude settings are read or written. The `agent` profile is Claude-only;
+# `brief-studio` has provider-specific argv/configuration and is supported by both providers.
 #
 # BRIEF-STUDIO PROFILE: a workshop session Orbital launched to develop a brief. It keeps the `agent` profile's
 # permission posture (bypassPermissions + inline dialog suppression, AskUserQuestion/EnterPlanMode disallowed —
@@ -115,10 +114,10 @@ if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
   else
     profile=human
   fi
-  # `agent` and `brief-studio` are composed entirely of Claude-only argv. Refuse them for a seeded Codex launch
-  # rather than reserve a request whose profile the launcher could not honor.
-  [[ "$agent" == claude || "$profile" == human ]] \
-    || refuse "a seeded codex launch supports --interaction-profile human only (the '$profile' profile is Claude-only argv)"
+  # The generic agent-to-agent profile is Claude-only. brief-studio has an explicit Codex implementation:
+  # per-invocation developer instructions + required orb MCP configuration in cockpit-seed-exec.
+  [[ "$agent" == claude || "$profile" == human || "$profile" == brief-studio ]] \
+    || refuse "a seeded codex launch does not support --interaction-profile '$profile'"
   # A Codex pane's trust override is the only thing standing between it and a startup dialog, so a cwd that
   # cannot be expressed as a TOML basic key refuses HERE — before any reservation — rather than in the pane.
   if [[ "$agent" == codex ]]; then
