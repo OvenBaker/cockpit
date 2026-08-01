@@ -72,19 +72,32 @@ cockpit_codex_trust_value() {
   printf 'projects."%s".trust_level="trusted"' "$cwd"
 }
 
-# Codex per-invocation config overrides for a brief-studio launch, %q-quoted for the one `bash -lc` hop every
-# launcher builds.
-cockpit_codex_brief_studio_args() {
-  local cwd="$1" orb="$2" value trust
+# Codex per-invocation config VALUES for a brief-studio launch, one TOML assignment per line. JSON string
+# escaping is also valid for TOML basic strings over this input charset. Keeping raw values here lets the plain
+# spawn quote them for its one shell hop while cockpit-seed-exec passes them as a real argv array.
+cockpit_codex_brief_studio_values() {
+  local cwd="$1" orb="$2" value trust instructions
   trust=$(cockpit_codex_trust_value "$cwd") || return 1
-  printf ' -c %q' "$trust"
-  [[ -n "$orb" ]] || return 0
-  printf ' -c %q' "mcp_servers.orb.command=$(jq -r '.command|@json' <<<"$orb")"
-  printf ' -c %q' "mcp_servers.orb.args=$(jq -c '.args' <<<"$orb")"
+  [[ -n "$orb" ]] || return 1
+  printf '%s\n' "$trust"
+  printf 'mcp_servers.orb.command=%s\n' "$(jq -r '.command|@json' <<<"$orb")"
+  printf 'mcp_servers.orb.args=%s\n' "$(jq -c '.args' <<<"$orb")"
   # A TOML inline table of bare keys. The env values are our own paths and tokens, and jq's @json escaping is
   # exactly TOML basic-string escaping over that charset.
   value=$(jq -r '.env | to_entries | map(.key + "=" + (.value|@json)) | join(",")' <<<"$orb")
-  printf ' -c %q' "mcp_servers.orb.env={$value}"
+  printf 'mcp_servers.orb.env={%s}\n' "$value"
+  # A valid spec is not enough: a brief session without its question channel must fail startup rather than
+  # silently continue. Codex owns the runtime initialization verdict; `required` makes that verdict fatal.
+  printf 'mcp_servers.orb.required=true\n'
+  instructions=$(jq -rn --arg value "$COCKPIT_BRIEF_STUDIO_SYSTEM_TEXT" '$value|@json')
+  printf 'developer_instructions=%s\n' "$instructions"
+}
+
+# The same values, %q-quoted for the one `bash -lc` hop used by a plain Codex spawn.
+cockpit_codex_brief_studio_args() {
+  local values value
+  values=$(cockpit_codex_brief_studio_values "$1" "$2") || return 1
+  while IFS= read -r value; do printf ' -c %q' "$value"; done <<<"$values"
 }
 
 # Labels come from arbitrary user text (santa's first_user_text = a session's

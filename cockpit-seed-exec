@@ -57,9 +57,9 @@ fail() {
 [[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [provider-bin] [human|agent|brief-studio] [orb-server-file] [claude|codex]"
 case "$profile" in human|agent|brief-studio) ;; *) die "interaction profile must be 'human', 'agent' or 'brief-studio'";; esac
 case "$provider" in claude|codex) ;; *) die "provider must be 'claude' or 'codex'";; esac
-# The two non-default profiles are built entirely from Claude-only argv. cockpit-spawn refuses the combination
-# before reserving; this is the launcher-side restatement, so a hand-run pane cannot silently drop the flags.
-[[ "$provider" == claude || "$profile" == human ]] || die "a codex launch supports the 'human' profile only"
+# The generic `agent` profile is Claude-only. `brief-studio` has an explicit Codex configuration path below.
+[[ "$provider" == claude || "$profile" == human || "$profile" == brief-studio ]] \
+  || die "a codex launch does not support the '$profile' profile"
 [[ -n "${TMUX_PANE:-}" ]] || die "not inside a tmux pane"
 [[ -f "$record" && ! -L "$record" ]] || die "seed record is unavailable or unsafe"
 
@@ -98,11 +98,21 @@ IFS= read -rd '' prompt < "$staging" || true
 rm -f "$staging" 2>/dev/null || true
 
 cd "$cwd" || fail "cwd-unavailable"
-# Codex: the prompt is its positional argument, preceded by the one startup-trust override. No remote-control
-# (Codex has none) and no profile argv (none of it is Codex's). Nothing else about the session is overridden.
+# Codex: the prompt is its positional argument. A human launch receives only the startup-trust override. A
+# brief-studio launch receives provider-native per-invocation developer instructions and a REQUIRED orb MCP
+# server. No remote-control (Codex has none), no global configuration writes, and the token VALUE never enters
+# argv — only the mode-0600 token-file path carried by the validated server spec does.
 if [[ "$provider" == codex ]]; then
-  trust=$(cockpit_codex_trust_value "$cwd") || fail "codex-trust-unassertable"
-  exec "$provider_bin" -c "$trust" -- "$prompt"
+  codex_args=()
+  if [[ "$profile" == brief-studio ]]; then
+    orb_spec=$(cockpit_orb_read_spec "$orb_file") || fail "orb-server-unavailable"
+    values=$(cockpit_codex_brief_studio_values "$cwd" "$orb_spec") || fail "codex-brief-studio-config-unavailable"
+    while IFS= read -r value; do codex_args+=(-c "$value"); done <<<"$values"
+  else
+    trust=$(cockpit_codex_trust_value "$cwd") || fail "codex-trust-unassertable"
+    codex_args+=(-c "$trust")
+  fi
+  exec "$provider_bin" "${codex_args[@]}" -- "$prompt"
 fi
 args=()
 # Seeded spawns are always remote-controlled (cockpit-spawn forces RC on); same 48-char app-title bound as
