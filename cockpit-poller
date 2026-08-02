@@ -57,10 +57,11 @@ PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}$
 # edge / crash. Generous enough not to second-guess a quietly-idle session.
 HOOK_TTL="${COCKPIT_HOOK_TTL:-900}"
 # Persistent layout snapshot so a closed/crashed cockpit can be restored. MUST
-# be outside /tmp to survive a reboot. Written throttled + only-on-change.
-STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/layout.${COCKPIT_SESSION}.tsv"
+# be outside /tmp to survive a reboot. Written throttled + only-on-change, now
+# append-only into the SQLite store (lib.sh) so a save can never destroy the
+# grid it is replacing — that is what made a dropped workspace unrecoverable.
 SAVE_EVERY="${COCKPIT_SAVE_SECS:-5}"; next_save=0; last_snap=""
-mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
+cockpit_layout_init
 
 # State colour as a FORMAT directive (#[fg=…]) for the per-pane top line (@sc),
 # NOT a pane-border-style: side-by-side panes share their vertical borders, so a
@@ -207,8 +208,7 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     next_save=$((now + SAVE_EVERY))
     snap=$(cockpit_snapshot)
     if [[ -n "$snap" && "$snap" != "$last_snap" ]]; then
-      printf '%s\n' "$snap" > "$STATE_FILE.tmp" 2>/dev/null && mv "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
-      last_snap="$snap"
+      cockpit_layout_save "$snap" && last_snap="$snap"
     fi
   fi
   sleep "$INTERVAL"
