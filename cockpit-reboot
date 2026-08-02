@@ -40,7 +40,7 @@ reboot_pane() {
   if (( ! force )) && [[ "$state" == "working" || "$state" == "needs-input" ]]; then
     echo "skip $pid: $state (use --force to reboot anyway)" >&2; return 1
   fi
-  local cmd; cmd=$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")
+  local cmd; cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
   if (( dry )); then echo "would reboot $pid  ${sid:0:8}  [$state]  ${label:0:40}"; return 0; fi
   $TMUX respawn-pane -k -t "$pid" "bash -lc $(printf %q "$cmd")" 2>/dev/null || { echo "skip $pid: respawn failed" >&2; return 1; }
   cockpit_stamp_known_agent "$pid" "$sid" "$cwd" "$label" "$agent"

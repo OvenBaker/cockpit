@@ -133,6 +133,106 @@ cockpit_snapshot() {
     -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}" 2>/dev/null
 }
 
+# --- layout store (SQLite) --------------------------------------------------
+# The layout used to be a single TSV that the poller rewrote in place every few
+# seconds. That made the CURRENT grid the only grid we knew about: when a
+# restore dropped a workspace, the next autosave — five seconds later — wrote
+# the loss over the only evidence of it, so there was nothing left to recover
+# from or even diagnose against. Snapshots are now append-only rows, so every
+# save keeps its predecessors and a bad restore can be diffed and undone.
+# sqlite3 is already a hard dependency (santa's index, above).
+COCKPIT_LAYOUT_DB="${COCKPIT_LAYOUT_DB:-${XDG_STATE_HOME:-$HOME/.local/state}/cockpit/layout.db}"
+COCKPIT_LAYOUT_KEEP="${COCKPIT_LAYOUT_KEEP:-200}"   # snapshots retained per session
+
+# SQL string literal from arbitrary text — the ONLY quoting rule that matters is
+# doubling single quotes. Everything else (tabs, newlines, backslashes) is
+# literal inside a SQLite string, which is precisely why storage stopped being
+# the fragile part: no delimiter can be confused with content.
+ck_sqesc() { local s="${1//\'/\'\'}"; printf "'%s'" "$s"; }
+
+cockpit_layout_init() {
+  mkdir -p "$(dirname "$COCKPIT_LAYOUT_DB")" 2>/dev/null || true
+  # stdout is silenced deliberately: PRAGMA journal_mode echoes "wal", and this
+  # runs inside command substitutions that would otherwise swallow it as data.
+  sqlite3 "$COCKPIT_LAYOUT_DB" >/dev/null 2>&1 <<'SQL'
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS snapshots(
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  at      INTEGER NOT NULL,
+  session TEXT    NOT NULL,
+  active  TEXT    NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS panes(
+  snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  win         TEXT    NOT NULL DEFAULT '',
+  workspace   TEXT    NOT NULL DEFAULT '',
+  session_id  TEXT    NOT NULL DEFAULT '',
+  cwd         TEXT    NOT NULL DEFAULT '',
+  label       TEXT    NOT NULL DEFAULT '',
+  agent       TEXT    NOT NULL DEFAULT '',
+  PRIMARY KEY(snapshot_id, seq));
+CREATE INDEX IF NOT EXISTS idx_snapshots_session_at ON snapshots(session, at DESC);
+SQL
+}
+
+# Persist a snapshot (the TSV text cockpit_snapshot prints) as one transaction.
+# Older snapshots beyond COCKPIT_LAYOUT_KEEP are pruned here, so the history is
+# bounded without a separate sweep.
+cockpit_layout_save() {
+  local snap="$1" sess="${COCKPIT_SESSION}" NIL='<nil>' sql active="" seq=0
+  local f1 f2 f3 f4 f5 f6
+  [[ -n "$snap" ]] || return 1
+  cockpit_layout_init
+  sql="BEGIN IMMEDIATE;"
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6; do
+    [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
+    [[ -n "$f1" ]] || continue
+    [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""
+    [[ "$f5" == "$NIL" ]] && f5=""; [[ "$f6" == "$NIL" ]] && f6=""
+    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent) VALUES("
+    sql+="(SELECT MAX(id) FROM snapshots),$seq,$(ck_sqesc "$f1"),$(ck_sqesc "$f2"),"
+    sql+="$(ck_sqesc "$f3"),$(ck_sqesc "$f4"),$(ck_sqesc "$f5"),$(ck_sqesc "$f6"));"
+    seq=$((seq+1))
+  done <<<"$snap"
+  (( seq > 0 )) || return 1        # never persist an empty grid over a good one
+  sql="BEGIN IMMEDIATE;INSERT INTO snapshots(at,session,active) VALUES($(date +%s),$(ck_sqesc "$sess"),$(ck_sqesc "$active"));${sql#BEGIN IMMEDIATE;}"
+  sql+="DELETE FROM panes WHERE snapshot_id IN (SELECT id FROM snapshots WHERE session=$(ck_sqesc "$sess") ORDER BY at DESC, id DESC LIMIT -1 OFFSET $COCKPIT_LAYOUT_KEEP);"
+  sql+="DELETE FROM snapshots WHERE session=$(ck_sqesc "$sess") AND id NOT IN (SELECT id FROM snapshots WHERE session=$(ck_sqesc "$sess") ORDER BY at DESC, id DESC LIMIT $COCKPIT_LAYOUT_KEEP);"
+  sql+="COMMIT;"
+  printf '%s' "$sql" | sqlite3 "$COCKPIT_LAYOUT_DB" 2>/dev/null
+}
+
+# Print a stored snapshot back in cockpit_snapshot's TSV form, newest first by
+# default; pass an offset (1 = the one before it) to walk back through history.
+# Emitting the same shape the poller captures keeps restore's parser the single
+# reader of that format.
+cockpit_layout_load() {
+  local back="${1:-0}" sess="${COCKPIT_SESSION}" TAB=$'\t' NIL='<nil>' sid
+  [[ -f "$COCKPIT_LAYOUT_DB" ]] || return 1
+  sid=$(sqlite3 "$COCKPIT_LAYOUT_DB" \
+    "SELECT id FROM snapshots WHERE session=$(ck_sqesc "$sess") ORDER BY at DESC, id DESC LIMIT 1 OFFSET $back;" 2>/dev/null)
+  [[ -n "$sid" ]] || return 1
+  sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
+    "SELECT '@active', active FROM snapshots WHERE id=$sid;" 2>/dev/null
+  sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
+    "SELECT win, workspace,
+            CASE WHEN session_id='' THEN '$NIL' ELSE session_id END,
+            CASE WHEN cwd='' THEN '$NIL' ELSE cwd END,
+            CASE WHEN label='' THEN '$NIL' ELSE label END,
+            CASE WHEN agent='' THEN '$NIL' ELSE agent END
+     FROM panes WHERE snapshot_id=$sid ORDER BY seq;" 2>/dev/null
+}
+
+# One-time adoption of the pre-SQLite TSV so an upgrade doesn't start blind.
+cockpit_layout_import_legacy() {
+  local tsv="${1:-}" n
+  [[ -s "$tsv" ]] || return 0
+  cockpit_layout_init
+  n=$(sqlite3 "$COCKPIT_LAYOUT_DB" "SELECT COUNT(*) FROM snapshots WHERE session=$(ck_sqesc "$COCKPIT_SESSION");" 2>/dev/null)
+  [[ "${n:-0}" == 0 ]] || return 0
+  cockpit_layout_save "$(cat "$tsv")" && echo "cockpit: imported legacy layout from $tsv" >&2
+}
+
 # The window the user is currently viewing = the active workspace. Helpers that
 # add/remove/retarget panes act on THIS window, not a hardcoded :0, so they work
 # whichever workspace you're in. Falls back to :0 if nothing's resolvable.
@@ -477,16 +577,58 @@ classify_codex() {
 
 agent_classify() { case "$1" in codex) classify_codex "$2";; *) classify_state "$2";; esac; }
 
+# The directory a claude session must be resumed FROM. `claude --resume <id>`
+# resolves the id inside the project dir derived from its CWD, so resuming from
+# anywhere else fails outright ("No conversation found with session ID") and the
+# pane dies on the spot. A pane's recorded @cwd is NOT reliable for this: the
+# Claude hook restamps it from the session's LIVE cwd (see cockpit-hook), so a
+# session that started in ~/work and cd'd into ~/work/sub ends up recorded under
+# the subdirectory while its transcript stays in the original project dir. That
+# drift is invisible until a restore, which then silently deletes the workspace.
+#
+# So: keep the recorded cwd when it genuinely owns the transcript, else recover
+# the launch cwd from the transcript itself (its first entry records it) and use
+# that — but only when it encodes back to the directory the transcript actually
+# lives in, so a malformed transcript can never redirect us somewhere arbitrary.
+claude_launch_cwd() {   # id cwd → a cwd that can resume this session
+  local id="$1" cwd="$2" jsonl first
+  [[ -f "$PROJECTS_DIR/$(encode_project_dir "$cwd")/$id.jsonl" ]] && { printf '%s' "$cwd"; return; }
+  jsonl=$(session_jsonl "$id" "$cwd")
+  [[ -n "$jsonl" && -f "$jsonl" ]] || { printf '%s' "$cwd"; return; }
+  first=$(grep -m1 -o '"cwd":"[^"]*"' "$jsonl" 2>/dev/null | head -1 | cut -d'"' -f4)
+  if [[ -n "$first" && -d "$first" \
+        && "$(encode_project_dir "$first")" == "$(basename "$(dirname "$jsonl")")" ]]; then
+    printf '%s' "$first"; return
+  fi
+  printf '%s' "$cwd"
+}
+
 # Inner shell command to (re)launch a pane for (agent, id, cwd[, rc-name]).
 # claude panes come up with `--remote-control` (see cockpit_rc_args); the optional
 # 4th arg is the name shown in the Claude app — pass the session's title where you
-# have it, else it falls back to the cwd basename. Codex is unaffected.
+# have it, else it falls back to the cwd basename. Codex is unaffected: `codex
+# resume` resolves a rollout by uuid across the whole store, so its cwd is just
+# where the work happens and carries no resolution meaning.
 agent_resume_inner() {
   local agent="$1" id="$2" cwd="$3" name="${4:-}"
   case "$agent" in
     codex) printf 'cd %q && exec codex resume %s' "$cwd" "$id";;
-    *)     printf 'cd %q && exec claude --resume %s%s' "$cwd" "$id" "$(cockpit_rc_args "$name" "$cwd")";;
+    *)     cwd=$(claude_launch_cwd "$id" "$cwd")
+           printf 'cd %q && exec claude --resume %s%s' "$cwd" "$id" "$(cockpit_rc_args "$name" "$cwd")";;
   esac
+}
+
+# Wrap a launch command so a FAILED start leaves the pane alive instead of
+# taking the workspace down with it. tmux closes a pane when its command exits,
+# and closes the WINDOW when that was its last pane — so one resume that exits
+# immediately silently deletes a whole workspace, and the next poller autosave
+# then erases it from the layout for good. There is no undo for that: the only
+# record it ever existed is the snapshot that just got overwritten.
+# A clean exit still closes the pane exactly as before; only failure is caught.
+cockpit_keep_pane_on_failure() {
+  local inner="$1"
+  inner="${inner/exec claude/claude}"; inner="${inner/exec codex/codex}"
+  printf '%s; rc=$?; [ "$rc" = 0 ] || { printf "\\n\\033[31mcockpit: launch failed (exit %%s)\\033[0m — keeping this pane so the workspace survives.\\n" "$rc"; exec bash -l; }' "$inner"
 }
 
 # Is a session already running? (don't double-resume). claude has a per-id
