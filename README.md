@@ -44,6 +44,11 @@ The picker, candidates, and restore merge both by recency (tagged `cl`/`cx`);
 `Alt-N` asks which agent to start. Cross-agent search/`related` in santa is a
 follow-on (it indexes Claude transcripts today).
 
+Bulk starts queue Codex panes three seconds apart so they do not all initialize
+the shared `CODEX_HOME` SQLite state simultaneously. During restore, Codex panes
+in the saved active workspace start first; workspace and pane order do not
+change. Override the interval with `COCKPIT_CODEX_STAGGER_SECS` (`0` disables it).
+
 ## Live state
 
 Each pane's **top title** is coloured by the session's live state, read from its
