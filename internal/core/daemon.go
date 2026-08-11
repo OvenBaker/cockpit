@@ -1577,6 +1577,21 @@ func (d *daemon) interact(caller, method string, p interactionParams) (any, erro
 	if err != sql.ErrNoRows {
 		return nil, err
 	}
+	// Typed actions append to whatever the provider's composer already holds and
+	// then submit it. `waiting` cannot prove the composer is empty — no hook fires
+	// on operator keystrokes — so the two facts only the terminal can show are
+	// checked here, strictly before any effect: a human at the keyboard, and a
+	// draft (or open chooser) on the input line. Both refusals are pre-effect, so
+	// the same idempotency key may retry them; they sit after the replay lookup so
+	// a replayed, already-delivered operation is never re-judged.
+	if action == "nudge" || action == "resume" || action == "compact" {
+		if engaged, detail := d.operatorEngaged(x.PaneID); engaged {
+			return nil, derr("PANE_OPERATOR_ACTIVE", detail)
+		}
+		if occupied, detail := d.composerGuard(x.PaneID, x.Provider); occupied {
+			return nil, derr("PANE_COMPOSING", detail)
+		}
+	}
 	ref := id("cpo_")
 	if _, err = d.st.db.Exec("INSERT INTO operations(ref,caller,method,idem_key,intent,status,pane_ref,badge,target_version,result,created_at) VALUES(?,?,?,?,?,'prepared',?,'',?,'null',?)", ref, caller, method, p.IdempotencyKey, intent, x.Ref, x.Version, time.Now().Unix()); err != nil {
 		return nil, err
