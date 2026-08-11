@@ -631,6 +631,23 @@ cockpit_keep_pane_on_failure() {
   printf '%s; rc=$?; [ "$rc" = 0 ] || { printf "\\n\\033[31mcockpit: launch failed (exit %%s)\\033[0m — keeping this pane so the workspace survives.\\n" "$rc"; exec bash -l; }' "$inner"
 }
 
+# Offset queued Codex starts so a bulk restore does not make every process
+# initialize the shared CODEX_HOME SQLite runtime at once.  $2 is the zero-based
+# launch ordinal after the caller has put the visible workspace first.  The
+# delay lives inside the pane command, so Cockpit can build and attach the whole
+# grid immediately instead of blocking the restore loop between launches.
+cockpit_stagger_agent_command() {
+  local agent="$1" ordinal="$2" inner="$3"
+  local interval="${COCKPIT_CODEX_STAGGER_SECS:-3}" delay notice
+  [[ "$agent" == codex ]] || { printf '%s' "$inner"; return; }
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=3
+  [[ "$ordinal" =~ ^[0-9]+$ ]] || ordinal=0
+  delay=$(( ordinal * interval ))
+  (( delay > 0 )) || { printf '%s' "$inner"; return; }
+  notice="cockpit: Codex startup queued for ${delay}s (shared-state stagger)"
+  printf 'printf "%%s\\n" %q; sleep %d; %s' "$notice" "$delay" "$inner"
+}
+
 # Is a session already running? (don't double-resume). claude has a per-id
 # process; codex's resumed process carries `resume <id>` in its argv too.
 session_is_running_agent() {

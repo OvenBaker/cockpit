@@ -217,6 +217,33 @@ stamp_pane() {  # pane-id  session-id  cwd  label  [agent]
   cockpit_stamp_known_agent "$1" "$2" "$3" "$4" "${5:-claude}"
 }
 
+# Bulk Codex launches are queued while the layout is built.  After every pane
+# exists, respawn the saved active workspace first and the remaining workspaces
+# second.  This changes initialization priority without changing tab/pane order.
+declare -a CODEX_QUEUE_PANES=() CODEX_QUEUE_WORKSPACES=() CODEX_QUEUE_COMMANDS=()
+codex_queue_reset() {
+  CODEX_QUEUE_PANES=(); CODEX_QUEUE_WORKSPACES=(); CODEX_QUEUE_COMMANDS=()
+}
+codex_queue_add() {
+  CODEX_QUEUE_PANES+=("$1"); CODEX_QUEUE_WORKSPACES+=("$2"); CODEX_QUEUE_COMMANDS+=("$3")
+}
+codex_queue_launch() {
+  local active="$1" pass i ordinal=0 cmd workspace
+  for pass in active remaining; do
+    for ((i=0;i<${#CODEX_QUEUE_PANES[@]};i++)); do
+      workspace="${CODEX_QUEUE_WORKSPACES[$i]}"
+      if [[ "$pass" == active ]]; then
+        [[ -n "$active" && "$workspace" == "$active" ]] || continue
+      else
+        [[ -z "$active" || "$workspace" != "$active" ]] || continue
+      fi
+      cmd=$(cockpit_stagger_agent_command codex "$ordinal" "${CODEX_QUEUE_COMMANDS[$i]}")
+      $TMUX respawn-pane -k -t "${CODEX_QUEUE_PANES[$i]}" "bash -lc $(printf %q "$cmd")"
+      ordinal=$((ordinal+1))
+    done
+  done
+}
+
 # launch exactly one poller (clears stragglers, fully detached) and attach.
 launch_and_attach() {
   # COCKPIT_NO_SINGLETON is the poller's existing "I'm a throwaway instance"
@@ -233,10 +260,16 @@ launch_and_attach() {
 # fresh build: a single 'work' workspace from CAND. Need a transient/extra zone?
 # spin one up on demand — Alt-N (new session → new workspace) or Alt-w.
 build_from_cand() {
-  local first=1 row id cwd title agent cmd pane
+  local first=1 row id cwd title agent cmd pane key
+  declare -A SEEN_SESSION=()
+  codex_queue_reset
   for row in "${CAND[@]}"; do
     IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
+    key="$agent:$id"
+    [[ -n "${SEEN_SESSION[$key]:-}" ]] && continue
+    SEEN_SESSION[$key]=1
     cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
+    [[ "$agent" == codex ]] && cmd="exec sleep infinity"
     if (( first )); then
       pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
       apply_chrome; first=0
@@ -245,9 +278,14 @@ build_from_cand() {
       $TMUX select-layout -t "$COCKPIT_SESSION:work" "$COCKPIT_LAYOUT"
     fi
     stamp_pane "$pane" "$id" "$cwd" "$title" "$agent"
+    if [[ "$agent" == codex ]]; then
+      cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$id" "$cwd" "$title")")
+      codex_queue_add "$pane" work "$cmd"
+    fi
   done
   $TMUX select-layout -t "$COCKPIT_SESSION:work" "$COCKPIT_LAYOUT"
   $TMUX select-window -t "$COCKPIT_SESSION:work"
+  codex_queue_launch work
 }
 
 # rebuild the saved workspaces/panes from the layout store. Returns 1 if there's
@@ -259,7 +297,7 @@ restore_grid() {
   cockpit_layout_import_legacy "$LEGACY_STATE"
   snap=$(cockpit_layout_load "$back") || return 1
   [[ -n "$snap" ]] || return 1
-  local active="" first=1 curwin="" awin="" i n resumable=0
+  local active="" first=1 curwin="" awin="" i n resumable=0 duplicates=0 key duplicate_noun
   declare -a W S C L A; local f1 f2 f3 f4 f5 f6
   while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
@@ -274,23 +312,42 @@ restore_grid() {
     W+=("$f2"); S+=("$f3"); C+=("$f4"); L+=("$f5"); A+=("$f6")
   done <<<"$snap"
   n=${#W[@]}; (( n > 0 )) || return 1
+  declare -A SEEN_RESUMABLE=()
   for ((i=0;i<n;i++)); do
-    [[ -n "${S[$i]}" && -n "$(agent_transcript "${A[$i]}" "${S[$i]}" "${C[$i]}")" ]] && resumable=$((resumable+1))
+    if [[ -n "${S[$i]}" && -n "$(agent_transcript "${A[$i]}" "${S[$i]}" "${C[$i]}")" ]]; then
+      key="${A[$i]}:${S[$i]}"
+      if [[ -n "${SEEN_RESUMABLE[$key]:-}" ]]; then duplicates=$((duplicates+1))
+      else SEEN_RESUMABLE[$key]=1; resumable=$((resumable+1))
+      fi
+    fi
   done
   (( resumable > 0 )) || return 1
   echo "cockpit: restoring $resumable session(s) from saved layout…" >&2
+  if (( duplicates > 0 )); then
+    [[ $duplicates == 1 ]] && duplicate_noun=entry || duplicate_noun=entries
+    echo "cockpit: ignored $duplicates duplicate session $duplicate_noun" >&2
+  fi
   # Group rows into windows by workspace NAME (NAMEWIN: name → window_id), NOT by
   # adjacency. The saved rows are in window-index order, so two windows that share a
   # name but are separated by a differently-named window (e.g. banktech … codex …
   # banktech) used to rebuild as TWO "banktech" tabs. Keying on the name collapses
   # them into one; recording each name's FIRST appearance preserves the tab ORDER the
   # user is used to (sorting the rows instead would alphabetise the whole grid).
-  declare -A SEENW NAMEWIN
+  declare -A SEENW NAMEWIN SEEN_LAUNCHED
+  codex_queue_reset
   for ((i=0;i<n;i++)); do
     local wname="${W[$i]}" sid="${S[$i]}" cwd="${C[$i]}" label="${L[$i]}" agent="${A[$i]}" issess=0 cmd pane
     [[ -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
+    if (( issess )); then
+      key="$agent:$sid"
+      [[ -n "${SEEN_LAUNCHED[$key]:-}" ]] && continue
+      SEEN_LAUNCHED[$key]=1
+      cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
+      [[ "$agent" == codex ]] && cmd="exec sleep infinity"
+    else
+      cmd="bash -l"
+    fi
     if [[ -z "${NAMEWIN[$wname]:-}" ]]; then      # first sighting of this workspace → open its window
-      if (( issess )); then cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")"); else cmd="bash -l"; fi
       if (( first )); then
         pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
         apply_chrome; first=0
@@ -303,13 +360,17 @@ restore_grid() {
     else                                          # workspace already open → add this pane to its window
       curwin="${NAMEWIN[$wname]}"
       (( issess )) || continue                    # don't recreate stray bare shells
-      cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
       pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
       stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
+    fi
+    if (( issess )) && [[ "$agent" == codex ]]; then
+      cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
+      codex_queue_add "$pane" "$wname" "$cmd"
     fi
   done
   for w in "${!SEENW[@]}"; do $TMUX select-layout -t "$w" "$COCKPIT_LAYOUT" 2>/dev/null; done
   [[ -n "$awin" ]] && $TMUX select-window -t "$awin" 2>/dev/null
+  codex_queue_launch "$active"
   return 0
 }
 

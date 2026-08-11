@@ -61,6 +61,16 @@ ok "window survives a failed launch"    '[[ -n "$(tmux -L cktest list-windows -t
 ok "failure is visible in the pane"     'tmux -L cktest capture-pane -p -t cktest 2>/dev/null | grep -q "launch failed"'
 tmux -L cktest kill-server 2>/dev/null
 
+echo "== fix 4: Codex bulk starts can be staggered without delaying other agents"
+INNER='cd /tmp && exec codex resume 019f-test'
+FIRST=$(COCKPIT_CODEX_STAGGER_SECS=3 cockpit_stagger_agent_command codex 0 "$INNER")
+THIRD=$(COCKPIT_CODEX_STAGGER_SECS=3 cockpit_stagger_agent_command codex 2 "$INNER")
+CLAUDE=$(COCKPIT_CODEX_STAGGER_SECS=3 cockpit_stagger_agent_command claude 9 'exec claude')
+ok "first Codex launch is immediate"    '[[ "$FIRST" == "$INNER" ]]'
+ok "later Codex launch gets ordinal delay" 'grep -q "sleep 6" <<<"$THIRD"'
+ok "queued launch explains its delay"  'grep -q "startup.*queued.*6s" <<<"$THIRD"'
+ok "Claude launch is never staggered"  '[[ "$CLAUDE" == "exec claude" ]]'
+
 echo "== control: the OLD behaviour would have lost that window"
 tmux -L cktest new-session -d -s cktest -n solo -x 120 -y 30 "bash -lc $(printf %q "cd $T/work && exec false")"
 sleep 2
