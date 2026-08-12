@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -56,6 +57,8 @@ func TestLiveCockpitAdmissionParityOnEquivalentSocket(t *testing.T) {
 		t.Fatal("test selected the live socket")
 	}
 	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-session", "-d", "-s", "live-equivalent", "sleep 600")
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "new-window", "-d", "-t", "live-equivalent", "-n", "aide", "sleep 600")
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "set-option", "-p", "-t", "live-equivalent:aide", "@orderly", "alpha")
 	defer func() { _ = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run() }()
 
 	d, err := newDaemon(root, socket, tmuxSocket, auth, true)
@@ -122,14 +125,34 @@ func TestLiveCockpitAdmissionParityOnEquivalentSocket(t *testing.T) {
 		t.Fatalf("dynamic list parity expected two stamped panes: %#v", list)
 	}
 	seenLater := false
+	laterPaneID := ""
+	laterPaneRef := ""
 	for _, raw := range panes {
 		candidate := raw.(map[string]any)
 		if candidate["locator"].(map[string]any)["windowId"] != p.WindowID && candidate["paneRef"] != "" && candidate["generation"].(int64) >= 1 && candidate["resourceVersion"].(int64) >= 1 {
 			seenLater = true
+			laterPaneID = candidate["locator"].(map[string]any)["paneId"].(string)
+			laterPaneRef = candidate["paneRef"].(string)
 		}
 	}
 	if !seenLater {
 		t.Fatalf("dynamic pane did not receive a stable identity: %#v", list)
+	}
+
+	// Once the original pane id disappears from the same fingerprint-matched
+	// server, its projection is durably retired. This is what prevents a normal
+	// pane close from becoming a missing-reference fence on the next reboot.
+	runLiveEquivalent(t, "tmux", "-L", tmuxSocket, "kill-pane", "-t", laterPaneID)
+	list = call("state.snapshot", map[string]any{}).(map[string]any)
+	if panes = list["panes"].([]any); len(panes) != 1 {
+		t.Fatalf("closed pane projection was not retired: %#v", list)
+	}
+	if _, err = d.st.pane(laterPaneRef); err != sql.ErrNoRows {
+		t.Fatalf("closed pane durable row remains: %v", err)
+	}
+	var retirementAudits int
+	if err = d.st.db.QueryRow("SELECT count(*) FROM audit WHERE method='projection.retire_absent' AND pane_ref=?", laterPaneRef).Scan(&retirementAudits); err != nil || retirementAudits != 1 {
+		t.Fatalf("closed pane retirement audit count=%d err=%v", retirementAudits, err)
 	}
 
 	interact := func(action, state, text string, n int) {

@@ -36,11 +36,12 @@ ok "codex resume cwd is untouched" \
    'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q "cd $T/work/sub"'
 
 echo "== fix 3: SQLite store round-trips, keeps history, survives nasty labels"
-SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>'
+SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\tcpw_test\tcpp_test\t3\t7\tworking\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>'
 ok "save accepts a snapshot"            'cockpit_layout_save "$SNAP"'
 ok "load returns it verbatim"           '[[ "$(cockpit_layout_load)" == "$SNAP" ]]'
 ok "single quotes survive storage"      'cockpit_layout_load | grep -q "with .quotes. and, commas"'
 ok "empty fields round-trip as <nil>"   'cockpit_layout_load | grep -qP "^1\tworkspace-b\t<nil>"'
+ok "controller identity survives storage" 'cockpit_layout_load | grep -q $'"'"'cpw_test\tcpp_test\t3\t7\tworking'"'"'$'
 ok "empty snapshot is refused"          '! cockpit_layout_save ""'
 SNAP2=${SNAP/workspace-a/workspace-z}
 cockpit_layout_save "$SNAP2" >/dev/null

@@ -97,6 +97,19 @@ func NewLiveCockpitDaemon(runtimeRoot, socket, credentialFile string) (*daemon, 
 	return newDaemon(runtimeRoot, socket, "cockpit", auth, true)
 }
 
+// IsLiveCockpitPending identifies admission failures that can resolve when the
+// named tmux server appears or finishes restoring its durable pane identities.
+// The production command waits inside one process for these cases, preventing
+// systemd from turning an expected restore interval into a crash loop. Store,
+// credential, and lease errors remain fatal.
+func IsLiveCockpitPending(err error) bool {
+	var de *domainError
+	if errors.As(err, &de) && de.Code == "CONTROLLER_NOT_READY" {
+		return true
+	}
+	return err != nil && strings.HasPrefix(err.Error(), `tmux ["`)
+}
+
 // The liveCockpit switch is private so production callers can only select the
 // fixed name through NewLiveCockpitDaemon. Tests exercise the same path with
 // a random throwaway server, never the real Cockpit socket.
@@ -287,6 +300,12 @@ func (d *daemon) Serve() error {
 	}
 	d.listener, d.socketDev, d.socketIno = l, uint64(st.Dev), uint64(st.Ino)
 	d.lifeMu.Unlock()
+	var maintenanceStop chan struct{}
+	if d.tm.allowLiveCockpit {
+		maintenanceStop = make(chan struct{})
+		go d.maintainProjection(maintenanceStop)
+		defer close(maintenanceStop)
+	}
 	for {
 		c, e := l.Accept()
 		if e != nil {
@@ -295,11 +314,42 @@ func (d *daemon) Serve() error {
 		go d.handle(c)
 	}
 }
+
+// maintainProjection makes pane retirement durable while the original tmux
+// server is still authoritative. A server replacement is never adopted here
+// unless its complete saved identity set passes validateFingerprintSuccessor.
+func (d *daemon) maintainProjection(stop <-chan struct{}) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	lastError := ""
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			err := d.reconcile()
+			if err == nil {
+				if lastError != "" {
+					fmt.Fprintln(os.Stderr, "cockpit-core: live projection reconciled")
+					lastError = ""
+				}
+				continue
+			}
+			if err.Error() != lastError {
+				lastError = err.Error()
+				fmt.Fprintf(os.Stderr, "cockpit-core: live projection pending: %v\n", err)
+			}
+		}
+	}
+}
 func (d *daemon) reconcile() error {
 	d.reconcileMu.Lock()
 	defer d.reconcileMu.Unlock()
-	b, e := d.tm.run("list-panes", "-a", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{@cockpit_workspace_ref}\t#{@cockpit_pane_ref}\t#{@cockpit_pane_generation}\t#{@cockpit_pane_version}\t#{@cockpit_badge}\t#{@agent}\t#{@state}")
+	b, e := d.tm.run("list-panes", "-a", "-f", "#{==:#{@orderly},}", "-F", "#{window_id}\t#{window_name}\t#{pane_id}\t#{@cockpit_workspace_ref}\t#{@cockpit_pane_ref}\t#{@cockpit_pane_generation}\t#{@cockpit_pane_version}\t#{@cockpit_badge}\t#{@agent}\t#{@state}\t#{@session_id}")
 	if e != nil {
+		return e
+	}
+	if b, e = canonicalPaneInventory(b); e != nil {
 		return e
 	}
 	// Strand recovery runs FIRST, before any validation that would refuse on the residues it clears. An
@@ -311,6 +361,7 @@ func (d *daemon) reconcile() error {
 	if e = d.recoverPrepared(b); e != nil {
 		return e
 	}
+	currentServer := false
 	fp, e := d.st.meta("fingerprint")
 	if e == sql.ErrNoRows {
 		if existing, ge := d.tm.globalOption("@cockpit_server_fingerprint"); ge != nil || existing != "" {
@@ -344,6 +395,13 @@ func (d *daemon) reconcile() error {
 		}
 		if e = d.tm.setGlobal("@cockpit_server_fingerprint", next); e != nil {
 			_ = d.st.setMeta("fingerprint", fp)
+			return e
+		}
+	} else {
+		currentServer = true
+	}
+	if currentServer {
+		if e = d.retireMissingProjection(b); e != nil {
 			return e
 		}
 	}
@@ -461,6 +519,106 @@ func (d *daemon) reconcile() error {
 		}
 	}
 	return nil
+}
+
+// canonicalPaneInventory applies the same duplicate-session rule as the layout
+// snapshot: one Claude/Codex transcript is one resumable pane. It returns the
+// historical ten-field controller inventory so the identity validation below
+// stays independent of session metadata.
+func canonicalPaneInventory(raw []byte) ([]byte, error) {
+	seen := map[string]bool{}
+	var kept []string
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) != 11 {
+			return nil, fmt.Errorf("unexpected tmux inventory")
+		}
+		if f[10] != "" && (f[8] == "claude" || f[8] == "codex") {
+			key := f[8] + "\x00" + f[10]
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		kept = append(kept, strings.Join(f[:10], "\t"))
+	}
+	if len(kept) == 0 {
+		return []byte{}, nil
+	}
+	return []byte(strings.Join(kept, "\n") + "\n"), nil
+}
+
+// retireMissingProjection is intentionally limited to a fingerprint-matched
+// server. Pane IDs are stable for that server, so a durable row whose pane ID
+// disappeared is a closed pane; a row whose pane still exists but lost its
+// stable ref is tampering or corruption and remains fenced. This distinction
+// lets normal pane/workspace closes survive the next reboot without weakening
+// successor admission.
+func (d *daemon) retireMissingProjection(inventory []byte) error {
+	livePaneIDs := map[string]bool{}
+	liveRefs := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(inventory), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) != 10 {
+			return fmt.Errorf("unexpected tmux inventory")
+		}
+		livePaneIDs[f[2]] = true
+		if f[4] != "" {
+			liveRefs[f[4]] = true
+		}
+	}
+	type durablePane struct{ ref, paneID, windowID string }
+	rows, err := d.st.db.Query("SELECT ref,pane_id,window_id FROM panes")
+	if err != nil {
+		return err
+	}
+	var retired []durablePane
+	for rows.Next() {
+		var p durablePane
+		if err = rows.Scan(&p.ref, &p.paneID, &p.windowID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if liveRefs[p.ref] {
+			continue
+		}
+		if livePaneIDs[p.paneID] {
+			_ = rows.Close()
+			return derr("CONTROLLER_NOT_READY", "live pane lost its durable identity stamp")
+		}
+		retired = append(retired, p)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if len(retired) == 0 {
+		return nil
+	}
+	tx, err := d.st.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, p := range retired {
+		if err = mustTx(tx, "DELETE FROM panes WHERE ref=?", p.ref); err == nil {
+			err = mustTx(tx, "INSERT INTO audit(at,caller,method,pane_ref,before_digest,after_digest) VALUES(?,?,?,?,?,?)",
+				time.Now().Unix(), "cockpit-core", "projection.retire_absent", p.ref, digest(p.windowID+"/"+p.paneID), "retired")
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	if err = mustTx(tx, "DELETE FROM workspaces WHERE NOT EXISTS (SELECT 1 FROM panes WHERE panes.workspace_ref=workspaces.ref)"); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // validateFingerprintSuccessor admits only a deliberate Cockpit replacement

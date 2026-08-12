@@ -217,6 +217,23 @@ stamp_pane() {  # pane-id  session-id  cwd  label  [agent]
   cockpit_stamp_known_agent "$1" "$2" "$3" "$4" "${5:-claude}"
 }
 
+# Restore controller-owned identity only when the snapshot contains a complete,
+# well-formed tuple. Legacy snapshots contain no tuple and are deliberately left
+# unstamped for the controller to adopt after the one-time projection reset.
+stamp_controller_identity() { # pane-id window-id workspace-ref pane-ref generation version badge
+  local pane="$1" win="$2" wref="$3" pref="$4" gen="$5" ver="$6" badge="$7"
+  if [[ -z "$wref$pref$gen$ver$badge" ]]; then return 0; fi
+  if [[ -z "$wref" || -z "$pref" || ! "$gen" =~ ^[1-9][0-9]*$ || ! "$ver" =~ ^[1-9][0-9]*$ ]]; then
+    echo "cockpit: refusing a partial controller identity in the saved layout" >&2
+    return 1
+  fi
+  $TMUX set-option -w -t "$win" @cockpit_workspace_ref "$wref" \
+    \; set-option -p -t "$pane" @cockpit_pane_ref "$pref" \
+    \; set-option -p -t "$pane" @cockpit_pane_generation "$gen" \
+    \; set-option -p -t "$pane" @cockpit_pane_version "$ver" \
+    \; set-option -p -t "$pane" @cockpit_badge "$badge"
+}
+
 # Bulk Codex launches are queued while the layout is built.  After every pane
 # exists, respawn the saved active workspace first and the remaining workspaces
 # second.  This changes initialization priority without changing tab/pane order.
@@ -298,8 +315,8 @@ restore_grid() {
   snap=$(cockpit_layout_load "$back") || return 1
   [[ -n "$snap" ]] || return 1
   local active="" first=1 curwin="" awin="" i n resumable=0 duplicates=0 key duplicate_noun
-  declare -a W S C L A; local f1 f2 f3 f4 f5 f6
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6; do
+  declare -a W S C L A WR PR PG PV B; local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     # Guard against a malformed layout file: a pane row's f1 is a window index
     # and f2 a workspace name. Skip anything else (blank lines, or continuation
@@ -308,13 +325,17 @@ restore_grid() {
     [[ "$f1" =~ ^[0-9]+$ && -n "$f2" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""; [[ "$f5" == "$NIL" ]] && f5=""
     [[ "$f6" == "$NIL" ]] && f6=""
-    [[ "$f6" == claude || "$f6" == codex ]] || continue
+    [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
+    [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
+    [[ "$f11" == "$NIL" ]] && f11=""
+    [[ "$f6" == claude || "$f6" == codex ]] || f6=""
     W+=("$f2"); S+=("$f3"); C+=("$f4"); L+=("$f5"); A+=("$f6")
+    WR+=("$f7"); PR+=("$f8"); PG+=("$f9"); PV+=("$f10"); B+=("$f11")
   done <<<"$snap"
   n=${#W[@]}; (( n > 0 )) || return 1
   declare -A SEEN_RESUMABLE=()
   for ((i=0;i<n;i++)); do
-    if [[ -n "${S[$i]}" && -n "$(agent_transcript "${A[$i]}" "${S[$i]}" "${C[$i]}")" ]]; then
+    if [[ ( "${A[$i]}" == claude || "${A[$i]}" == codex ) && -n "${S[$i]}" && -n "$(agent_transcript "${A[$i]}" "${S[$i]}" "${C[$i]}")" ]]; then
       key="${A[$i]}:${S[$i]}"
       if [[ -n "${SEEN_RESUMABLE[$key]:-}" ]]; then duplicates=$((duplicates+1))
       else SEEN_RESUMABLE[$key]=1; resumable=$((resumable+1))
@@ -337,7 +358,8 @@ restore_grid() {
   codex_queue_reset
   for ((i=0;i<n;i++)); do
     local wname="${W[$i]}" sid="${S[$i]}" cwd="${C[$i]}" label="${L[$i]}" agent="${A[$i]}" issess=0 cmd pane
-    [[ -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
+    local wref="${WR[$i]}" pref="${PR[$i]}" gen="${PG[$i]}" ver="${PV[$i]}" badge="${B[$i]}"
+    [[ ( "$agent" == claude || "$agent" == codex ) && -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
     if (( issess )); then
       key="$agent:$sid"
       [[ -n "${SEEN_LAUNCHED[$key]:-}" ]] && continue
@@ -359,10 +381,10 @@ restore_grid() {
       (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
     else                                          # workspace already open → add this pane to its window
       curwin="${NAMEWIN[$wname]}"
-      (( issess )) || continue                    # don't recreate stray bare shells
       pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
-      stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
+      (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
     fi
+    stamp_controller_identity "$pane" "$curwin" "$wref" "$pref" "$gen" "$ver" "$badge" || return 1
     if (( issess )) && [[ "$agent" == codex ]]; then
       cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
       codex_queue_add "$pane" "$wname" "$cmd"
