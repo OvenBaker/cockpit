@@ -17,8 +17,10 @@ wopt() { $TMUX show -wqv -t "$1" "$2" 2>/dev/null; }   # window option (quiet, v
 case "${1:-close}" in
   close)
     win=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_id}')
-    n=$($TMUX list-windows -t "$COCKPIT_SESSION" -F x 2>/dev/null | wc -l)
-    if (( n <= 1 )); then
+    # Count what would SURVIVE, not what currently exists — closes already in
+    # flight are still live windows, and counting them let a held-down Alt-W mark
+    # every workspace in the grid before the first one had died.
+    if (( $(cockpit_ws_open_count) <= 1 )); then
       $TMUX display-message "cockpit: can't close the last workspace (cockpit --kill to exit)"; exit 0
     fi
     [[ -n "$(wopt "$win" @closing)" ]] && exit 0          # already counting down
@@ -27,9 +29,14 @@ case "${1:-close}" in
     $TMUX set -w -t "$win" @origname "$name"
     $TMUX set -w -t "$win" @closing  "$tok"
     $TMUX rename-window -t "$win" "✗ $name"               # visible cue on the tab
-    $TMUX set -g @undo_kind ws; $TMUX set -g @undo_win "$win"; $TMUX set -g @undo_tok "$tok"
+    cockpit_ws_undo_push "$win" "$tok"
     $TMUX previous-window -t "$COCKPIT_SESSION" 2>/dev/null || true   # get it out of view
-    $TMUX display-message "closing '$name' in ${GRACE}s — Alt-u to undo"
+    pending=$(cockpit_ws_undo_pending)
+    if (( pending > 1 )); then
+      $TMUX display-message "closing '$name' in ${GRACE}s — $pending workspaces now closing, Alt-u to undo each"
+    else
+      $TMUX display-message "closing '$name' in ${GRACE}s — Alt-u to undo"
+    fi
     setsid nohup "$HERE/cockpit-ws" reap "$win" "$tok" >/dev/null 2>&1 &
     ;;
   reap)
@@ -39,15 +46,20 @@ case "${1:-close}" in
     [[ -n "$tok" && "$(wopt "$win" @closing)" == "$tok" ]] && $TMUX kill-window -t "$win" 2>/dev/null
     ;;
   undo)
-    win=$($TMUX show -gqv @undo_win 2>/dev/null); tok=$($TMUX show -gqv @undo_tok 2>/dev/null)
-    if [[ -z "$win" || "$(wopt "$win" @closing)" != "$tok" ]]; then
-      $TMUX display-message "cockpit: nothing to undo"; exit 0
-    fi
+    # Pop the newest still-pending close. Repeat presses walk back through a
+    # burst instead of stopping at the one workspace the old single slot held.
+    entry=$(cockpit_ws_undo_pop) || { $TMUX display-message "cockpit: nothing to undo"; exit 0; }
+    IFS=$'\t' read -r win tok <<<"$entry"
     name=$(wopt "$win" @origname)
     $TMUX set -w -t "$win" @closing ""
     $TMUX rename-window -t "$win" "${name:-workspace}"
     $TMUX select-window -t "$win"
-    $TMUX display-message "recovered '${name}'"
+    left=$(cockpit_ws_undo_pending)
+    if (( left > 0 )); then
+      $TMUX display-message "recovered '${name}' — $left more still closing, Alt-u again"
+    else
+      $TMUX display-message "recovered '${name}'"
+    fi
     ;;
   *) echo "usage: cockpit-ws {close|undo}" >&2; exit 2;;
 esac

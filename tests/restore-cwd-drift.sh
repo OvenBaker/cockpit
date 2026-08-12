@@ -36,7 +36,7 @@ mk "$A" "$T/work"; mk "$B" "$T/work"
 
 # The layout as the poller would have saved it: 'orbital' is a single-pane
 # workspace whose @cwd drifted into a subdirectory — the exact fatal shape.
-SNAP=$'@active\tmain\n0\tmain\t'"$B"$'\t'"$T/work"$'\thealthy\tclaude\n1\torbital\t'"$A"$'\t'"$T/work/sub"$'\tdrifted\tclaude'
+SNAP=$'@active\tmain\n0\tmain\t'"$B"$'\t'"$T/work"$'\thealthy\tclaude\tcpw_main\tcpp_main\t2\t5\tidle\n1\torbital\t'"$A"$'\t'"$T/work/sub"$'\tdrifted\tclaude\tcpw_orbital\tcpp_orbital\t3\t8\tworking'
 cockpit_layout_save "$SNAP" || { echo "save failed"; exit 1; }
 
 tmux -L ckrst kill-server 2>/dev/null
@@ -64,6 +64,10 @@ done
 chk "stub agent resumed in BOTH panes (fix 1 worked, not just fix 2)" '[[ "$agents" == 2 ]]'
 chk "drifted pane runs in the transcript-owning dir, not the recorded cwd" \
     '[[ "$(tmux -L ckrst list-panes -s -t ckrst -f "#{==:#{window_name},orbital}" -F "#{pane_current_path}")" == "$T/work" ]]'
+chk "controller pane identities survive restore" \
+    '[[ "$(tmux -L ckrst list-panes -s -t ckrst -F "#{@cockpit_pane_ref}:#{@cockpit_pane_generation}:#{@cockpit_pane_version}" | sort | tr "\n" " ")" == "cpp_main:2:5 cpp_orbital:3:8 " ]]'
+chk "controller workspace identities survive restore" \
+    '[[ "$(tmux -L ckrst list-windows -t ckrst -F "#{@cockpit_workspace_ref}" | sort | tr "\n" " ")" == "cpw_main cpw_orbital " ]]'
 
 tmux -L ckrst kill-server 2>/dev/null; pkill -f "$T" 2>/dev/null; rm -rf "$T"
 echo; [[ $fail == 0 ]] && echo "e2e: all checks passed" || echo "e2e: FAILURES"

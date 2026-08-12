@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gareth/cockpit-core/internal/core"
 )
@@ -335,15 +336,25 @@ func daemon(args []string) {
 		if *runtimeRoot == "" || *socket == "" || *credentials == "" || *root != "" || *tmuxSocket != "" {
 			fatal("--live-cockpit requires --runtime-root --socket --credentials-file and rejects --test-root/--tmux-socket")
 		}
-		d, err := core.NewLiveCockpitDaemon(*runtimeRoot, *socket, *credentials)
-		if err != nil {
-			fatal(err.Error())
+		lastPending := ""
+		for {
+			d, err := core.NewLiveCockpitDaemon(*runtimeRoot, *socket, *credentials)
+			if err == nil {
+				defer d.Close()
+				if err = d.Serve(); err != nil {
+					fatal(err.Error())
+				}
+				return
+			}
+			if !core.IsLiveCockpitPending(err) {
+				fatal(err.Error())
+			}
+			if err.Error() != lastPending {
+				fmt.Fprintf(os.Stderr, "cockpit-core: waiting for Cockpit restore: %v\n", err)
+				lastPending = err.Error()
+			}
+			time.Sleep(3 * time.Second)
 		}
-		defer d.Close()
-		if err := d.Serve(); err != nil {
-			fatal(err.Error())
-		}
-		return
 	}
 	if *root == "" || *socket == "" || *tmuxSocket == "" || *credentials == "" || *runtimeRoot != "" {
 		fatal("daemon requires --test-root --socket --tmux-socket --credentials-file (or --live-cockpit with --runtime-root)")

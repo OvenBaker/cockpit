@@ -130,7 +130,13 @@ cockpit_snapshot() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
   printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
   $tmux list-panes -s -t "$COCKPIT_SESSION" -f '#{==:#{@orderly},}' \
-    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}" 2>/dev/null
+    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@cockpit_workspace_ref,#{@cockpit_workspace_ref},$NIL}${TAB}#{?@cockpit_pane_ref,#{@cockpit_pane_ref},$NIL}${TAB}#{?@cockpit_pane_generation,#{@cockpit_pane_generation},$NIL}${TAB}#{?@cockpit_pane_version,#{@cockpit_pane_version},$NIL}${TAB}#{?@cockpit_badge,#{@cockpit_badge},$NIL}" 2>/dev/null |
+    awk -F "$TAB" -v nil="$NIL" '
+      $3 != nil && ($6 == "claude" || $6 == "codex") {
+        key=$6 SUBSEP $3; if (seen[key]++) next
+      }
+      { print }
+    '
 }
 
 # --- layout store (SQLite) --------------------------------------------------
@@ -170,9 +176,30 @@ CREATE TABLE IF NOT EXISTS panes(
   cwd         TEXT    NOT NULL DEFAULT '',
   label       TEXT    NOT NULL DEFAULT '',
   agent       TEXT    NOT NULL DEFAULT '',
+  workspace_ref  TEXT NOT NULL DEFAULT '',
+  pane_ref       TEXT NOT NULL DEFAULT '',
+  pane_generation TEXT NOT NULL DEFAULT '',
+  pane_version    TEXT NOT NULL DEFAULT '',
+  badge           TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(snapshot_id, seq));
 CREATE INDEX IF NOT EXISTS idx_snapshots_session_at ON snapshots(session, at DESC);
 SQL
+  # CREATE TABLE IF NOT EXISTS does not add columns to an existing layout DB.
+  # Each ALTER is race-tolerant: another poller may win between the probe and
+  # the write, in which case the final probe is the authority.
+  local name spec
+  while IFS='|' read -r name spec; do
+    [[ "$(sqlite3 "$COCKPIT_LAYOUT_DB" "SELECT count(*) FROM pragma_table_info('panes') WHERE name='$name';" 2>/dev/null)" == 1 ]] && continue
+    sqlite3 "$COCKPIT_LAYOUT_DB" "ALTER TABLE panes ADD COLUMN $name $spec;" >/dev/null 2>&1 \
+      || [[ "$(sqlite3 "$COCKPIT_LAYOUT_DB" "SELECT count(*) FROM pragma_table_info('panes') WHERE name='$name';" 2>/dev/null)" == 1 ]] \
+      || return 1
+  done <<'COLUMNS'
+workspace_ref|TEXT NOT NULL DEFAULT ''
+pane_ref|TEXT NOT NULL DEFAULT ''
+pane_generation|TEXT NOT NULL DEFAULT ''
+pane_version|TEXT NOT NULL DEFAULT ''
+badge|TEXT NOT NULL DEFAULT ''
+COLUMNS
 }
 
 # Persist a snapshot (the TSV text cockpit_snapshot prints) as one transaction.
@@ -180,18 +207,22 @@ SQL
 # bounded without a separate sweep.
 cockpit_layout_save() {
   local snap="$1" sess="${COCKPIT_SESSION}" NIL='<nil>' sql active="" seq=0
-  local f1 f2 f3 f4 f5 f6
+  local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11
   [[ -n "$snap" ]] || return 1
   cockpit_layout_init
   sql="BEGIN IMMEDIATE;"
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6; do
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     [[ -n "$f1" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""
     [[ "$f5" == "$NIL" ]] && f5=""; [[ "$f6" == "$NIL" ]] && f6=""
-    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent) VALUES("
+    [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
+    [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
+    [[ "$f11" == "$NIL" ]] && f11=""
+    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,workspace_ref,pane_ref,pane_generation,pane_version,badge) VALUES("
     sql+="(SELECT MAX(id) FROM snapshots),$seq,$(ck_sqesc "$f1"),$(ck_sqesc "$f2"),"
-    sql+="$(ck_sqesc "$f3"),$(ck_sqesc "$f4"),$(ck_sqesc "$f5"),$(ck_sqesc "$f6"));"
+    sql+="$(ck_sqesc "$f3"),$(ck_sqesc "$f4"),$(ck_sqesc "$f5"),$(ck_sqesc "$f6"),"
+    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"),$(ck_sqesc "$f10"),$(ck_sqesc "$f11"));"
     seq=$((seq+1))
   done <<<"$snap"
   (( seq > 0 )) || return 1        # never persist an empty grid over a good one
@@ -207,11 +238,31 @@ cockpit_layout_save() {
 # Emitting the same shape the poller captures keeps restore's parser the single
 # reader of that format.
 cockpit_layout_load() {
-  local back="${1:-0}" sess="${COCKPIT_SESSION}" TAB=$'\t' NIL='<nil>' sid
+  local back="${1:-0}" sess="${COCKPIT_SESSION}" sid
   [[ -f "$COCKPIT_LAYOUT_DB" ]] || return 1
   sid=$(sqlite3 "$COCKPIT_LAYOUT_DB" \
     "SELECT id FROM snapshots WHERE session=$(ck_sqesc "$sess") ORDER BY at DESC, id DESC LIMIT 1 OFFSET $back;" 2>/dev/null)
   [[ -n "$sid" ]] || return 1
+  cockpit_layout_emit "$sid"
+}
+
+# Same, addressed by the snapshot id `cockpit --history` prints. An OFFSET is a
+# moving target — the poller appends while you are deciding, so the "3 back" you
+# read is not the "3 back" you restore. The id never moves, which is what you
+# want when the snapshot you are reaching for is the one good grid in the list.
+cockpit_layout_load_id() {
+  local id="${1:-}" sess="${COCKPIT_SESSION}" sid
+  [[ -f "$COCKPIT_LAYOUT_DB" && "$id" =~ ^[0-9]+$ ]] || return 1
+  sid=$(sqlite3 "$COCKPIT_LAYOUT_DB" \
+    "SELECT id FROM snapshots WHERE id=$id AND session=$(ck_sqesc "$sess");" 2>/dev/null)
+  [[ -n "$sid" ]] || return 1
+  cockpit_layout_emit "$sid"
+}
+
+# Shared row emitter for both addressing modes above. $1 is a snapshot id that
+# the caller has already resolved (and confirmed belongs to this session).
+cockpit_layout_emit() {
+  local sid="$1" TAB=$'\t' NIL='<nil>'
   sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
     "SELECT '@active', active FROM snapshots WHERE id=$sid;" 2>/dev/null
   sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
@@ -219,8 +270,40 @@ cockpit_layout_load() {
             CASE WHEN session_id='' THEN '$NIL' ELSE session_id END,
             CASE WHEN cwd='' THEN '$NIL' ELSE cwd END,
             CASE WHEN label='' THEN '$NIL' ELSE label END,
-            CASE WHEN agent='' THEN '$NIL' ELSE agent END
+            CASE WHEN agent='' THEN '$NIL' ELSE agent END,
+            CASE WHEN workspace_ref='' THEN '$NIL' ELSE workspace_ref END,
+            CASE WHEN pane_ref='' THEN '$NIL' ELSE pane_ref END,
+            CASE WHEN pane_generation='' THEN '$NIL' ELSE pane_generation END,
+            CASE WHEN pane_version='' THEN '$NIL' ELSE pane_version END,
+            CASE WHEN badge='' THEN '$NIL' ELSE badge END
      FROM panes WHERE snapshot_id=$sid ORDER BY seq;" 2>/dev/null
+}
+
+# "id<TAB>workspaces<TAB>panes" for the snapshot at offset $1 (0 = newest).
+cockpit_layout_stats() {
+  local back="${1:-0}" sess="${COCKPIT_SESSION}" TAB=$'\t'
+  [[ -f "$COCKPIT_LAYOUT_DB" ]] || return 1
+  sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
+    "SELECT s.id, COUNT(DISTINCT p.workspace), COUNT(p.seq)
+     FROM snapshots s LEFT JOIN panes p ON p.snapshot_id=s.id
+     WHERE s.session=$(ck_sqesc "$sess")
+     GROUP BY s.id ORDER BY s.at DESC, s.id DESC LIMIT 1 OFFSET $back;" 2>/dev/null
+}
+
+# Same shape, for the RICHEST of the last $1 snapshots (most workspaces, then most
+# panes). Restore uses this to notice that the layout it is about to rebuild is a
+# fraction of a grid that existed an hour ago — the shape of a mass-close or a
+# half-failed restore, which is otherwise invisible until the workspaces are gone.
+cockpit_layout_peak() {
+  local lim="${1:-30}" sess="${COCKPIT_SESSION}" TAB=$'\t'
+  [[ -f "$COCKPIT_LAYOUT_DB" ]] || return 1
+  sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
+    "SELECT id, ws, panes FROM (
+       SELECT s.id AS id, COUNT(DISTINCT p.workspace) AS ws, COUNT(p.seq) AS panes, s.at AS at
+       FROM snapshots s LEFT JOIN panes p ON p.snapshot_id=s.id
+       WHERE s.session=$(ck_sqesc "$sess")
+       GROUP BY s.id ORDER BY s.at DESC, s.id DESC LIMIT $lim)
+     ORDER BY ws DESC, panes DESC, id DESC LIMIT 1;" 2>/dev/null
 }
 
 # One-time adoption of the pre-SQLite TSV so an upgrade doesn't start blind.
@@ -240,6 +323,69 @@ cockpit_cur_window() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} w
   w=$($tmux display -p -t "$COCKPIT_SESSION" '#{window_id}' 2>/dev/null)
   echo "${w:-$COCKPIT_SESSION:0}"
+}
+
+# --- soft-close bookkeeping -------------------------------------------------
+# How many workspaces would SURVIVE the closes already in flight. A window marked
+# @closing is still a live tmux window for the whole grace period, and a window
+# marked @graveyard is a holding pen for a removed pane, not a workspace — so
+# counting raw `list-windows` overstates what's left. That overstatement is what
+# made "can't close the last workspace" a guard in name only: hold Alt-W down and
+# every press sees all 24 windows still standing, marks another one, and moves on,
+# until the whole grid is counting down at once (2026-08-12: 23 lost that way).
+cockpit_ws_open_count() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} n=0 closing graveyard
+  while IFS=$'\t' read -r closing graveyard; do
+    [[ -z "$closing" && -z "$graveyard" ]] && n=$((n+1))
+  done < <($tmux list-windows -t "$COCKPIT_SESSION" -F "#{@closing}"$'\t'"#{@graveyard}" 2>/dev/null)
+  printf '%s' "$n"
+}
+
+# Pending-close undo STACK ("window_id:token" entries, newest last). This was a
+# single global slot, so N closes inside one grace period left only the newest
+# recoverable and orphaned the other N-1 while they were still alive and undoable.
+# @undo_win/@undo_tok are kept as a mirror of the top entry: they are the legacy
+# read path and what tests/pane-release.sh asserts against.
+cockpit_ws_undo_push() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} win="$1" tok="$2" stack
+  stack=$($tmux show -gqv @undo_ws_stack 2>/dev/null)
+  $tmux set -g @undo_ws_stack "${stack:+$stack }$win:$tok"
+  $tmux set -g @undo_kind ws; $tmux set -g @undo_win "$win"; $tmux set -g @undo_tok "$tok"
+}
+
+# Print "window_id<TAB>token" for the newest entry that is STILL a pending close,
+# dropping it and any stale entries above it. A window that was already reaped or
+# re-closed carries a different @closing token, so a stale entry can never
+# resurrect it. Returns 1 when nothing is recoverable.
+cockpit_ws_undo_pop() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} entry win tok
+  local -a stack=()
+  read -r -a stack <<<"$($tmux show -gqv @undo_ws_stack 2>/dev/null)"
+  while (( ${#stack[@]} )); do
+    entry="${stack[-1]}"; unset 'stack[-1]'
+    win="${entry%%:*}"; tok="${entry#*:}"
+    if [[ -n "$win" && -n "$tok" && "$($tmux show -wqv -t "$win" @closing 2>/dev/null)" == "$tok" ]]; then
+      $tmux set -g @undo_ws_stack "${stack[*]-}"
+      # re-point the legacy mirror at the new top (empty once the stack is drained)
+      local top="${stack[-1]-}"
+      $tmux set -g @undo_win "${top%%:*}"; $tmux set -g @undo_tok "${top#*:}"
+      printf '%s\t%s' "$win" "$tok"; return 0
+    fi
+  done
+  $tmux set -g @undo_ws_stack ""; $tmux set -g @undo_win ""; $tmux set -g @undo_tok ""
+  return 1
+}
+
+# How many closes are still pending and recoverable — what Alt-u has left to give.
+cockpit_ws_undo_pending() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} entry win tok n=0
+  local -a stack=()
+  read -r -a stack <<<"$($tmux show -gqv @undo_ws_stack 2>/dev/null)"
+  for entry in "${stack[@]}"; do
+    win="${entry%%:*}"; tok="${entry#*:}"
+    [[ -n "$win" && -n "$tok" && "$($tmux show -wqv -t "$win" @closing 2>/dev/null)" == "$tok" ]] && n=$((n+1))
+  done
+  printf '%s' "$n"
 }
 
 # Resolve a target workspace WINDOW id by name: reuse if it exists, else create
@@ -629,6 +775,23 @@ cockpit_keep_pane_on_failure() {
   local inner="$1"
   inner="${inner/exec claude/claude}"; inner="${inner/exec codex/codex}"
   printf '%s; rc=$?; [ "$rc" = 0 ] || { printf "\\n\\033[31mcockpit: launch failed (exit %%s)\\033[0m — keeping this pane so the workspace survives.\\n" "$rc"; exec bash -l; }' "$inner"
+}
+
+# Offset queued Codex starts so a bulk restore does not make every process
+# initialize the shared CODEX_HOME SQLite runtime at once.  $2 is the zero-based
+# launch ordinal after the caller has put the visible workspace first.  The
+# delay lives inside the pane command, so Cockpit can build and attach the whole
+# grid immediately instead of blocking the restore loop between launches.
+cockpit_stagger_agent_command() {
+  local agent="$1" ordinal="$2" inner="$3"
+  local interval="${COCKPIT_CODEX_STAGGER_SECS:-3}" delay notice
+  [[ "$agent" == codex ]] || { printf '%s' "$inner"; return; }
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=3
+  [[ "$ordinal" =~ ^[0-9]+$ ]] || ordinal=0
+  delay=$(( ordinal * interval ))
+  (( delay > 0 )) || { printf '%s' "$inner"; return; }
+  notice="cockpit: Codex startup queued for ${delay}s (shared-state stagger)"
+  printf 'printf "%%s\\n" %q; sleep %d; %s' "$notice" "$delay" "$inner"
 }
 
 # Is a session already running? (don't double-resume). claude has a per-id

@@ -5,6 +5,8 @@
 #                        (if a cockpit is already running, attaches to it)
 #   cockpit --fresh      ignore the saved layout; pick sessions fresh
 #   cockpit --restore    force-restore the saved layout
+#   cockpit --history    list saved snapshots (id, time, panes, workspaces)
+#   cockpit --restore-id ID   force-restore one specific snapshot from --history
 #   cockpit --save       snapshot the running grid's layout to disk now
 #   cockpit --santa      pick sessions in santa's TUI (resume → cockpit)
 #   cockpit --rebuild    tear down a running cockpit, then build a fresh one
@@ -49,6 +51,7 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --rebuild) REBUILD=1;; --auto) AUTO=1;; --santa) SANTA=1;;
   --restore) RESTORE=1;; --fresh) FRESH=1;; --save) MODE=save;; -n) N="$2"; shift;;
   --history) MODE=history;; --restore-from) RESTORE=1; RESTORE_BACK="$2"; shift;;
+  --restore-id) RESTORE=1; RESTORE_ID="$2"; shift;;
   *) echo "unknown arg: $1" >&2; exit 2;; esac; shift; done
 PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
 # Saved layout (written by the poller); survives reboot. Now an append-only
@@ -217,6 +220,50 @@ stamp_pane() {  # pane-id  session-id  cwd  label  [agent]
   cockpit_stamp_known_agent "$1" "$2" "$3" "$4" "${5:-claude}"
 }
 
+# Restore controller-owned identity only when the snapshot contains a complete,
+# well-formed tuple. Legacy snapshots contain no tuple and are deliberately left
+# unstamped for the controller to adopt after the one-time projection reset.
+stamp_controller_identity() { # pane-id window-id workspace-ref pane-ref generation version badge
+  local pane="$1" win="$2" wref="$3" pref="$4" gen="$5" ver="$6" badge="$7"
+  if [[ -z "$wref$pref$gen$ver$badge" ]]; then return 0; fi
+  if [[ -z "$wref" || -z "$pref" || ! "$gen" =~ ^[1-9][0-9]*$ || ! "$ver" =~ ^[1-9][0-9]*$ ]]; then
+    echo "cockpit: refusing a partial controller identity in the saved layout" >&2
+    return 1
+  fi
+  $TMUX set-option -w -t "$win" @cockpit_workspace_ref "$wref" \
+    \; set-option -p -t "$pane" @cockpit_pane_ref "$pref" \
+    \; set-option -p -t "$pane" @cockpit_pane_generation "$gen" \
+    \; set-option -p -t "$pane" @cockpit_pane_version "$ver" \
+    \; set-option -p -t "$pane" @cockpit_badge "$badge"
+}
+
+# Bulk Codex launches are queued while the layout is built.  After every pane
+# exists, respawn the saved active workspace first and the remaining workspaces
+# second.  This changes initialization priority without changing tab/pane order.
+declare -a CODEX_QUEUE_PANES=() CODEX_QUEUE_WORKSPACES=() CODEX_QUEUE_COMMANDS=()
+codex_queue_reset() {
+  CODEX_QUEUE_PANES=(); CODEX_QUEUE_WORKSPACES=(); CODEX_QUEUE_COMMANDS=()
+}
+codex_queue_add() {
+  CODEX_QUEUE_PANES+=("$1"); CODEX_QUEUE_WORKSPACES+=("$2"); CODEX_QUEUE_COMMANDS+=("$3")
+}
+codex_queue_launch() {
+  local active="$1" pass i ordinal=0 cmd workspace
+  for pass in active remaining; do
+    for ((i=0;i<${#CODEX_QUEUE_PANES[@]};i++)); do
+      workspace="${CODEX_QUEUE_WORKSPACES[$i]}"
+      if [[ "$pass" == active ]]; then
+        [[ -n "$active" && "$workspace" == "$active" ]] || continue
+      else
+        [[ -z "$active" || "$workspace" != "$active" ]] || continue
+      fi
+      cmd=$(cockpit_stagger_agent_command codex "$ordinal" "${CODEX_QUEUE_COMMANDS[$i]}")
+      $TMUX respawn-pane -k -t "${CODEX_QUEUE_PANES[$i]}" "bash -lc $(printf %q "$cmd")"
+      ordinal=$((ordinal+1))
+    done
+  done
+}
+
 # launch exactly one poller (clears stragglers, fully detached) and attach.
 launch_and_attach() {
   # COCKPIT_NO_SINGLETON is the poller's existing "I'm a throwaway instance"
@@ -233,10 +280,16 @@ launch_and_attach() {
 # fresh build: a single 'work' workspace from CAND. Need a transient/extra zone?
 # spin one up on demand — Alt-N (new session → new workspace) or Alt-w.
 build_from_cand() {
-  local first=1 row id cwd title agent cmd pane
+  local first=1 row id cwd title agent cmd pane key
+  declare -A SEEN_SESSION=()
+  codex_queue_reset
   for row in "${CAND[@]}"; do
     IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
+    key="$agent:$id"
+    [[ -n "${SEEN_SESSION[$key]:-}" ]] && continue
+    SEEN_SESSION[$key]=1
     cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
+    [[ "$agent" == codex ]] && cmd="exec sleep infinity"
     if (( first )); then
       pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
       apply_chrome; first=0
@@ -245,9 +298,14 @@ build_from_cand() {
       $TMUX select-layout -t "$COCKPIT_SESSION:work" "$COCKPIT_LAYOUT"
     fi
     stamp_pane "$pane" "$id" "$cwd" "$title" "$agent"
+    if [[ "$agent" == codex ]]; then
+      cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$id" "$cwd" "$title")")
+      codex_queue_add "$pane" work "$cmd"
+    fi
   done
   $TMUX select-layout -t "$COCKPIT_SESSION:work" "$COCKPIT_LAYOUT"
   $TMUX select-window -t "$COCKPIT_SESSION:work"
+  codex_queue_launch work
 }
 
 # rebuild the saved workspaces/panes from the layout store. Returns 1 if there's
@@ -257,11 +315,16 @@ build_from_cand() {
 restore_grid() {
   local back="${1:-0}" snap
   cockpit_layout_import_legacy "$LEGACY_STATE"
-  snap=$(cockpit_layout_load "$back") || return 1
+  if [[ -n "${RESTORE_ID:-}" ]]; then
+    snap=$(cockpit_layout_load_id "$RESTORE_ID") \
+      || { echo "cockpit: no snapshot $RESTORE_ID for session '$COCKPIT_SESSION' (see: cockpit --history)" >&2; return 1; }
+  else
+    snap=$(cockpit_layout_load "$back") || return 1
+  fi
   [[ -n "$snap" ]] || return 1
-  local active="" first=1 curwin="" awin="" i n resumable=0
-  declare -a W S C L A; local f1 f2 f3 f4 f5 f6
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6; do
+  local active="" first=1 curwin="" awin="" i n resumable=0 duplicates=0 key duplicate_noun
+  declare -a W S C L A WR PR PG PV B; local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     # Guard against a malformed layout file: a pane row's f1 is a window index
     # and f2 a workspace name. Skip anything else (blank lines, or continuation
@@ -270,27 +333,51 @@ restore_grid() {
     [[ "$f1" =~ ^[0-9]+$ && -n "$f2" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""; [[ "$f5" == "$NIL" ]] && f5=""
     [[ "$f6" == "$NIL" ]] && f6=""
-    [[ "$f6" == claude || "$f6" == codex ]] || continue
+    [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
+    [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
+    [[ "$f11" == "$NIL" ]] && f11=""
+    [[ "$f6" == claude || "$f6" == codex ]] || f6=""
     W+=("$f2"); S+=("$f3"); C+=("$f4"); L+=("$f5"); A+=("$f6")
+    WR+=("$f7"); PR+=("$f8"); PG+=("$f9"); PV+=("$f10"); B+=("$f11")
   done <<<"$snap"
   n=${#W[@]}; (( n > 0 )) || return 1
+  declare -A SEEN_RESUMABLE=()
   for ((i=0;i<n;i++)); do
-    [[ -n "${S[$i]}" && -n "$(agent_transcript "${A[$i]}" "${S[$i]}" "${C[$i]}")" ]] && resumable=$((resumable+1))
+    if [[ ( "${A[$i]}" == claude || "${A[$i]}" == codex ) && -n "${S[$i]}" && -n "$(agent_transcript "${A[$i]}" "${S[$i]}" "${C[$i]}")" ]]; then
+      key="${A[$i]}:${S[$i]}"
+      if [[ -n "${SEEN_RESUMABLE[$key]:-}" ]]; then duplicates=$((duplicates+1))
+      else SEEN_RESUMABLE[$key]=1; resumable=$((resumable+1))
+      fi
+    fi
   done
   (( resumable > 0 )) || return 1
   echo "cockpit: restoring $resumable session(s) from saved layout…" >&2
+  if (( duplicates > 0 )); then
+    [[ $duplicates == 1 ]] && duplicate_noun=entry || duplicate_noun=entries
+    echo "cockpit: ignored $duplicates duplicate session $duplicate_noun" >&2
+  fi
   # Group rows into windows by workspace NAME (NAMEWIN: name → window_id), NOT by
   # adjacency. The saved rows are in window-index order, so two windows that share a
   # name but are separated by a differently-named window (e.g. banktech … codex …
   # banktech) used to rebuild as TWO "banktech" tabs. Keying on the name collapses
   # them into one; recording each name's FIRST appearance preserves the tab ORDER the
   # user is used to (sorting the rows instead would alphabetise the whole grid).
-  declare -A SEENW NAMEWIN
+  declare -A SEENW NAMEWIN SEEN_LAUNCHED
+  codex_queue_reset
   for ((i=0;i<n;i++)); do
     local wname="${W[$i]}" sid="${S[$i]}" cwd="${C[$i]}" label="${L[$i]}" agent="${A[$i]}" issess=0 cmd pane
-    [[ -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
+    local wref="${WR[$i]}" pref="${PR[$i]}" gen="${PG[$i]}" ver="${PV[$i]}" badge="${B[$i]}"
+    [[ ( "$agent" == claude || "$agent" == codex ) && -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
+    if (( issess )); then
+      key="$agent:$sid"
+      [[ -n "${SEEN_LAUNCHED[$key]:-}" ]] && continue
+      SEEN_LAUNCHED[$key]=1
+      cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
+      [[ "$agent" == codex ]] && cmd="exec sleep infinity"
+    else
+      cmd="bash -l"
+    fi
     if [[ -z "${NAMEWIN[$wname]:-}" ]]; then      # first sighting of this workspace → open its window
-      if (( issess )); then cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")"); else cmd="bash -l"; fi
       if (( first )); then
         pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
         apply_chrome; first=0
@@ -302,15 +389,45 @@ restore_grid() {
       (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
     else                                          # workspace already open → add this pane to its window
       curwin="${NAMEWIN[$wname]}"
-      (( issess )) || continue                    # don't recreate stray bare shells
-      cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
       pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
-      stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
+      (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
+    fi
+    stamp_controller_identity "$pane" "$curwin" "$wref" "$pref" "$gen" "$ver" "$badge" || return 1
+    if (( issess )) && [[ "$agent" == codex ]]; then
+      cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
+      codex_queue_add "$pane" "$wname" "$cmd"
     fi
   done
   for w in "${!SEENW[@]}"; do $TMUX select-layout -t "$w" "$COCKPIT_LAYOUT" 2>/dev/null; done
   [[ -n "$awin" ]] && $TMUX select-window -t "$awin" 2>/dev/null
+  codex_queue_launch "$active"
   return 0
+}
+
+# The layout store is append-only, so the grid that vanished is still on disk —
+# but restore takes the NEWEST snapshot, and the newest snapshot of a grid that
+# just lost 23 workspaces is a grid with one workspace. That is how a recoverable
+# hour became an unrecoverable morning on 2026-08-12: cockpit rebuilt the wreck
+# without a word, and only the operator knew anything was missing.
+# So: before building anything, compare what we're about to restore against the
+# richest layout in recent history. A shrink can be deliberate (workspaces do get
+# closed), so this never switches silently — it says what it found and, at a
+# terminal, offers the fuller snapshot. Skipped when the operator named an id.
+restore_shrink_check() {
+  local back="${1:-0}" cid cws cpanes pid pws ppanes ans
+  IFS=$'\t' read -r cid cws cpanes < <(cockpit_layout_stats "$back") || return 0
+  IFS=$'\t' read -r pid pws ppanes < <(cockpit_layout_peak 30) || return 0
+  [[ "$cws" =~ ^[0-9]+$ && "$pws" =~ ^[0-9]+$ ]] || return 0
+  (( cws > 0 && pid != cid && pws >= cws * 2 && pws - cws >= 2 )) || return 0
+  echo "cockpit: the newest layout has $cws workspace(s) / $cpanes pane(s)," >&2
+  echo "         but snapshot $pid has $pws / $ppanes — something closed the grid, not you?" >&2
+  if [[ -t 0 && -t 1 ]]; then
+    printf '         [r] restore snapshot %s instead   [k] keep the newest  (k in 20s): ' "$pid" >&2
+    read -r -t 20 -n 1 ans </dev/tty || true; echo >&2
+    [[ "${ans:-}" == [rR] ]] && { RESTORE_ID="$pid"; echo "cockpit: restoring snapshot $pid" >&2; }
+  else
+    echo "         restore it with: cockpit --restore-id $pid" >&2
+  fi
 }
 
 # ---- orchestrate: restore the saved layout, else pick fresh ----
@@ -322,6 +439,7 @@ if [[ "$RESTORE" == 1 ]]; then want_restore=1
 elif [[ "$SANTA" == 0 && "$AUTO" == 0 && "$FRESH" == 0 ]] && cockpit_layout_load >/dev/null 2>&1; then want_restore=1; fi
 
 if (( want_restore )); then
+  [[ -n "${RESTORE_ID:-}" ]] || restore_shrink_check "${RESTORE_BACK:-0}"
   restore_grid "${RESTORE_BACK:-0}" && launch_and_attach     # success → never returns
   [[ "$RESTORE" == 1 ]] && echo "cockpit: no saved layout to restore — starting fresh" >&2
 fi

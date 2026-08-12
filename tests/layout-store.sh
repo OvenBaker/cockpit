@@ -36,11 +36,12 @@ ok "codex resume cwd is untouched" \
    'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q "cd $T/work/sub"'
 
 echo "== fix 3: SQLite store round-trips, keeps history, survives nasty labels"
-SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>'
+SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\tcpw_test\tcpp_test\t3\t7\tworking\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>'
 ok "save accepts a snapshot"            'cockpit_layout_save "$SNAP"'
 ok "load returns it verbatim"           '[[ "$(cockpit_layout_load)" == "$SNAP" ]]'
 ok "single quotes survive storage"      'cockpit_layout_load | grep -q "with .quotes. and, commas"'
 ok "empty fields round-trip as <nil>"   'cockpit_layout_load | grep -qP "^1\tworkspace-b\t<nil>"'
+ok "controller identity survives storage" 'cockpit_layout_load | grep -q $'"'"'cpw_test\tcpp_test\t3\t7\tworking'"'"'$'
 ok "empty snapshot is refused"          '! cockpit_layout_save ""'
 SNAP2=${SNAP/workspace-a/workspace-z}
 cockpit_layout_save "$SNAP2" >/dev/null
@@ -60,6 +61,16 @@ sleep 2
 ok "window survives a failed launch"    '[[ -n "$(tmux -L cktest list-windows -t cktest -F "#{window_name}" 2>/dev/null | grep -x solo)" ]]'
 ok "failure is visible in the pane"     'tmux -L cktest capture-pane -p -t cktest 2>/dev/null | grep -q "launch failed"'
 tmux -L cktest kill-server 2>/dev/null
+
+echo "== fix 4: Codex bulk starts can be staggered without delaying other agents"
+INNER='cd /tmp && exec codex resume 019f-test'
+FIRST=$(COCKPIT_CODEX_STAGGER_SECS=3 cockpit_stagger_agent_command codex 0 "$INNER")
+THIRD=$(COCKPIT_CODEX_STAGGER_SECS=3 cockpit_stagger_agent_command codex 2 "$INNER")
+CLAUDE=$(COCKPIT_CODEX_STAGGER_SECS=3 cockpit_stagger_agent_command claude 9 'exec claude')
+ok "first Codex launch is immediate"    '[[ "$FIRST" == "$INNER" ]]'
+ok "later Codex launch gets ordinal delay" 'grep -q "sleep 6" <<<"$THIRD"'
+ok "queued launch explains its delay"  'grep -q "startup.*queued.*6s" <<<"$THIRD"'
+ok "Claude launch is never staggered"  '[[ "$CLAUDE" == "exec claude" ]]'
 
 echo "== control: the OLD behaviour would have lost that window"
 tmux -L cktest new-session -d -s cktest -n solo -x 120 -y 30 "bash -lc $(printf %q "cd $T/work && exec false")"

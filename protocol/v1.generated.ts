@@ -5,7 +5,6 @@ export type ErrorCode =
   | "PERMISSION_DENIED" | "CAPABILITY_ABSENT" | "TARGET_NOT_FOUND" | "TARGET_GONE"
   | "CONFLICT_VERSION" | "CONFLICT_GENERATION" | "CONFLICT_MATERIAL_STATE"
   | "IDEMPOTENCY_CONFLICT" | "IDEMPOTENCY_EXPIRED" | "DEADLINE_EXCEEDED" | "CANCELLED"
-  | "PANE_OPERATOR_ACTIVE" | "PANE_COMPOSING"
   | "CONTROLLER_NOT_READY" | "INTERNAL";
 export interface PaneExpectation { kind: "pane"; paneRef: `cpp_${string}`; generation: number; resourceVersion: number; material: { lifecycle: "active"; observedState?: "waiting" | "working" | "paused" } }
 export interface BadgeRequest { protocol: "1.0"; deadline: string; idempotencyKey: `ik_${number}_${string}`; paneRef: `cpp_${string}`; badge: string; expectations: [PaneExpectation] }
