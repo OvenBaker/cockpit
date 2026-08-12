@@ -144,7 +144,9 @@ case "${1:-remove}" in
       # That is cockpit-ws's model, so this writes cockpit-ws's state shape, declares the `ws`
       # undo kind and detaches cockpit-ws's OWN reaper — the dispatcher routes on @undo_kind,
       # so pane-shaped state under the ws kind would leave Alt-u inert with no visible cause.
-      if (( $($TMUX list-windows -t "$COCKPIT_SESSION" -F x 2>/dev/null | wc -l) <= 1 )); then
+      # Survivors, not raw windows: closes already counting down are still listed
+      # by tmux, so counting them would let a burst release the whole grid.
+      if (( $(cockpit_ws_open_count) <= 1 )); then
         echo "cockpit-pane release: $win is the last window in '$COCKPIT_SESSION'" >&2
         exit "$RELEASE_E_LASTWIN"
       fi
@@ -152,7 +154,7 @@ case "${1:-remove}" in
       $TMUX set -w -t "$win" @origname "$name"
       $TMUX set -w -t "$win" @closing  "$tok"
       $TMUX rename-window -t "$win" "✗ $name"
-      $TMUX set -g @undo_kind ws; $TMUX set -g @undo_win "$win"; $TMUX set -g @undo_tok "$tok"
+      cockpit_ws_undo_push "$win" "$tok"
       # Switch away ONLY when the released window is the one in view. A release fired from
       # Orbital routinely targets a workspace nobody is looking at; moving the operator's
       # view then would be a surprise with no cause they can see.

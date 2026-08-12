@@ -5,6 +5,8 @@
 #                        (if a cockpit is already running, attaches to it)
 #   cockpit --fresh      ignore the saved layout; pick sessions fresh
 #   cockpit --restore    force-restore the saved layout
+#   cockpit --history    list saved snapshots (id, time, panes, workspaces)
+#   cockpit --restore-id ID   force-restore one specific snapshot from --history
 #   cockpit --save       snapshot the running grid's layout to disk now
 #   cockpit --santa      pick sessions in santa's TUI (resume → cockpit)
 #   cockpit --rebuild    tear down a running cockpit, then build a fresh one
@@ -49,6 +51,7 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --rebuild) REBUILD=1;; --auto) AUTO=1;; --santa) SANTA=1;;
   --restore) RESTORE=1;; --fresh) FRESH=1;; --save) MODE=save;; -n) N="$2"; shift;;
   --history) MODE=history;; --restore-from) RESTORE=1; RESTORE_BACK="$2"; shift;;
+  --restore-id) RESTORE=1; RESTORE_ID="$2"; shift;;
   *) echo "unknown arg: $1" >&2; exit 2;; esac; shift; done
 PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
 # Saved layout (written by the poller); survives reboot. Now an append-only
@@ -312,7 +315,12 @@ build_from_cand() {
 restore_grid() {
   local back="${1:-0}" snap
   cockpit_layout_import_legacy "$LEGACY_STATE"
-  snap=$(cockpit_layout_load "$back") || return 1
+  if [[ -n "${RESTORE_ID:-}" ]]; then
+    snap=$(cockpit_layout_load_id "$RESTORE_ID") \
+      || { echo "cockpit: no snapshot $RESTORE_ID for session '$COCKPIT_SESSION' (see: cockpit --history)" >&2; return 1; }
+  else
+    snap=$(cockpit_layout_load "$back") || return 1
+  fi
   [[ -n "$snap" ]] || return 1
   local active="" first=1 curwin="" awin="" i n resumable=0 duplicates=0 key duplicate_noun
   declare -a W S C L A WR PR PG PV B; local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11
@@ -396,6 +404,32 @@ restore_grid() {
   return 0
 }
 
+# The layout store is append-only, so the grid that vanished is still on disk —
+# but restore takes the NEWEST snapshot, and the newest snapshot of a grid that
+# just lost 23 workspaces is a grid with one workspace. That is how a recoverable
+# hour became an unrecoverable morning on 2026-08-12: cockpit rebuilt the wreck
+# without a word, and only the operator knew anything was missing.
+# So: before building anything, compare what we're about to restore against the
+# richest layout in recent history. A shrink can be deliberate (workspaces do get
+# closed), so this never switches silently — it says what it found and, at a
+# terminal, offers the fuller snapshot. Skipped when the operator named an id.
+restore_shrink_check() {
+  local back="${1:-0}" cid cws cpanes pid pws ppanes ans
+  IFS=$'\t' read -r cid cws cpanes < <(cockpit_layout_stats "$back") || return 0
+  IFS=$'\t' read -r pid pws ppanes < <(cockpit_layout_peak 30) || return 0
+  [[ "$cws" =~ ^[0-9]+$ && "$pws" =~ ^[0-9]+$ ]] || return 0
+  (( cws > 0 && pid != cid && pws >= cws * 2 && pws - cws >= 2 )) || return 0
+  echo "cockpit: the newest layout has $cws workspace(s) / $cpanes pane(s)," >&2
+  echo "         but snapshot $pid has $pws / $ppanes — something closed the grid, not you?" >&2
+  if [[ -t 0 && -t 1 ]]; then
+    printf '         [r] restore snapshot %s instead   [k] keep the newest  (k in 20s): ' "$pid" >&2
+    read -r -t 20 -n 1 ans </dev/tty || true; echo >&2
+    [[ "${ans:-}" == [rR] ]] && { RESTORE_ID="$pid"; echo "cockpit: restoring snapshot $pid" >&2; }
+  else
+    echo "         restore it with: cockpit --restore-id $pid" >&2
+  fi
+}
+
 # ---- orchestrate: restore the saved layout, else pick fresh ----
 # Default plain `cockpit` auto-restores when a layout exists; --fresh/--auto/
 # --santa force a fresh pick, --restore forces restore.
@@ -405,6 +439,7 @@ if [[ "$RESTORE" == 1 ]]; then want_restore=1
 elif [[ "$SANTA" == 0 && "$AUTO" == 0 && "$FRESH" == 0 ]] && cockpit_layout_load >/dev/null 2>&1; then want_restore=1; fi
 
 if (( want_restore )); then
+  [[ -n "${RESTORE_ID:-}" ]] || restore_shrink_check "${RESTORE_BACK:-0}"
   restore_grid "${RESTORE_BACK:-0}" && launch_and_attach     # success → never returns
   [[ "$RESTORE" == 1 ]] && echo "cockpit: no saved layout to restore — starting fresh" >&2
 fi

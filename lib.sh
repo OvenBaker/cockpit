@@ -238,11 +238,31 @@ cockpit_layout_save() {
 # Emitting the same shape the poller captures keeps restore's parser the single
 # reader of that format.
 cockpit_layout_load() {
-  local back="${1:-0}" sess="${COCKPIT_SESSION}" TAB=$'\t' NIL='<nil>' sid
+  local back="${1:-0}" sess="${COCKPIT_SESSION}" sid
   [[ -f "$COCKPIT_LAYOUT_DB" ]] || return 1
   sid=$(sqlite3 "$COCKPIT_LAYOUT_DB" \
     "SELECT id FROM snapshots WHERE session=$(ck_sqesc "$sess") ORDER BY at DESC, id DESC LIMIT 1 OFFSET $back;" 2>/dev/null)
   [[ -n "$sid" ]] || return 1
+  cockpit_layout_emit "$sid"
+}
+
+# Same, addressed by the snapshot id `cockpit --history` prints. An OFFSET is a
+# moving target — the poller appends while you are deciding, so the "3 back" you
+# read is not the "3 back" you restore. The id never moves, which is what you
+# want when the snapshot you are reaching for is the one good grid in the list.
+cockpit_layout_load_id() {
+  local id="${1:-}" sess="${COCKPIT_SESSION}" sid
+  [[ -f "$COCKPIT_LAYOUT_DB" && "$id" =~ ^[0-9]+$ ]] || return 1
+  sid=$(sqlite3 "$COCKPIT_LAYOUT_DB" \
+    "SELECT id FROM snapshots WHERE id=$id AND session=$(ck_sqesc "$sess");" 2>/dev/null)
+  [[ -n "$sid" ]] || return 1
+  cockpit_layout_emit "$sid"
+}
+
+# Shared row emitter for both addressing modes above. $1 is a snapshot id that
+# the caller has already resolved (and confirmed belongs to this session).
+cockpit_layout_emit() {
+  local sid="$1" TAB=$'\t' NIL='<nil>'
   sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
     "SELECT '@active', active FROM snapshots WHERE id=$sid;" 2>/dev/null
   sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
@@ -257,6 +277,33 @@ cockpit_layout_load() {
             CASE WHEN pane_version='' THEN '$NIL' ELSE pane_version END,
             CASE WHEN badge='' THEN '$NIL' ELSE badge END
      FROM panes WHERE snapshot_id=$sid ORDER BY seq;" 2>/dev/null
+}
+
+# "id<TAB>workspaces<TAB>panes" for the snapshot at offset $1 (0 = newest).
+cockpit_layout_stats() {
+  local back="${1:-0}" sess="${COCKPIT_SESSION}" TAB=$'\t'
+  [[ -f "$COCKPIT_LAYOUT_DB" ]] || return 1
+  sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
+    "SELECT s.id, COUNT(DISTINCT p.workspace), COUNT(p.seq)
+     FROM snapshots s LEFT JOIN panes p ON p.snapshot_id=s.id
+     WHERE s.session=$(ck_sqesc "$sess")
+     GROUP BY s.id ORDER BY s.at DESC, s.id DESC LIMIT 1 OFFSET $back;" 2>/dev/null
+}
+
+# Same shape, for the RICHEST of the last $1 snapshots (most workspaces, then most
+# panes). Restore uses this to notice that the layout it is about to rebuild is a
+# fraction of a grid that existed an hour ago — the shape of a mass-close or a
+# half-failed restore, which is otherwise invisible until the workspaces are gone.
+cockpit_layout_peak() {
+  local lim="${1:-30}" sess="${COCKPIT_SESSION}" TAB=$'\t'
+  [[ -f "$COCKPIT_LAYOUT_DB" ]] || return 1
+  sqlite3 -separator "$TAB" "$COCKPIT_LAYOUT_DB" \
+    "SELECT id, ws, panes FROM (
+       SELECT s.id AS id, COUNT(DISTINCT p.workspace) AS ws, COUNT(p.seq) AS panes, s.at AS at
+       FROM snapshots s LEFT JOIN panes p ON p.snapshot_id=s.id
+       WHERE s.session=$(ck_sqesc "$sess")
+       GROUP BY s.id ORDER BY s.at DESC, s.id DESC LIMIT $lim)
+     ORDER BY ws DESC, panes DESC, id DESC LIMIT 1;" 2>/dev/null
 }
 
 # One-time adoption of the pre-SQLite TSV so an upgrade doesn't start blind.
@@ -276,6 +323,69 @@ cockpit_cur_window() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} w
   w=$($tmux display -p -t "$COCKPIT_SESSION" '#{window_id}' 2>/dev/null)
   echo "${w:-$COCKPIT_SESSION:0}"
+}
+
+# --- soft-close bookkeeping -------------------------------------------------
+# How many workspaces would SURVIVE the closes already in flight. A window marked
+# @closing is still a live tmux window for the whole grace period, and a window
+# marked @graveyard is a holding pen for a removed pane, not a workspace — so
+# counting raw `list-windows` overstates what's left. That overstatement is what
+# made "can't close the last workspace" a guard in name only: hold Alt-W down and
+# every press sees all 24 windows still standing, marks another one, and moves on,
+# until the whole grid is counting down at once (2026-08-12: 23 lost that way).
+cockpit_ws_open_count() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} n=0 closing graveyard
+  while IFS=$'\t' read -r closing graveyard; do
+    [[ -z "$closing" && -z "$graveyard" ]] && n=$((n+1))
+  done < <($tmux list-windows -t "$COCKPIT_SESSION" -F "#{@closing}"$'\t'"#{@graveyard}" 2>/dev/null)
+  printf '%s' "$n"
+}
+
+# Pending-close undo STACK ("window_id:token" entries, newest last). This was a
+# single global slot, so N closes inside one grace period left only the newest
+# recoverable and orphaned the other N-1 while they were still alive and undoable.
+# @undo_win/@undo_tok are kept as a mirror of the top entry: they are the legacy
+# read path and what tests/pane-release.sh asserts against.
+cockpit_ws_undo_push() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} win="$1" tok="$2" stack
+  stack=$($tmux show -gqv @undo_ws_stack 2>/dev/null)
+  $tmux set -g @undo_ws_stack "${stack:+$stack }$win:$tok"
+  $tmux set -g @undo_kind ws; $tmux set -g @undo_win "$win"; $tmux set -g @undo_tok "$tok"
+}
+
+# Print "window_id<TAB>token" for the newest entry that is STILL a pending close,
+# dropping it and any stale entries above it. A window that was already reaped or
+# re-closed carries a different @closing token, so a stale entry can never
+# resurrect it. Returns 1 when nothing is recoverable.
+cockpit_ws_undo_pop() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} entry win tok
+  local -a stack=()
+  read -r -a stack <<<"$($tmux show -gqv @undo_ws_stack 2>/dev/null)"
+  while (( ${#stack[@]} )); do
+    entry="${stack[-1]}"; unset 'stack[-1]'
+    win="${entry%%:*}"; tok="${entry#*:}"
+    if [[ -n "$win" && -n "$tok" && "$($tmux show -wqv -t "$win" @closing 2>/dev/null)" == "$tok" ]]; then
+      $tmux set -g @undo_ws_stack "${stack[*]-}"
+      # re-point the legacy mirror at the new top (empty once the stack is drained)
+      local top="${stack[-1]-}"
+      $tmux set -g @undo_win "${top%%:*}"; $tmux set -g @undo_tok "${top#*:}"
+      printf '%s\t%s' "$win" "$tok"; return 0
+    fi
+  done
+  $tmux set -g @undo_ws_stack ""; $tmux set -g @undo_win ""; $tmux set -g @undo_tok ""
+  return 1
+}
+
+# How many closes are still pending and recoverable — what Alt-u has left to give.
+cockpit_ws_undo_pending() {
+  local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} entry win tok n=0
+  local -a stack=()
+  read -r -a stack <<<"$($tmux show -gqv @undo_ws_stack 2>/dev/null)"
+  for entry in "${stack[@]}"; do
+    win="${entry%%:*}"; tok="${entry#*:}"
+    [[ -n "$win" && -n "$tok" && "$($tmux show -wqv -t "$win" @closing 2>/dev/null)" == "$tok" ]] && n=$((n+1))
+  done
+  printf '%s' "$n"
 }
 
 # Resolve a target workspace WINDOW id by name: reuse if it exists, else create
