@@ -99,7 +99,7 @@ if $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
   if [[ "$SANTA" == 1 ]]; then
     echo "cockpit: opening santa — resume sends sessions into the grid…" >&2
     SANTA_RESUME_CMD="$HERE/cockpit-send" SANTA_RESUME_LABEL=cockpit PATH="$HERE/shim:$PATH" \
-      COCKPIT_SEND="$HERE/cockpit-send" COCKPIT_TMUX="$TMUX" santa tui || true
+      COCKPIT_SEND="$HERE/cockpit-send" COCKPIT_TMUX="$TMUX" santa tui --provider cuda || true
     exec $TMUX attach -t "$COCKPIT_SESSION"
   fi
   echo "cockpit already running — attaching. ( --rebuild to re-pick · --santa to browse · --kill to tear down )" >&2
@@ -117,7 +117,7 @@ select_cand() {
     : > "$PENDING"
     echo "cockpit: browse in santa, hit resume on the sessions you want, then quit the TUI." >&2
     SANTA_RESUME_CMD="$HERE/cockpit-send" SANTA_RESUME_LABEL=cockpit PATH="$HERE/shim:$PATH" \
-      COCKPIT_SEND="$HERE/cockpit-send" COCKPIT_TMUX="$TMUX" santa tui || true
+      COCKPIT_SEND="$HERE/cockpit-send" COCKPIT_TMUX="$TMUX" santa tui --provider cuda || true
     mapfile -t CAND < <(awk -F'\t' 'NF>=2 && !seen[$1]++ {print}' "$PENDING" 2>/dev/null)
     [[ ${#CAND[@]} -gt 0 ]] || { echo "no sessions chosen in santa" >&2; return 1; }
   elif [[ "$AUTO" == 1 || ! -t 0 || ! -t 1 ]]; then
@@ -182,7 +182,7 @@ apply_chrome() {
   $TMUX bind -n M-f   display-popup -E -w 88 -h 22 "$HERE/cockpit-related #{pane_id}"
   # browse in santa's TUI; its resume key drops the session into the grid
   $TMUX bind -n M-s   display-popup -E -w 95% -h 90% \
-    "SANTA_RESUME_CMD=$HERE/cockpit-send SANTA_RESUME_LABEL=cockpit PATH=$HERE/shim:\$PATH COCKPIT_SEND=$HERE/cockpit-send COCKPIT_TMUX='$TMUX' santa tui"
+    "SANTA_RESUME_CMD=$HERE/cockpit-send SANTA_RESUME_LABEL=cockpit PATH=$HERE/shim:\$PATH COCKPIT_SEND=$HERE/cockpit-send COCKPIT_TMUX='$TMUX' santa tui --provider cuda"
   $TMUX bind -n M-x   run-shell "$HERE/cockpit-pane remove"
   $TMUX bind    x     run-shell "$HERE/cockpit-pane remove"   # C-b x → same recoverable kill
   # Swallow C-z: panes are `exec claude`, so an accidental Ctrl+Z suspends the agent

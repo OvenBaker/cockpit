@@ -38,6 +38,7 @@ declare -A LASTSTATE  # pane_id -> last @state written (setting it repaints the 
 declare -A PREV_WCOUNT # window_id -> last pane count (re-tile that window on change)
 declare -A LASTWS     # window_id -> last @ws_badge written (workspace tab colour)
 declare -A ADOPTED    # session id -> already claimed by a pane (Alt-N new sessions)
+declare -A LASTACT    # pane_id -> last @activity_at written (skip redundant writes)
 prev_counts=""        # last @active/@finished/@idle trio written (skip no-op status writes)
 # Labels are stamped once at pane creation, often from a fallback (first prompt)
 # before santa has summarised the session. Re-query the DB occasionally
@@ -130,14 +131,30 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
       [[ -n "$sid" ]] || continue        # still pending, or a bare scratch shell — skip
     fi
     [[ -n "${LASTLABEL[$pid]:-}" ]] || LASTLABEL[$pid]="$curlabel"   # seed from what's on the border
+    # Transcript location + last-write time are computed EVERY cycle, not only on
+    # classify fallback: @activity_at (stamped below) makes "when did this pane
+    # last actually produce anything" queryable, where before it survived only as
+    # prose inside the badge string.
+    jsonl=$(agent_transcript "$agent" "$sid" "$cwd")
+    mtime=0; [[ -n "$jsonl" && -f "$jsonl" ]] && mtime=$(stat -c %Y "$jsonl" 2>/dev/null || echo 0)
     # Event-driven state (cockpit-hook) is authoritative when fresh; otherwise
-    # fall back to tail-parsing the transcript (covers codex, pre-hook sessions,
-    # and any missed edge once the hook state goes stale).
-    if [[ -n "$hookstate" ]] && (( now - ${hookat:-0} <= HOOK_TTL )); then
+    # fall back to tail-parsing the transcript (pre-hook sessions, and any missed
+    # edge once the hook state goes stale). Codex is a separate contract: its only
+    # hook event is turn-complete → idle, so the stamp wins exactly while the
+    # rollout hasn't moved past it — a stamp newer than the last transcript write
+    # means the turn ENDED even when the last recorded boundary still says
+    # task_started (the stuck-working-forever case), and a newer transcript write
+    # means a new turn the hook cannot see, so classify wins. No TTL on the codex
+    # idle stamp: idle stays idle until the rollout moves again.
+    if [[ "$agent" == codex && "$hookstate" == idle ]] && (( mtime <= ${hookat:-0} )); then
+      raw=idle; age=$(( now - ${hookat:-now} ))
+    elif [[ "$agent" != codex && -n "$hookstate" ]] && (( now - ${hookat:-0} <= HOOK_TTL )); then
       raw="$hookstate"; age=$(( now - ${hookat:-now} ))
     else
-      jsonl=$(agent_transcript "$agent" "$sid" "$cwd")
-      raw=$(agent_classify "$agent" "$jsonl"); age=$(idle_seconds "$jsonl")
+      raw=$(agent_classify "$agent" "$jsonl"); age=$(( now - mtime ))
+    fi
+    if [[ "${LASTACT[$pid]:-}" != "$mtime" ]]; then
+      $TMUX set -p -t "$pid" @activity_at "$mtime"; LASTACT[$pid]="$mtime"
     fi
 
     state="$raw"

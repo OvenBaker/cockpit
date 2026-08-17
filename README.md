@@ -38,7 +38,7 @@ discovery dispatch per provider:
 |---|---|---|
 | transcripts | `~/.claude/projects/**/<id>.jsonl` | `~/.codex/sessions/**/rollout-*-<id>.jsonl` |
 | done signal | `end_turn` | `event_msg/task_complete` |
-| resume | `claude --resume <id>` | `codex resume <id>` |
+| resume | `claude --resume <id>` | `codex --sandbox danger-full-access --ask-for-approval on-request -c approvals_reviewer=auto_review resume <id>` |
 
 The picker, candidates, and restore merge both by recency (tagged `cl`/`cx`);
 `Alt-N` asks which agent to start. Cross-agent search/`related` in santa is a

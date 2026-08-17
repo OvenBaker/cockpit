@@ -57,7 +57,7 @@ retarget_pane() {
 spawn_new() {
   local W="$1" cwd="$2" agent="${3:-claude}" name="${4:-}" cmd act actsid pane launch
   case "$agent" in
-    codex) launch="exec codex";;
+    codex) launch="exec codex$(cockpit_codex_launch_args)";;
     shell) launch="exec bash -l";;
     *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;   # RC on: steerable from the app
   esac

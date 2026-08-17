@@ -191,10 +191,13 @@ func TestMCPStatusFailsClosedAndLiteralTextSubmits(t *testing.T) {
 	if strings.Contains(string(after[len(before):]), "send-keys") {
 		t.Fatal("unknown observed state delivered terminal input")
 	}
+	// needs-input is surfaced as itself (it is the state that means "a human
+	// must act") but stays uninteractable: a modal is capturing keys, so no
+	// interaction capability may ever be advertised for it.
 	run(t, "tmux", "-L", f.tmux, "set-option", "-p", "-t", f.targetPane, "@state", "needs-input")
-	legacyAttention := mcpOneCall(t, f, "get_status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)["structuredContent"].(map[string]any)
-	if legacyAttention["provider"] != "claude" || legacyAttention["observedState"] != "unknown" || mcpHasCapability(legacyAttention, "interaction:nudge") {
-		t.Fatalf("legacy needs-input was admitted as an interaction state: %#v", legacyAttention)
+	attention := mcpOneCall(t, f, "get_status", map[string]any{"paneRef": f.pane["paneRef"]})["result"].(map[string]any)["structuredContent"].(map[string]any)
+	if attention["provider"] != "claude" || attention["observedState"] != "needs-input" || mcpHasCapability(attention, "interaction:nudge") {
+		t.Fatalf("needs-input must surface as itself with no interaction capability: %#v", attention)
 	}
 
 	output := filepath.Join(f.root, "literal-input")

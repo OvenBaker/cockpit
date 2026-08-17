@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -306,12 +307,54 @@ func (d *daemon) Serve() error {
 		go d.maintainProjection(maintenanceStop)
 		defer close(maintenanceStop)
 	}
+	// Watchdog: the 2026-08-16 outage was a listener whose fd died underneath a
+	// blocked Accept — the process stayed "active" for days while every client
+	// got connection refused, and neither systemd nor controller.health could
+	// tell (health needs the socket it was probing). Probe our own socket; if
+	// it stops accepting while we still believe we are serving, close the
+	// listener — Close wakes the blocked Accept even when the underlying fd was
+	// closed out from under Go's poller — so Serve returns an error, main exits,
+	// and Restart=on-failure brings up a daemon that actually listens.
+	watchdogStop := make(chan struct{})
+	go d.watchListener(l, watchdogStop)
+	defer close(watchdogStop)
 	for {
 		c, e := l.Accept()
 		if e != nil {
 			return e
 		}
 		go d.handle(c)
+	}
+}
+
+func (d *daemon) watchListener(l net.Listener, stop <-chan struct{}) {
+	failures := 0
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			c, err := net.DialTimeout("unix", d.socket, 2*time.Second)
+			if err == nil {
+				_ = c.Close()
+				failures = 0
+				continue
+			}
+			d.lifeMu.Lock()
+			closed := d.closed
+			d.lifeMu.Unlock()
+			if closed {
+				return
+			}
+			failures++
+			if failures >= 3 {
+				fmt.Fprintf(os.Stderr, "cockpit-core: control socket stopped accepting (%v); closing listener so the daemon restarts instead of serving nothing\n", err)
+				_ = l.Close()
+				return
+			}
+		}
 	}
 }
 
@@ -1345,8 +1388,19 @@ func (p pane) view() map[string]any {
 		if p.State == "paused" {
 			capabilities = append(capabilities, "interaction:resume")
 		}
+		// needs-input deliberately grants NO interaction capability: it means a
+		// modal is capturing keys, and typing into it acts on the dialog. The
+		// state itself is surfaced (it is the one that means "a human must act"),
+		// the pane just cannot be driven out of it remotely.
 	}
-	return map[string]any{"paneRef": p.Ref, "workspaceRef": p.WorkspaceRef, "generation": p.Generation, "resourceVersion": p.Version, "lifecycle": lifecycle, "provider": p.Provider, "observedState": p.State, "locator": map[string]any{"paneId": p.PaneID, "windowId": p.WindowID}, "display": map[string]any{"badge": p.Badge}, "capabilities": capabilities}
+	v := map[string]any{"paneRef": p.Ref, "workspaceRef": p.WorkspaceRef, "generation": p.Generation, "resourceVersion": p.Version, "lifecycle": lifecycle, "provider": p.Provider, "observedState": p.State, "locator": map[string]any{"paneId": p.PaneID, "windowId": p.WindowID}, "display": map[string]any{"badge": p.Badge}, "capabilities": capabilities}
+	if p.Detail != "" {
+		v["observedDetail"] = p.Detail
+	}
+	if p.ActivityAt > 0 {
+		v["lastActivityAt"] = p.ActivityAt
+	}
+	return v
 }
 
 // Provider and observed state are deliberately not client writable and are not
@@ -1356,41 +1410,58 @@ func (p pane) view() map[string]any {
 func (d *daemon) observePane(p pane) pane {
 	provider, pe := d.tm.paneOption(p.PaneID, "@agent")
 	state, se := d.tm.paneOption(p.PaneID, "@state")
+	activity, ae := d.tm.paneOption(p.PaneID, "@activity_at")
 	if pe == nil && (provider == "claude" || provider == "codex") {
 		p.Provider = provider
 	} else {
 		p.Provider = "unknown"
 	}
-	// Cockpit's idle and just-finished projections are both settled provider
-	// turns. The latter is only an attention latch applied after idle, so they
-	// share the V1 waiting material state. needs-input/dead and missing values
-	// intentionally remain unavailable to typed interactions.
-	if se == nil && (state == "idle" || state == "just-finished") {
-		p.State = "waiting"
-	} else if se == nil && (state == "working" || state == "paused") {
-		p.State = state
-	} else {
-		p.State = "unknown"
+	p.State, p.Detail = materialState(se == nil, state)
+	if ae == nil {
+		if n, err := strconv.ParseInt(activity, 10, 64); err == nil && n > 0 {
+			p.ActivityAt = n
+		}
 	}
 	return p
+}
+
+// materialState maps the poller's raw @state onto the controller vocabulary.
+// idle and just-finished are both settled provider turns (the latter is only an
+// attention latch applied after idle), so they share the V1 waiting material
+// state — the raw value survives as Detail. needs-input is first-class: it is
+// the one state that means "a human must act", so erasing it to unknown made a
+// waiting-on-operator classifier impossible; it still carries no interaction
+// capabilities (see view). dead and missing values fail closed as unknown.
+func materialState(known bool, raw string) (state, detail string) {
+	if !known {
+		return "unknown", ""
+	}
+	switch raw {
+	case "idle", "just-finished":
+		return "waiting", raw
+	case "working", "paused", "needs-input":
+		return raw, raw
+	default:
+		return "unknown", ""
+	}
 }
 
 // observeAll applies observePane's mapping to a whole inventory from ONE tmux read rather than two option
 // reads per pane. A grid of forty panes is an ordinary size here, so the per-pane form would turn every
 // snapshot into eighty subprocess round-trips.
 func (d *daemon) observeAll(ps []pane) ([]pane, error) {
-	b, err := d.tm.run("list-panes", "-a", "-F", "#{@cockpit_pane_ref}\t#{@agent}\t#{@state}")
+	b, err := d.tm.run("list-panes", "-a", "-F", "#{@cockpit_pane_ref}\t#{@agent}\t#{@state}\t#{@activity_at}")
 	if err != nil {
 		return nil, err
 	}
-	type observation struct{ provider, state string }
+	type observation struct{ provider, state, activity string }
 	live := map[string]observation{}
 	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) != 3 || f[0] == "" {
+		if len(f) != 4 || f[0] == "" {
 			continue
 		}
-		live[f[0]] = observation{provider: f[1], state: f[2]}
+		live[f[0]] = observation{provider: f[1], state: f[2], activity: f[3]}
 	}
 	out := make([]pane, 0, len(ps))
 	for _, p := range ps {
@@ -1402,12 +1473,11 @@ func (d *daemon) observeAll(ps []pane) ([]pane, error) {
 		} else {
 			p.Provider = "unknown"
 		}
-		if known && (got.state == "idle" || got.state == "just-finished") {
-			p.State = "waiting"
-		} else if known && (got.state == "working" || got.state == "paused") {
-			p.State = got.state
-		} else {
-			p.State = "unknown"
+		p.State, p.Detail = materialState(known, got.state)
+		if known {
+			if n, err := strconv.ParseInt(got.activity, 10, 64); err == nil && n > 0 {
+				p.ActivityAt = n
+			}
 		}
 		out = append(out, p)
 	}

@@ -9,12 +9,14 @@
 #
 # Wired from ~/.claude/settings.json. Invoked as:
 #   cockpit-hook working          # UserPromptSubmit
+#   cockpit-hook heartbeat        # PostToolUse — refreshes @hook_at mid-turn so the
+#                                 # stamp is a liveness signal, not a turn-start time
 #   cockpit-hook idle             # Stop (main turn ended)
 #   cockpit-hook needs-input      # (direct)
 #   cockpit-hook notification     # Notification — reads stdin JSON for the type
 #   cockpit-hook session-start    # SessionStart
 #   cockpit-hook session-end      # SessionEnd (clears hook state → poller reclassifies)
-#   cockpit-hook codex-notify [json]   # Codex `notify` program (future; arg/stdin = JSON)
+#   cockpit-hook codex-notify [json]   # Codex `notify` program (~/.codex/config.toml; arg = JSON)
 set -uo pipefail
 
 # Which tmux -L socket is cockpit's. Overridable so tests can run on a throwaway
@@ -112,6 +114,13 @@ seed_touch() {  # $1 = working|session-end   (never exits; state stamping contin
 
 case "$ev" in
   working)        seed_touch working; stamp working;;
+  # PostToolUse: a tool just completed, so the turn is demonstrably alive. Refresh
+  # the stamp (state working, fresh @hook_at) so "hook says working but @hook_at is
+  # old" comes to mean "no tool has finished since", which is what stall detection
+  # needs — instead of "the turn merely STARTED long ago", which is what made every
+  # long turn cross HOOK_TTL and misread as needs-input. Skips seed_touch (only a
+  # first prompt can accept a seed) and the session-id restamp (working covers it).
+  heartbeat)      stamp working;;
   idle|stop)      stamp idle;;
   needs-input)    stamp needs-input;;
   session-start)  stamp idle;;       # fresh/resumed session waiting for a prompt
@@ -128,8 +137,10 @@ case "$ev" in
       *) exit 0;;
     esac;;
   codex-notify)
-    # Codex notify program (not wired yet — Codex stays on rollout classify because
-    # its only event is turn-complete, which alone would read as idle mid-turn).
+    # Codex notify program (wired via ~/.codex/config.toml `notify`). Its only
+    # event is turn-complete → idle; the poller trusts the stamp only while the
+    # rollout hasn't been written past it, so a new turn (which fires no hook)
+    # can never sit misread as idle — see the codex branch in cockpit-poller.
     j="${2:-}"; [[ -z "$j" ]] && j=$(cat 2>/dev/null || true)
     ty=""; command -v jq >/dev/null 2>&1 && ty=$(printf '%s' "$j" | jq -r '.type // empty' 2>/dev/null || true)
     case "$ty" in agent-turn-complete) stamp idle;; *) exit 0;; esac;;
