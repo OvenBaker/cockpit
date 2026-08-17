@@ -58,8 +58,15 @@ func id(prefix string) string {
 
 type pane struct {
 	Ref, WorkspaceRef, WindowID, PaneID, Badge, Provider, State string
-	Generation, Version                                         int64
-	Fenced                                                      bool
+	// Observation-only fields, never persisted: Detail is the poller's raw
+	// @state (idle | just-finished | needs-input | working | paused | dead),
+	// which the material State projection deliberately coarsens; ActivityAt is
+	// the poller-stamped @activity_at (unix seconds of the transcript's last
+	// write), 0 when unstamped.
+	Detail     string
+	ActivityAt int64
+	Generation, Version int64
+	Fenced              bool
 }
 type workspace struct {
 	Ref, WindowID, Name string
