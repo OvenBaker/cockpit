@@ -172,7 +172,7 @@ cockpit_snapshot() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
   printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
   $tmux list-panes -s -t "$COCKPIT_SESSION" -f '#{==:#{@orderly},}' \
-    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@cockpit_workspace_ref,#{@cockpit_workspace_ref},$NIL}${TAB}#{?@cockpit_pane_ref,#{@cockpit_pane_ref},$NIL}${TAB}#{?@cockpit_pane_generation,#{@cockpit_pane_generation},$NIL}${TAB}#{?@cockpit_pane_version,#{@cockpit_pane_version},$NIL}${TAB}#{?@cockpit_badge,#{@cockpit_badge},$NIL}" 2>/dev/null |
+    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@cockpit_workspace_ref,#{@cockpit_workspace_ref},$NIL}${TAB}#{?@cockpit_pane_ref,#{@cockpit_pane_ref},$NIL}${TAB}#{?@cockpit_pane_generation,#{@cockpit_pane_generation},$NIL}${TAB}#{?@cockpit_pane_version,#{@cockpit_pane_version},$NIL}${TAB}#{?@cockpit_badge,#{@cockpit_badge},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}" 2>/dev/null |
     awk -F "$TAB" -v nil="$NIL" '
       $3 != nil && ($6 == "claude" || $6 == "codex") {
         key=$6 SUBSEP $3; if (seen[key]++) next
@@ -241,6 +241,7 @@ pane_ref|TEXT NOT NULL DEFAULT ''
 pane_generation|TEXT NOT NULL DEFAULT ''
 pane_version|TEXT NOT NULL DEFAULT ''
 badge|TEXT NOT NULL DEFAULT ''
+orb_server_file|TEXT NOT NULL DEFAULT ''
 COLUMNS
 }
 
@@ -249,22 +250,22 @@ COLUMNS
 # bounded without a separate sweep.
 cockpit_layout_save() {
   local snap="$1" sess="${COCKPIT_SESSION}" NIL='<nil>' sql active="" seq=0
-  local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11
+  local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12
   [[ -n "$snap" ]] || return 1
   cockpit_layout_init
   sql="BEGIN IMMEDIATE;"
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11; do
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     [[ -n "$f1" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""
     [[ "$f5" == "$NIL" ]] && f5=""; [[ "$f6" == "$NIL" ]] && f6=""
     [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
     [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
-    [[ "$f11" == "$NIL" ]] && f11=""
-    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,workspace_ref,pane_ref,pane_generation,pane_version,badge) VALUES("
+    [[ "$f11" == "$NIL" ]] && f11=""; [[ "$f12" == "$NIL" ]] && f12=""
+    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,workspace_ref,pane_ref,pane_generation,pane_version,badge,orb_server_file) VALUES("
     sql+="(SELECT MAX(id) FROM snapshots),$seq,$(ck_sqesc "$f1"),$(ck_sqesc "$f2"),"
     sql+="$(ck_sqesc "$f3"),$(ck_sqesc "$f4"),$(ck_sqesc "$f5"),$(ck_sqesc "$f6"),"
-    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"),$(ck_sqesc "$f10"),$(ck_sqesc "$f11"));"
+    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"),$(ck_sqesc "$f10"),$(ck_sqesc "$f11"),$(ck_sqesc "$f12"));"
     seq=$((seq+1))
   done <<<"$snap"
   (( seq > 0 )) || return 1        # never persist an empty grid over a good one
@@ -317,7 +318,8 @@ cockpit_layout_emit() {
             CASE WHEN pane_ref='' THEN '$NIL' ELSE pane_ref END,
             CASE WHEN pane_generation='' THEN '$NIL' ELSE pane_generation END,
             CASE WHEN pane_version='' THEN '$NIL' ELSE pane_version END,
-            CASE WHEN badge='' THEN '$NIL' ELSE badge END
+            CASE WHEN badge='' THEN '$NIL' ELSE badge END,
+            CASE WHEN orb_server_file='' THEN '$NIL' ELSE orb_server_file END
      FROM panes WHERE snapshot_id=$sid ORDER BY seq;" 2>/dev/null
 }
 
@@ -797,12 +799,35 @@ claude_launch_cwd() {   # id cwd → a cwd that can resume this session
 # have it, else it falls back to the cwd basename. Codex is unaffected: `codex
 # resume` resolves a rollout by uuid across the whole store, so its cwd is just
 # where the work happens and carries no resolution meaning.
+# The `orb` MCP server is attached PER INVOCATION, in argv, by cockpit-seed-exec — so it lives exactly as long
+# as the process spawned with it. A resume rebuilt argv from scratch and dropped it, which is how an Orbital
+# execution came back from a WSL reboot on 2026-08-18 with its ask AND declare channels gone while its spec
+# file sat unread on disk: the session finished the work, could not say so, and left a stale
+# `blocked-on-external` declaration standing over work that was done. Nothing announced the loss, because by
+# design nothing watches for it (Orbital D-016/D-017).
+#
+# So the spec PATH rides the pane as @orb_server_file, is persisted with the layout, and is re-passed here. It
+# is re-VALIDATED at resume rather than trusted: the file may have been rotated, removed or replaced since the
+# spawn, and a spec that no longer holds is dropped silently — a session with no orb is the state we already
+# have, whereas a bad --mcp-config takes the whole resume down with it.
+cockpit_orb_resume_args() {   # agent  cwd  orb-server-file → argv fragment, %q-quoted for the bash -lc hop
+  local agent="$1" cwd="$2" file="$3" spec value
+  [[ -n "$file" ]] || return 0
+  spec=$(cockpit_orb_read_spec "$file") || return 0
+  if [[ "$agent" == codex ]]; then
+    # Codex takes the server as -c assignments, not --mcp-config, and its trust value is cwd-derived.
+    while IFS= read -r value; do printf ' -c %q' "$value"; done < <(cockpit_codex_execution_values "$cwd" "$spec")
+  else
+    printf ' --mcp-config %q' "$(jq -cn --argjson s "$spec" '{mcpServers:{orb:$s}}')"
+  fi
+}
+
 agent_resume_inner() {
-  local agent="$1" id="$2" cwd="$3" name="${4:-}"
+  local agent="$1" id="$2" cwd="$3" name="${4:-}" orb="${5:-}"
   case "$agent" in
-    codex) printf 'cd %q && exec codex%s resume %s' "$cwd" "$(cockpit_codex_launch_args)" "$id";;
+    codex) printf 'cd %q && exec codex%s%s resume %s' "$cwd" "$(cockpit_codex_launch_args)" "$(cockpit_orb_resume_args "$agent" "$cwd" "$orb")" "$id";;
     *)     cwd=$(claude_launch_cwd "$id" "$cwd")
-           printf 'cd %q && exec claude --resume %s%s' "$cwd" "$id" "$(cockpit_rc_args "$name" "$cwd")";;
+           printf 'cd %q && exec claude --resume %s%s%s' "$cwd" "$id" "$(cockpit_rc_args "$name" "$cwd")" "$(cockpit_orb_resume_args "$agent" "$cwd" "$orb")";;
   esac
 }
 

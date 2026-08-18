@@ -290,6 +290,10 @@ if [[ "$agent" == shell ]]; then
 else
   cockpit_stamp_pending_agent "$pane" "$cwd" "$name" "$agent"
 fi
+# The orb server is attached to THIS invocation's argv only (cockpit-seed-exec). Record the spec path on the
+# pane so it is persisted with the layout and re-passed on resume — otherwise the ask and declare channels are
+# lost to the first reboot, silently, while the spec file itself is still sitting on disk.
+if [[ -n "$orb_file" ]]; then $TMUX set -p -t "$pane" @orb_server_file "$orb_file"; fi
 if (( seeded )); then
   # Bind pane → request in both directions (the launcher does the same from inside the pane, whichever runs
   # first; the record update is flock-serialized and first-writer-wins).

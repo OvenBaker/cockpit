@@ -23,6 +23,11 @@ printf '%s\n' \
   "{\"type\":\"system\",\"cwd\":\"$T/work\",\"sessionId\":\"$SID\"}" \
   "{\"type\":\"assistant\",\"cwd\":\"$T/work/sub\"}" > "$PD/$SID.jsonl"
 
+# --- fixture: a valid orb MCP server spec, the shape Orbital writes per launch. cockpit_orb_read_spec
+# requires an absolute, executable command, so /bin/echo stands in for the node binary.
+ORB="$T/orb.server.json"
+printf '{"command":"/bin/echo","args":["%s/orb-mcp.mjs"],"env":{"ORB_TOKEN_FILE":"%s/orb.token"}}\n' "$T" "$T" > "$ORB"
+
 echo "== fix 1: resume cwd follows the transcript, not the drifted @cwd"
 ok "drifted cwd is corrected to the owning dir" \
    '[[ "$(claude_launch_cwd "$SID" "$T/work/sub")" == "$T/work" ]]'
@@ -39,13 +44,35 @@ ok "codex resume disables the OS sandbox" \
 ok "codex resume keeps automatic approval review" \
    'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q -- "--ask-for-approval on-request -c approvals_reviewer=auto_review"'
 
+# The orb channel is attached per invocation, in argv. A resume that rebuilds argv without it silently strips
+# an execution's ask and declare tools — which is how a session came back from a reboot unable to declare while
+# its spec file sat on disk. Re-attaching is conditional on the spec still validating.
+echo "== fix 5: a resumed session keeps the orb channel it was launched with"
+ok "claude resume re-attaches the orb server" \
+   'agent_resume_inner claude "$SID" "$T/work" x "$ORB" | grep -q -- "--mcp-config"'
+ok "the re-attached server is the recorded one" \
+   'agent_resume_inner claude "$SID" "$T/work" x "$ORB" | grep -q "orb-mcp.mjs"'
+ok "no binding leaves the resume byte-identical" \
+   '[[ "$(agent_resume_inner claude "$SID" "$T/work" x)" == "$(agent_resume_inner claude "$SID" "$T/work" x "")" ]]'
+ok "a vanished spec degrades to no orb, not a broken resume" \
+   '[[ "$(agent_resume_inner claude "$SID" "$T/work" x "$T/gone.json")" == "$(agent_resume_inner claude "$SID" "$T/work" x)" ]]'
+ok "an invalid spec is refused, not passed through" \
+   'printf "{\"command\":\"not-absolute\"}" > "$T/bad.json"; [[ "$(agent_resume_inner claude "$SID" "$T/work" x "$T/bad.json")" == "$(agent_resume_inner claude "$SID" "$T/work" x)" ]]'
+ok "codex resume re-attaches the orb server as -c values" \
+   'agent_resume_inner codex 019f-abc "$T/work" x "$ORB" | grep -q "mcp_servers.orb.command"'
+
 echo "== fix 3: SQLite store round-trips, keeps history, survives nasty labels"
-SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\tcpw_test\tcpp_test\t3\t7\tworking\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>'
+SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\tcpw_test\tcpp_test\t3\t7\tworking\t'"$ORB"$'\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>'
 ok "save accepts a snapshot"            'cockpit_layout_save "$SNAP"'
 ok "load returns it verbatim"           '[[ "$(cockpit_layout_load)" == "$SNAP" ]]'
 ok "single quotes survive storage"      'cockpit_layout_load | grep -q "with .quotes. and, commas"'
 ok "empty fields round-trip as <nil>"   'cockpit_layout_load | grep -qP "^1\tworkspace-b\t<nil>"'
-ok "controller identity survives storage" 'cockpit_layout_load | grep -q $'"'"'cpw_test\tcpp_test\t3\t7\tworking'"'"'$'
+ok "controller identity survives storage" 'cockpit_layout_load | grep -q $'"'"'cpw_test\tcpp_test\t3\t7\tworking\t'"'"''
+# The orb binding is what lets a RESUMED execution keep the channel it was launched with, so it has to survive
+# the layout store or the resume has nothing to re-attach.
+ok "orb binding survives storage"       '[[ "$(cockpit_layout_load | sed -n 2p | cut -f12)" == "$ORB" ]]'
+ok "a pane with no orb binding stays empty" \
+   '[[ "$(cockpit_layout_load | sed -n 3p | cut -f12)" == "<nil>" ]]'
 ok "empty snapshot is refused"          '! cockpit_layout_save ""'
 SNAP2=${SNAP/workspace-a/workspace-z}
 cockpit_layout_save "$SNAP2" >/dev/null
