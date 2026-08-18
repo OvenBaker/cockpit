@@ -13,8 +13,8 @@
 # meant). `claude` execs the pre-provider argv byte-for-byte. `codex` execs the prompt as Codex's positional
 # prompt with ONE per-invocation config override — the launch cwd's trust level — because Codex gates startup
 # on a folder-trust dialog that an agent-driven pane has nobody to answer. Nothing else is overridden: the
-# operator's own approval_policy and sandbox_mode govern the session exactly as they do a hand-started Codex,
-# and ~/.codex/config.toml is never written. Codex has no app-side remote control, so no --remote-control is
+# Cockpit's per-invocation full-access/auto-review posture governs the session without writing
+# ~/.codex/config.toml. Codex has no app-side remote control, so no --remote-control is
 # passed, and no hook, so its seed has no acceptance event — the record honestly stays `pending`.
 #
 # The prompt is DATA only: it is never interpolated into a shell command, never passed through tmux
@@ -35,6 +35,11 @@
 # after a human accepts it, so a fresh agent-driven launch would otherwise stall on a dialog no agent
 # counterpart can dismiss. Passing it as an inline per-invocation flag setting suppresses the dialog for
 # THIS launch only — ~/.claude/settings.json is never written.
+#
+# `execution` is an Orbital-launched piece of WORK. It is a thin orb carrier: it changes no permission mode,
+# removes no tools and appends no system text, so its argv is the `human` launch plus exactly the `orb` MCP
+# server. It is not brief-studio: reusing that profile would escalate an execution to bypassPermissions and
+# tell it that it is authoring a brief.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 
@@ -54,11 +59,12 @@ fail() {
   die "$1"
 }
 
-[[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [provider-bin] [human|agent|brief-studio] [orb-server-file] [claude|codex]"
-case "$profile" in human|agent|brief-studio) ;; *) die "interaction profile must be 'human', 'agent' or 'brief-studio'";; esac
+[[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [provider-bin] [human|agent|brief-studio|execution] [orb-server-file] [claude|codex]"
+case "$profile" in human|agent|brief-studio|execution) ;; *) die "interaction profile must be 'human', 'agent', 'brief-studio' or 'execution'";; esac
 case "$provider" in claude|codex) ;; *) die "provider must be 'claude' or 'codex'";; esac
-# The generic `agent` profile is Claude-only. `brief-studio` has an explicit Codex configuration path below.
-[[ "$provider" == claude || "$profile" == human || "$profile" == brief-studio ]] \
+# The generic `agent` profile is Claude-only. `brief-studio` and `execution` have explicit Codex configuration
+# paths below.
+[[ "$provider" == claude || "$profile" == human || "$profile" == brief-studio || "$profile" == execution ]] \
   || die "a codex launch does not support the '$profile' profile"
 [[ -n "${TMUX_PANE:-}" ]] || die "not inside a tmux pane"
 [[ -f "$record" && ! -L "$record" ]] || die "seed record is unavailable or unsafe"
@@ -103,10 +109,16 @@ cd "$cwd" || fail "cwd-unavailable"
 # server. No remote-control (Codex has none), no global configuration writes, and the token VALUE never enters
 # argv — only the mode-0600 token-file path carried by the validated server spec does.
 if [[ "$provider" == codex ]]; then
-  codex_args=()
+  mapfile -t codex_args < <(cockpit_codex_launch_argv)
   if [[ "$profile" == brief-studio ]]; then
     orb_spec=$(cockpit_orb_read_spec "$orb_file") || fail "orb-server-unavailable"
     values=$(cockpit_codex_brief_studio_values "$cwd" "$orb_spec") || fail "codex-brief-studio-config-unavailable"
+    while IFS= read -r value; do codex_args+=(-c "$value"); done <<<"$values"
+  elif [[ "$profile" == execution ]]; then
+    # Trust + the orb server, and deliberately NO developer_instructions: an execution's instructions are the
+    # seeded prompt it was launched with, not text this profile injects.
+    orb_spec=$(cockpit_orb_read_spec "$orb_file") || fail "orb-server-unavailable"
+    values=$(cockpit_codex_execution_values "$cwd" "$orb_spec") || fail "codex-execution-config-unavailable"
     while IFS= read -r value; do codex_args+=(-c "$value"); done <<<"$values"
   else
     trust=$(cockpit_codex_trust_value "$cwd") || fail "codex-trust-unassertable"
@@ -140,6 +152,14 @@ if [[ "$profile" == brief-studio ]]; then
   orb_spec=$(cockpit_orb_read_spec "$orb_file") || fail "orb-server-unavailable"
   # One validated argv element built from the validated spec — never shell-interpolated, and no global
   # ~/.claude configuration is read or written.
+  args+=(--mcp-config "$(jq -cn --argjson s "$orb_spec" '{mcpServers:{orb:$s}}')")
+fi
+# Execution profile: a THIN ORB CARRIER and nothing else. No --permission-mode, no --settings, no
+# --disallowedTools, no --append-system-prompt — the argv is byte-identical to the `human` launch plus exactly
+# one --mcp-config. Reusing brief-studio here would silently escalate an execution to bypassPermissions and
+# append text telling a work session it is authoring a brief; both would be wrong, and neither would be visible.
+if [[ "$profile" == execution ]]; then
+  orb_spec=$(cockpit_orb_read_spec "$orb_file") || fail "orb-server-unavailable"
   args+=(--mcp-config "$(jq -cn --argjson s "$orb_spec" '{mcpServers:{orb:$s}}')")
 fi
 exec "$provider_bin" "${args[@]}" -- "$prompt"

@@ -30,6 +30,23 @@ cockpit_rc_args() {
   printf ' --remote-control %q' "${name:0:48}"
 }
 
+# Cockpit's Codex permission posture. Cockpit sessions deliberately run without
+# the Linux/WSL bwrap sandbox, while keeping on-request approvals routed through
+# Codex's automatic reviewer. Keep this as one argv source so new, resumed,
+# seeded, and brief-studio launches cannot drift apart.
+cockpit_codex_launch_argv() {
+  printf '%s\n' \
+    --sandbox danger-full-access \
+    --ask-for-approval on-request \
+    -c approvals_reviewer=auto_review
+}
+
+# The same argv, %q-quoted for launchers that cross one bash -lc hop.
+cockpit_codex_launch_args() {
+  local arg
+  while IFS= read -r arg; do printf ' %q' "$arg"; done < <(cockpit_codex_launch_argv)
+}
+
 # ── brief-studio launch posture (Orbital's `orb` MCP channel) ───────────────────────────────────────────────
 # A brief-studio pane is a workshop session Orbital launched to develop a brief. Three things make it usable
 # from Orbital and NOTHING else about the spawn contract changes:
@@ -91,6 +108,31 @@ cockpit_codex_brief_studio_values() {
   printf 'mcp_servers.orb.required=true\n'
   instructions=$(jq -rn --arg value "$COCKPIT_BRIEF_STUDIO_SYSTEM_TEXT" '$value|@json')
   printf 'developer_instructions=%s\n' "$instructions"
+}
+
+# ── execution launch posture (Orbital's `orb` channel on a WORK session) ───────────────────────────────────
+# An `execution` pane is a piece of work Orbital launched, not a workshop authoring a brief. It gets the orb
+# channel and NOTHING else: no permission-mode change, no tool removal, no appended system text. brief-studio
+# is deliberately not reused — its bypassPermissions would silently escalate an execution, and its workshop
+# instructions would tell a work session it is authoring a brief.
+#
+# What the session is told about the channel is Orbital's own launch prompt's job, not this profile's: the
+# profile stays text-free so it cannot misdescribe the work it carries.
+#
+# Codex per-invocation config VALUES for an execution launch, one TOML assignment per line: the startup trust
+# override (a pane sitting on a folder-trust dialog is a session nobody can answer) and the orb server. No
+# developer_instructions — that is the line between this profile and brief-studio.
+cockpit_codex_execution_values() {
+  local cwd="$1" orb="$2" value trust
+  trust=$(cockpit_codex_trust_value "$cwd") || return 1
+  [[ -n "$orb" ]] || return 1
+  printf '%s\n' "$trust"
+  printf 'mcp_servers.orb.command=%s\n' "$(jq -r '.command|@json' <<<"$orb")"
+  printf 'mcp_servers.orb.args=%s\n' "$(jq -c '.args' <<<"$orb")"
+  value=$(jq -r '.env | to_entries | map(.key + "=" + (.value|@json)) | join(",")' <<<"$orb")
+  printf 'mcp_servers.orb.env={%s}\n' "$value"
+  # An execution launched to ask through orb, without orb, goes quiet on the operator with no way to say why.
+  printf 'mcp_servers.orb.required=true\n'
 }
 
 # The same values, %q-quoted for the one `bash -lc` hop used by a plain Codex spawn.
@@ -758,7 +800,7 @@ claude_launch_cwd() {   # id cwd → a cwd that can resume this session
 agent_resume_inner() {
   local agent="$1" id="$2" cwd="$3" name="${4:-}"
   case "$agent" in
-    codex) printf 'cd %q && exec codex resume %s' "$cwd" "$id";;
+    codex) printf 'cd %q && exec codex%s resume %s' "$cwd" "$(cockpit_codex_launch_args)" "$id";;
     *)     cwd=$(claude_launch_cwd "$id" "$cwd")
            printf 'cd %q && exec claude --resume %s%s' "$cwd" "$id" "$(cockpit_rc_args "$name" "$cwd")";;
   esac

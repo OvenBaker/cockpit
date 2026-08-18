@@ -20,7 +20,12 @@ trap cleanup EXIT
 # Record the session id and millisecond timestamp at actual Codex process start.
 cat > "$T/bin/codex" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\t%s\n' "${2:-}" "$(date +%s%3N)" >> "$CODEX_START_LOG"
+sid=""
+while (( $# )); do
+  if [[ "$1" == resume ]]; then sid="${2:-}"; break; fi
+  shift
+done
+printf '%s\t%s\n' "$sid" "$(date +%s%3N)" >> "$CODEX_START_LOG"
 exec sleep 600
 STUB
 chmod +x "$T/bin/codex"

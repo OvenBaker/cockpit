@@ -5,8 +5,8 @@
 #
 #   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME]
 #                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N
-#                  [--interaction-profile human|agent|brief-studio]]   # codex: human or brief-studio
-#                 [--interaction-profile brief-studio --orb-server-file ABS]
+#                  [--interaction-profile human|agent|brief-studio|execution]]  # codex: human, brief-studio, execution
+#                 [--interaction-profile brief-studio|execution --orb-server-file ABS]
 #
 # claude panes come up with Remote Control on (via lib.sh), so the session shows
 # in the Claude app under NAME and you can steer it from your phone. No id is
@@ -28,6 +28,15 @@
 # which is the honest reading of "the prompt was delivered, its submission was never observed". Codex's
 # STARTUP trust gate is suppressed, per invocation only (see cockpit-seed-exec), because a pane sitting on a
 # trust dialog is a session nobody asked for and, agent-driven, nobody can answer. `shell` is never seedable.
+#
+# EXECUTION PROFILE: a piece of WORK Orbital launched, not a workshop authoring a brief. It is a thin orb
+# carrier and nothing else: it changes no permission mode, removes no tools, and appends no system text, so the
+# pane's argv is the `human` launch plus exactly the `orb` MCP server named by --orb-server-file. brief-studio
+# is deliberately NOT reused here — its bypassPermissions would silently escalate an execution and its workshop
+# instructions would tell a work session it is authoring a brief. What the session is told about the channel is
+# the launcher's own prompt's job; this profile stays text-free so it cannot misdescribe the work it carries.
+# Seeded launches only, both providers, and an absent or invalid orb server REFUSES rather than spawning a
+# session that was told to ask and cannot.
 #
 # INTERACTION PROFILE (seeded contract only): --interaction-profile human|agent selects who is on the other
 # side of the seeded session. Omitted → `human`, which is byte-for-byte the pre-profile launch (existing
@@ -110,13 +119,14 @@ if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
   # Typed interaction profile: `human`, `agent`, or `brief-studio`; omission means `human` (the
   # backward-compatible default — an unprofiled seeded launch stays byte-identical to the pre-profile contract).
   if (( profile_given )); then
-    case "$profile" in human|agent|brief-studio) ;; *) refuse "--interaction-profile must be 'human', 'agent' or 'brief-studio'";; esac
+    case "$profile" in human|agent|brief-studio|execution) ;; *) refuse "--interaction-profile must be 'human', 'agent', 'brief-studio' or 'execution'";; esac
   else
     profile=human
   fi
-  # The generic agent-to-agent profile is Claude-only. brief-studio has an explicit Codex implementation:
-  # per-invocation developer instructions + required orb MCP configuration in cockpit-seed-exec.
-  [[ "$agent" == claude || "$profile" == human || "$profile" == brief-studio ]] \
+  # The generic agent-to-agent profile is Claude-only. brief-studio and execution both have explicit Codex
+  # implementations: required orb MCP configuration in cockpit-seed-exec (brief-studio additionally injects
+  # per-invocation developer instructions; execution deliberately does not).
+  [[ "$agent" == claude || "$profile" == human || "$profile" == brief-studio || "$profile" == execution ]] \
     || refuse "a seeded codex launch does not support --interaction-profile '$profile'"
   # A Codex pane's trust override is the only thing standing between it and a startup dialog, so a cwd that
   # cannot be expressed as a TOML basic key refuses HERE — before any reservation — rather than in the pane.
@@ -138,12 +148,12 @@ fi
 # A brief-studio session that cannot reach `orb` cannot ask a question, which is the whole point of launching
 # it this way — so an absent, unreadable or malformed server specification refuses the launch by name rather
 # than spawning a mute session that then goes quiet on the operator.
-if [[ "$profile" == brief-studio ]]; then
-  [[ -n "$orb_file" ]] || { echo "cockpit-spawn: --interaction-profile brief-studio requires --orb-server-file" >&2; exit 2; }
+if [[ "$profile" == brief-studio || "$profile" == execution ]]; then
+  [[ -n "$orb_file" ]] || { echo "cockpit-spawn: --interaction-profile $profile requires --orb-server-file" >&2; exit 2; }
   orb_spec=$(cockpit_orb_read_spec "$orb_file") \
     || { echo "cockpit-spawn: orb MCP server specification is unavailable or invalid: $orb_file" >&2; exit 2; }
 elif [[ -n "$orb_file" ]]; then
-  echo "cockpit-spawn: --orb-server-file requires --interaction-profile brief-studio" >&2; exit 2
+  echo "cockpit-spawn: --orb-server-file requires --interaction-profile brief-studio or execution" >&2; exit 2
 fi
 
 $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "cockpit-spawn: no cockpit grid running" >&2; exit 1; }
@@ -252,8 +262,8 @@ else case "$agent" in
   codex) if [[ "$profile" == brief-studio ]]; then
            extra=$(cockpit_codex_brief_studio_args "$cwd" "$orb_spec") \
              || { echo "cockpit-spawn: cannot assert Codex folder trust for --cwd '$cwd' (unquotable path); refusing rather than spawning into a stall" >&2; exit 2; }
-           launch="exec codex$extra"
-         else launch="exec codex"; fi;;
+           launch="exec codex$(cockpit_codex_launch_args)$extra"
+         else launch="exec codex$(cockpit_codex_launch_args)"; fi;;
   shell) launch="exec bash -l";;
   *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;
 esac; fi

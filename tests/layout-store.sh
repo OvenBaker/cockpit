@@ -34,6 +34,10 @@ ok "resume command cds to the owning dir" \
    'agent_resume_inner claude "$SID" "$T/work/sub" x | grep -q "cd $T/work &&"'
 ok "codex resume cwd is untouched" \
    'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q "cd $T/work/sub"'
+ok "codex resume disables the OS sandbox" \
+   'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q -- "--sandbox danger-full-access"'
+ok "codex resume keeps automatic approval review" \
+   'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q -- "--ask-for-approval on-request -c approvals_reviewer=auto_review"'
 
 echo "== fix 3: SQLite store round-trips, keeps history, survives nasty labels"
 SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\tcpw_test\tcpp_test\t3\t7\tworking\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>'
