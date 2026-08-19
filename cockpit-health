@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# cockpit-health — external liveness probe for cockpit-core's control socket.
+#
+# Exists because of the 2026-08-16 outage: the daemon's listener fd died under
+# a blocked Accept and the process sat "active" for days serving nothing, which
+# no in-band check can see (controller.health needs the very socket that died).
+# The daemon now carries its own self-dial watchdog; this timer is the backstop
+# for whatever silent-death mode that one can't catch.
+#
+# One deliberate refusal: while the daemon is in admission-wait ("waiting for
+# Cockpit restore" — stamps diverged from the durable projection), the socket is
+# legitimately unbound and a restart fixes nothing. That state needs a human
+# (see the admission-refusal runbook), so we log it and stand down.
+set -uo pipefail
+
+SOCK="${COCKPIT_CONTROL_SOCK:-$HOME/.local/state/cockpit/mcp-local/control.sock}"
+
+systemctl --user is-active --quiet cockpit-core.service || exit 0
+
+# Grace: a daemon younger than 90s may still be starting/admitting.
+started=$(systemctl --user show -p ActiveEnterTimestampMonotonic --value cockpit-core.service)
+now=$(awk '{printf "%d", $1*1000000}' /proc/uptime)
+[[ -n "$started" && "$started" != 0 ]] && (( now - started < 90000000 )) && exit 0
+
+dial() {
+  python3 - "$SOCK" << 'EOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(2)
+try:
+    s.connect(sys.argv[1])
+except Exception:
+    sys.exit(1)
+EOF
+}
+
+fails=0
+for _ in 1 2 3; do
+  dial && exit 0
+  fails=$((fails + 1)); sleep 3
+done
+
+if journalctl --user -u cockpit-core.service --since '-3 minutes' --no-pager 2>/dev/null \
+    | grep -q 'waiting for Cockpit restore'; then
+  logger -t cockpit-health "control socket unbound but daemon is in admission-wait; needs the repair runbook, not a restart"
+  exit 0
+fi
+
+logger -t cockpit-health "control socket refused $fails consecutive dials with cockpit-core active; restarting the daemon"
+systemctl --user restart cockpit-core.service
