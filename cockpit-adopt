@@ -43,6 +43,15 @@ fi
 
 transcript=$(agent_transcript "$agent" "$sid" "$cwd")
 [[ -f "$transcript" ]] || { echo "cockpit-adopt: provider transcript is not available for the requested binding" >&2; exit 1; }
+# A provider session has one canonical pane. Transcript existence proves provider/cwd, but not exclusivity: a
+# same-repository rollout can be selected accidentally after its mtime advances. Refuse a second live binding
+# before stamping, including in repair mode.
+while IFS='|' read -r otherPane otherSID; do
+  if [[ "$otherPane" != "$pane" && "$otherSID" == "$sid" ]]; then
+    echo "cockpit-adopt: session is already bound to pane $otherPane" >&2
+    exit 1
+  fi
+done < <($TMUX list-panes -a -F '#{pane_id}|#{@session_id}')
 [[ -n "$label" ]] || label="$(basename "$cwd")"
 cockpit_stamp_known_agent "$pane" "$sid" "$cwd" "$label" "$agent"
 echo "adopted $pane as $agent session ${sid:0:8}"

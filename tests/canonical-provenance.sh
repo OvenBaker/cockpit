@@ -33,6 +33,11 @@ id1=11111111-1111-4111-8111-111111111111
 sleep 1
 jq -n --arg cwd "$root/work" '{type:"session_meta",payload:{cwd:$cwd}}' >"$root/sessions/rollout-test-$id1.jsonl"
 printf '%s\n' '{"type":"event","payload":{"type":"task_complete"}}' >>"$root/sessions/rollout-test-$id1.jsonl"
+# This older rollout is written after the pane was born and therefore has the newest mtime, but its explicit
+# session birth predates the pane. Adoption must use session_meta time, not mistake recent activity for birth.
+stale=99999999-9999-4999-8999-999999999999
+jq -n --arg cwd "$root/work" '{type:"session_meta",timestamp:"2000-01-01T00:00:00Z",payload:{cwd:$cwd}}' >"$root/sessions/rollout-test-$stale.jsonl"
+printf '%s\n' '{"type":"event","payload":{"type":"task_complete"}}' >>"$root/sessions/rollout-test-$stale.jsonl"
 env "${env_common[@]}" COCKPIT_NO_SINGLETON=1 COCKPIT_INTERVAL=1 "$HERE/cockpit-poller" & poller=$!
 
 wait_for() {
@@ -57,6 +62,11 @@ env "${env_common[@]}" "$HERE/cockpit-adopt" --pane "$direct" --agent codex --se
 wait_for "$direct" "$id2"
 if env "${env_common[@]}" "$HERE/cockpit-adopt" --pane "$direct" --agent codex --session-id "$id1" --cwd "$root/work" >/dev/null 2>&1; then
   echo "cockpit-adopt accepted a conflicting existing session" >&2
+  exit 1
+fi
+duplicate=$(tm split-window -t cockpit:0 -P -F '#{pane_id}' 'sleep 600')
+if env "${env_common[@]}" "$HERE/cockpit-adopt" --pane "$duplicate" --agent codex --session-id "$id2" --cwd "$root/work" >/dev/null 2>&1; then
+  echo "cockpit-adopt bound one provider session to two panes" >&2
   exit 1
 fi
 
@@ -97,14 +107,16 @@ afterClaude=$(tm display-message -p -t "$hookPane" '#{@agent}|#{@session_id}|#{@
 # The explicit repair boundary can restore metadata only when the pane's foreground executable proves the
 # asserted provider. The ordinary adopt path still refuses the same conflicting binding.
 cp /bin/sleep "$root/bin/codex"
+id4=44444444-4444-4444-8444-444444444444
+jq -n --arg cwd "$root/work" '{type:"session_meta",payload:{cwd:$cwd}}' >"$root/sessions/rollout-test-$id4.jsonl"
 repairPane=$(tm split-window -t cockpit:0 -P -F '#{pane_id}' "$root/bin/codex 600")
 tm set-option -p -t "$repairPane" @agent claude
 tm set-option -p -t "$repairPane" @session_id "$id3"
 tm set-option -p -t "$repairPane" @cwd "$root"
-if env "${env_common[@]}" "$HERE/cockpit-adopt" --pane "$repairPane" --agent codex --session-id "$id2" --cwd "$root/work" >/dev/null 2>&1; then
+if env "${env_common[@]}" "$HERE/cockpit-adopt" --pane "$repairPane" --agent codex --session-id "$id4" --cwd "$root/work" >/dev/null 2>&1; then
   echo "cockpit-adopt repaired a conflicting binding without the repair flag" >&2
   exit 1
 fi
-env "${env_common[@]}" "$HERE/cockpit-adopt" --pane "$repairPane" --agent codex --session-id "$id2" --cwd "$root/work" \
+env "${env_common[@]}" "$HERE/cockpit-adopt" --pane "$repairPane" --agent codex --session-id "$id4" --cwd "$root/work" \
   --repair-conflicting-binding >/dev/null
-[[ "$(tm display-message -p -t "$repairPane" '#{@agent}|#{@session_id}|#{@cwd}|#{@hook_state}')" == "codex|$id2|$root/work|" ]]
+[[ "$(tm display-message -p -t "$repairPane" '#{@agent}|#{@session_id}|#{@cwd}|#{@hook_state}')" == "codex|$id4|$root/work|" ]]
