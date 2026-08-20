@@ -124,7 +124,10 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
       # pane's agent+cwd after it was born, then track it like any other.
       if [[ -n "$cwd" && -n "$born" ]]; then
         a=$(cockpit_adopt_agent "$agent" "$cwd" "$born")
-        if [[ -n "$a" && -z "${ADOPTED[$a]:-}" ]]; then
+        # The in-memory set prevents two pending panes claiming one rollout in this cycle; the tmux scan also
+        # covers sessions that were already bound before this poller process started.
+        if [[ -n "$a" && -z "${ADOPTED[$a]:-}" ]] &&
+            ! $TMUX list-panes -a -F '#{@session_id}' | grep -Fxq "$a"; then
           ADOPTED[$a]=1; $TMUX set -p -t "$pid" @session_id "$a"; sid="$a"
         fi
       fi

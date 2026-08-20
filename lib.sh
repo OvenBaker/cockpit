@@ -882,9 +882,18 @@ agent_of_id() {
 cockpit_adopt_agent() {
   local agent="$1" cwd="$2" born="$3"
   if [[ "$agent" == codex ]]; then
-    local f
+    local f meta started started_epoch
     while IFS= read -r f; do
-      [[ "$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$f")" 2>/dev/null)" == "$cwd" ]] || continue
+      meta=$(head -1 "$f" 2>/dev/null)
+      [[ "$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$meta" 2>/dev/null)" == "$cwd" ]] || continue
+      # Rollout mtime is activity, not birth: an older session updated after this pane started can otherwise win
+      # the newest-file sort and be bound to two panes. When session_meta carries its creation timestamp, require
+      # that timestamp to be at/after the pane birth; old rollouts without one retain the legacy mtime fallback.
+      started=$(jq -r 'select(.type=="session_meta")|.timestamp // .payload.timestamp // empty' <<<"$meta" 2>/dev/null)
+      if [[ -n "$started" ]]; then
+        started_epoch=$(date -d "$started" +%s 2>/dev/null || echo 0)
+        (( started_epoch >= born )) || continue
+      fi
       basename "$f" | sed -E 's/.*-([0-9a-f-]{36})\.jsonl$/\1/'; return
     done < <(find "$CODEX_SESSIONS" -type f -name 'rollout-*.jsonl' -newermt "@$born" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-)
     return 0
