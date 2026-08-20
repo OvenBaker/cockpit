@@ -7,17 +7,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 
 usage() {
-  echo "usage: cockpit-adopt --pane %N --agent claude|codex --session-id UUID --cwd ABSOLUTE_DIR" >&2
+  echo "usage: cockpit-adopt --pane %N --agent claude|codex --session-id UUID --cwd ABSOLUTE_DIR [--repair-conflicting-binding]" >&2
   exit 2
 }
 
-pane=""; agent=""; sid=""; cwd=""
+pane=""; agent=""; sid=""; cwd=""; repair=0
 while (($#)); do
   case "$1" in
     --pane) pane=${2:-}; shift 2;;
     --agent) agent=${2:-}; shift 2;;
     --session-id) sid=${2:-}; shift 2;;
     --cwd) cwd=${2:-}; shift 2;;
+    --repair-conflicting-binding) repair=1; shift;;
     *) usage;;
   esac
 done
@@ -26,12 +27,19 @@ done
 # Resolve the exact pane from the selected Cockpit grid and reject a conflicting
 # existing binding. An operator supplies the session identity; the transcript
 # check below proves it belongs to the supplied provider/cwd before any stamp.
-row=$($TMUX display-message -p -t "$pane" '#{session_name}|#{pane_id}|#{@agent}|#{@session_id}|#{@cwd}|#{@label}' 2>/dev/null) || { echo "cockpit-adopt: pane not found" >&2; exit 1; }
-IFS='|' read -r session gotPane oldAgent oldSID oldCWD label <<<"$row"
+row=$($TMUX display-message -p -t "$pane" '#{session_name}|#{pane_id}|#{@agent}|#{@session_id}|#{@cwd}|#{@label}|#{pane_current_command}' 2>/dev/null) || { echo "cockpit-adopt: pane not found" >&2; exit 1; }
+IFS='|' read -r session gotPane oldAgent oldSID oldCWD label command <<<"$row"
 [[ "$session" == "$COCKPIT_SESSION" && "$gotPane" == "$pane" ]] || { echo "cockpit-adopt: pane is outside cockpit" >&2; exit 1; }
-[[ -z "$oldAgent" || "$oldAgent" == "$agent" ]] || { echo "cockpit-adopt: provider conflicts with existing pane binding" >&2; exit 1; }
-[[ -z "$oldSID" || "$oldSID" == "$sid" ]] || { echo "cockpit-adopt: session conflicts with existing pane binding" >&2; exit 1; }
-[[ -z "$oldCWD" || "$oldCWD" == "$cwd" ]] || { echo "cockpit-adopt: cwd conflicts with existing pane binding" >&2; exit 1; }
+if (( repair )); then
+  # Repair is deliberately explicit and only admits a pane whose foreground executable is the provider being
+  # asserted. This is the bounded recovery for metadata clobbered by a nested provider hook; it cannot retarget
+  # a shell or a pane currently owned by some other running provider.
+  [[ "$command" == "$agent" ]] || { echo "cockpit-adopt: repair provider does not match the pane's foreground command" >&2; exit 1; }
+else
+  [[ -z "$oldAgent" || "$oldAgent" == "$agent" ]] || { echo "cockpit-adopt: provider conflicts with existing pane binding" >&2; exit 1; }
+  [[ -z "$oldSID" || "$oldSID" == "$sid" ]] || { echo "cockpit-adopt: session conflicts with existing pane binding" >&2; exit 1; }
+  [[ -z "$oldCWD" || "$oldCWD" == "$cwd" ]] || { echo "cockpit-adopt: cwd conflicts with existing pane binding" >&2; exit 1; }
+fi
 
 transcript=$(agent_transcript "$agent" "$sid" "$cwd")
 [[ -f "$transcript" ]] || { echo "cockpit-adopt: provider transcript is not available for the requested binding" >&2; exit 1; }
