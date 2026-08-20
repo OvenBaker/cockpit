@@ -23,6 +23,14 @@ It then stamps the established metadata and clears old projection values; the
 poller produces `@state` on its next cycle. It never infers provider or state
 from a pane title, process name, or terminal content.
 
+If a nested provider hook corrupted an otherwise canonical pane binding, the
+operator may add `--repair-conflicting-binding`. Repair still requires the
+matching provider transcript and additionally verifies that the pane’s current
+foreground executable is the explicitly supplied provider. Without that flag,
+the ordinary no-conflicting-binding rule remains unchanged. Provider hooks are
+also owner-scoped: Claude lifecycle events mutate only unclaimed or
+Claude-owned panes, and Codex notifications mutate only Codex-owned panes.
+
 This command is a migration aid only. Do not run it against a live pane before
 reviewer GO. Panes launched outside the Cockpit repository’s launchers remain
 the responsibility of their creating workflow/worktree.

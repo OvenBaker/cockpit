@@ -37,6 +37,18 @@ ev="${1:-}"
 INPUT=""
 if [[ "$ev" != codex-notify && ! -t 0 ]]; then INPUT=$(cat 2>/dev/null || true); fi
 
+# Provider lifecycle hooks inherit TMUX_PANE through every child process a pane launches. A Codex agent may run
+# `claude -p` for review (and a Claude agent may invoke Codex), but those nested providers do not own the pane.
+# The pane's canonical @agent is set by spawn/adopt and decides which provider's hooks may mutate its identity,
+# cwd, seed acceptance, or live state. An unstamped pane may still be claimed by a direct Claude session-start;
+# Codex has no equivalent start hook, so codex-notify is accepted only on a pane already owned by Codex.
+owner=$("${T[@]}" display -p -t "$TMUX_PANE" '#{@agent}' 2>/dev/null || true)
+if [[ "$ev" == codex-notify ]]; then
+  [[ "$owner" == codex ]] || exit 0
+else
+  [[ -z "$owner" || "$owner" == claude ]] || exit 0
+fi
+
 # Keep @session_id pointing at the conversation Claude is ACTUALLY in. The id a
 # pane was spawned with goes stale the instant you /clear or start a new chat —
 # that forks a new session file — and a stale pin makes the poller classify, and
