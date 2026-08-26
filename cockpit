@@ -175,13 +175,15 @@ apply_chrome() {
   $TMUX bind -n M-Tab run-shell "$HERE/cockpit-next"
   $TMUX bind -n M-z   resize-pane -Z
   $TMUX bind -n M-i   run-shell "$HERE/cockpit-toggle-idle"
-  $TMUX bind -n M-r   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick retarget #{pane_id}"
-  $TMUX bind -n M-n   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick add"
+  # Fixed columns, not 90%: on a wide client 90% was ~252 columns of mostly empty space around
+  # rows that are a tag, an age, a path and a title.
+  $TMUX bind -n M-r   display-popup -E -w 120 -h 32 "$HERE/cockpit-pick retarget #{pane_id}"
+  $TMUX bind -n M-n   display-popup -E -w 120 -h 32 "$HERE/cockpit-pick add"
   # Alt-N is three picker steps; the directory step lists every indexed cwd, so it wants height.
   # Fixed columns rather than 90%: the rows are paths and short labels, not the full grid width.
   $TMUX bind -n M-N   display-popup -E -w 96 -h 34 "$HERE/cockpit-pick new"
   # find sessions related to the focused pane's session → add a chosen one here
-  $TMUX bind -n M-f   display-popup -E -w 88 -h 22 "$HERE/cockpit-related #{pane_id}"
+  $TMUX bind -n M-f   display-popup -E -w 120 -h 24 "$HERE/cockpit-related #{pane_id}"
   # browse in santa's TUI; its resume key drops the session into the grid.
   # --no-refresh is load-bearing: the TUI's launch-time ingest can take minutes on a large
   # history (and repaints a progress bar per file), so the popup would sit blank and never

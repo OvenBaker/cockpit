@@ -32,19 +32,18 @@ if (( rc != 0 )); then
 fi
 (( ${#R[@]} )) || { say "  no related sessions found."; pause "(any key) "; exit 0; }
 
-say ""; say "  Related sessions — pick one to add to this workspace:"; say ""
-i=0; declare -a RID RCWD
+rows=""
 for row in "${R[@]}"; do
   IFS=$'\t' read -r rid rcwd rtitle rsame <<< "$row"
   [[ "$rcwd" == "-" ]] && rcwd=""
-  i=$((i+1)); RID[$i]="$rid"; RCWD[$i]="$rcwd"
-  marker=""; [[ "$rsame" == 1 ]] && marker="  ↳ same repo"
-  printf '  %2d  %-24s %s%s\n' "$i" "${rcwd/#$HOME/\~}" "${rtitle:0:44}" "$marker" >/dev/tty
+  marker=""; [[ "$rsame" == 1 ]] && marker="↳ same repo"
+  rows+="$rid"$'\t'"$rcwd"$'\t'"${rcwd/#$HOME/\~}"$'\t'"$rtitle"$'\t'"$marker"$'\n'
 done
-say ""; printf '  > ' >/dev/tty
-read -r line </dev/tty || line=""
-[[ "$line" =~ ^[0-9]+$ ]] && (( line >= 1 && line <= i )) || { say "  cancelled."; sleep 0.4; exit 0; }
+# hidden: 1 id, 2 cwd · shown: 3 ~cwd, 4 title, 5 same-repo marker · filter on cwd + title
+sel=$(printf '%s' "$rows" | ck_select "Related to ${sid:0:8} → add to this workspace" \
+        --hide 1,2 --match 2,4) || exit 0
+rid="${sel%%$'\t'*}"; rest="${sel#*$'\t'}"; rcwd="${rest%%$'\t'*}"
 
 # hand off to cockpit-send (adds to the current workspace; resolves cwd if blank)
-if [[ -n "${RCWD[$line]}" ]]; then exec "$HERE/cockpit-send" "${RID[$line]}" --cwd "${RCWD[$line]}"
-else exec "$HERE/cockpit-send" "${RID[$line]}"; fi
+if [[ -n "$rcwd" ]]; then exec "$HERE/cockpit-send" "$rid" --cwd "$rcwd"
+else exec "$HERE/cockpit-send" "$rid"; fi

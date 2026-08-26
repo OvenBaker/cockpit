@@ -699,8 +699,22 @@ session_is_live() {
 # candidate would double-resume it, churning the shared transcript (the source
 # of the green/blue flicker) and risking corruption. This is the authoritative
 # check; the mtime window stays as a backstop for non-resume launches.
+#
+# A candidate gather asks this once per row and each pgrep forks: ~20ms × ~104 rows was roughly
+# half the four seconds Alt-r/Alt-n spent showing an EMPTY popup before the list appeared. So a
+# gather snapshots the process table once (ck_ps_begin) and matches against that.
+#
+# The cache is opt-in and short-lived on purpose. cockpit-pick re-checks liveness at ACTION time
+# to catch a session that went live while the operator was reading the list; that check is a race
+# guard and must never consult a table sampled seconds earlier. Outside a gather, _CK_PS is empty
+# and the check runs live.
+_CK_PS=""
+ck_ps_begin() { _CK_PS=$(ps -eo args= 2>/dev/null || true); }
+ck_ps_end()   { _CK_PS=""; }
+
 session_is_running() {
   local id="$1"
+  [[ -n "$_CK_PS" ]] && { [[ "$_CK_PS" == *"claude --resume $id"* ]]; return; }
   pgrep -f "claude --resume $id" >/dev/null 2>&1
 }
 
@@ -724,7 +738,8 @@ _claude_rows() {
     id=$(basename "$jsonl" .jsonl)
     [[ "${ST[$id]:-active}" == "completed" || "${ST[$id]:-}" == "archived" ]] && continue
     session_is_running "$id" && continue
-    session_is_live "$jsonl" && continue
+    # mtime is already in $mt from find; session_is_live would fork stat+date to rediscover it
+    (( now - ${mt%.*} < COCKPIT_LIVE_SECS )) && continue
     cwd="${CW[$id]:-}"; title="${TL[$id]:-}"
     if [[ -z "$cwd" || -z "$title" ]]; then
       # Not (fully) indexed by santa. Read only the head — cwd is on every event
@@ -767,7 +782,7 @@ _codex_rows() {
     id=$(basename "$f" | sed -E 's/.*-([0-9a-f-]{36})\.jsonl$/\1/'); [[ -n "$id" ]] || continue
     [[ "${ST[$id]:-active}" == "completed" || "${ST[$id]:-}" == "archived" ]] && continue
     session_is_running_agent codex "$id" && continue
-    session_is_live "$f" && continue
+    (( now - ${mt%.*} < COCKPIT_LIVE_SECS )) && continue   # $mt from find; no stat/date fork
     cwd="${CW[$id]:-}"
     [[ -z "$cwd" ]] && cwd=$(jq -r 'select(.type=="session_meta")|.payload.cwd // empty' <<<"$(head -1 "$f")" 2>/dev/null)
     [[ -n "$cwd" ]] || continue
@@ -785,9 +800,11 @@ _codex_rows() {
 # Output TSV: id<TAB>cwd<TAB>title<TAB>agent   (limit via $1, default 6)
 cockpit_candidates() {
   local limit="${1:-6}"
+  ck_ps_begin                          # one ps for the whole gather; see session_is_running
   { _claude_rows $((limit + 12)); _codex_rows $((limit + 12)); } \
     | sort -t$'\t' -k1,1 -rn | head -n "$limit" \
     | awk -F'\t' 'BEGIN{OFS="\t"}{print $3,$4,$5,$2}'   # mtime,agent,id,cwd,title → id,cwd,title,agent
+  ck_ps_end
 }
 
 # Distinct working directories you've worked in recently, newest first, filtered
@@ -993,7 +1010,9 @@ cockpit_stagger_agent_command() {
 # process; codex's resumed process carries `resume <id>` in its argv too.
 session_is_running_agent() {
   case "$1" in
-    codex) pgrep -f "resume $2" >/dev/null 2>&1;;
+    codex)
+      [[ -n "$_CK_PS" ]] && { [[ "$_CK_PS" == *"resume $2"* ]]; return; }
+      pgrep -f "resume $2" >/dev/null 2>&1;;
     *)     session_is_running "$2";;
   esac
 }

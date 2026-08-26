@@ -44,7 +44,7 @@ parse_sel() {
 retarget_pane() {
   local pane="$1" id="$2" cwd="$3" title="$4" agent="${5:-claude}"
   if session_is_running_agent "$agent" "$id"; then   # re-check at action time
-    say "cockpit: $id is live elsewhere — not retargeting"; sleep 1; return 0
+    say "cockpit: $id is live elsewhere — not retargeting"; sleep 1; return 1
   fi
   # Retargeting re-execs the provider in this pane. The pane's Claude account binding (@account) is a property
   # of the PANE the operator dedicated, not of the session it happens to hold, so it carries forward — with
@@ -59,7 +59,7 @@ retarget_pane() {
       eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
     else
       say "cockpit: pane is bound to Claude account '$acct', which no longer resolves — not retargeting"
-      sleep 2; return 0
+      sleep 2; return 1
     fi
   fi
   local cmd; cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
@@ -219,19 +219,39 @@ if (( ${#CAND[@]} == 0 )); then
   exit 0
 fi
 
-say ""
-say "  cockpit · dormant sessions  (cl=claude  cx=codex)"
-say "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
-i=0
-for row in "${CAND[@]}"; do
-  IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
-  i=$((i+1))
-  jsonl=$(agent_transcript "$agent" "$id" "$cwd")
-  age=$(fmt_age "$(idle_seconds "$jsonl")")
-  tag=$([[ "$agent" == codex ]] && echo cx || echo cl)
-  printf '  %2d  %s %4s  %-22s  %s\n' "$i" "$tag" "$age" "${cwd/#$HOME/\~}" "${title:0:44}" >/dev/tty
-done
-say ""
+# Rows carry their machine fields (id/cwd/title/agent) first and hidden, then the four display
+# columns. The picker returns the line verbatim, so the caller reads the machine fields straight
+# back out without a lookup table or an index to get wrong.
+pick_rows() {
+  local row id cwd title agent jsonl age tag
+  for row in "${CAND[@]}"; do
+    IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
+    jsonl=$(agent_transcript "$agent" "$id" "$cwd")
+    age=$(fmt_age "$(idle_seconds "$jsonl")")
+    tag=$([[ "$agent" == codex ]] && echo cx || echo cl)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "$cwd" "$title" "$agent" "$tag" "$age" "${cwd/#$HOME/\~}" "${title:0:80}"
+  done
+}
+# hidden: 1 id, 2 cwd, 3 title, 4 agent · shown: 5 tag, 6 age, 7 ~cwd, 8 title · filter: cwd+title
+PICK_ARGS=(--hide 1,2,3,4 --match 2,3)
+
+# the numbered render is startup-only now (see the case below)
+if [[ "$MODE" == startup ]]; then
+  say ""
+  say "  cockpit · dormant sessions  (cl=claude  cx=codex)"
+  say "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+  i=0
+  for row in "${CAND[@]}"; do
+    IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
+    i=$((i+1))
+    jsonl=$(agent_transcript "$agent" "$id" "$cwd")
+    age=$(fmt_age "$(idle_seconds "$jsonl")")
+    tag=$([[ "$agent" == codex ]] && echo cx || echo cl)
+    printf '  %2d  %s %4s  %-22s  %s\n' "$i" "$tag" "$age" "${cwd/#$HOME/\~}" "${title:0:44}" >/dev/tty
+  done
+  say ""
+fi
 
 # --- act on the mode ---------------------------------------------------------
 case "$MODE" in
@@ -256,42 +276,37 @@ case "$MODE" in
     # (unchanged by the keypress, so it's the pane the user pressed Alt-r on).
     [[ -z "$pane" || "$pane" == *'#{'* ]] && \
       pane=$($TMUX display -p -t "$COCKPIT_SESSION:0" '#{pane_id}' 2>/dev/null)
-    say "  Retarget this pane → which session?"
-    printf '  > ' >/dev/tty
-    read -r line </dev/tty || line=""
-    mapfile -t idx < <(parse_sel "$line"); nsel="${idx[0]:-}"
-    [[ -n "$nsel" ]] && (( nsel >= 1 && nsel <= ${#CAND[@]} )) || { say "  cancelled."; sleep 0.6; exit 0; }
-    IFS=$'\t' read -r id cwd title agent <<< "${CAND[$((nsel-1))]}"
-    retarget_pane "$pane" "$id" "$cwd" "$title" "${agent:-claude}"
-    say "  → ${title:0:50}"; sleep 0.6
+    pidx=$($TMUX display -p -t "$pane" '#{pane_index}' 2>/dev/null)
+    sel=$(pick_rows | ck_select "Retarget pane ${pidx:-?} → which session?" "${PICK_ARGS[@]}") || exit 0
+    IFS=$'\t' read -r id cwd title agent _ <<< "$sel"
+    # Only announce success if retarget_pane actually retargeted. Its refusals (session live
+    # elsewhere, unresolvable @account) used to return 0, so the arrow printed one line under
+    # "not retargeting" and the operator was told the opposite of what happened.
+    retarget_pane "$pane" "$id" "$cwd" "$title" "${agent:-claude}" \
+      && $TMUX display-message "retargeted pane ${pidx:-?} → ${title:0:60}"
     ;;
 
   add)
     W=$(cockpit_cur_window)   # add to the workspace you're viewing
-    # If the active pane is a bare untracked shell (e.g. a freshly-created
-    # workspace's placeholder), reuse it instead of splitting — otherwise split.
+    # Choose FIRST, then make the pane. The old order split before prompting and unwound the
+    # split on a clean cancel — but there is no trap in this script, so a popup killed by a
+    # client detach or SIGINT skipped the unwind and left a stray empty pane behind.
+    sel=$(pick_rows | ck_select "Add a pane → which session?" "${PICK_ARGS[@]}") || exit 0
+    IFS=$'\t' read -r id cwd title agent _ <<< "$sel"
+
+    # If the active pane is a bare untracked shell (e.g. a freshly-created workspace's
+    # placeholder), reuse it instead of splitting — otherwise split.
     act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
-    actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
-    split_made=0
+    actsid=$($TMUX show -pv -t "$act" @session_id 2>/dev/null || true)
     if [[ -z "$actsid" ]]; then
       pane="$act"                                            # reuse placeholder shell
     else
       pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -l" 2>/dev/null) \
         || { say "  no room for another pane at this width."; pause "(any key) "; exit 0; }
-      split_made=1
       $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
     fi
-    say "  New pane → which session?"
-    printf '  > ' >/dev/tty
-    read -r line </dev/tty || line=""
-    mapfile -t idx < <(parse_sel "$line"); nsel="${idx[0]:-}"
-    if [[ -z "$nsel" ]] || ! (( nsel >= 1 && nsel <= ${#CAND[@]} )); then
-      (( split_made )) && { $TMUX kill-pane -t "$pane" 2>/dev/null; $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null; }
-      say "  cancelled."; sleep 0.6; exit 0      # reused placeholder is left as-is
-    fi
-    IFS=$'\t' read -r id cwd title agent <<< "${CAND[$((nsel-1))]}"
-    retarget_pane "$pane" "$id" "$cwd" "$title" "${agent:-claude}"
-    say "  → ${title:0:50}"; sleep 0.6
+    retarget_pane "$pane" "$id" "$cwd" "$title" "${agent:-claude}" \
+      && $TMUX display-message "added pane → ${title:0:60}"
     ;;
 
   *) echo "usage: cockpit-pick {startup|retarget <pane>|add|new}" >&2; exit 2;;
