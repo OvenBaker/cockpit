@@ -149,16 +149,19 @@ apply_chrome() {
   # so it uses whatever room the pane has — wide panes show more, narrow less.
   # A stamped @role prefixes the label with a compact glyph for known roles (bare codepoint, no VS16 — the
   # variation selector breaks tmux's border width math) or a bracketed text tag for anything else.
-  # A bound Claude account follows the role: its @account_mark (a single Greek letter, single-cell — see
-  # cockpit_account_mark) if one is assigned, else a "· name " fallback so an unmarked account is still
-  # visible rather than silently blank. Nested #{?...} conditionals read poorly inline, so both tag pieces
-  # are built in variables first.
+  # A bound Claude account comes FIRST, to the left of the role: its @account_mark (a single Greek letter,
+  # single-cell — see cockpit_account_mark) if one is assigned, else a "· name " fallback so an unmarked
+  # account is still visible rather than silently blank. The mark hugs a following role glyph with no space
+  # of its own (`α🧱 label`, not `α 🧱 label`) — it emits a space only when there is NO role to butt up
+  # against, so the mark-only case (`α label`) still separates cleanly; the dot fallback always keeps its
+  # trailing space regardless, since "· name 🧱 label" reads fine either way. Nested #{?...} conditionals
+  # read poorly inline, so both tag pieces are built in variables first.
   local role_tag='#{?@role,#{?#{==:#{@role},architect},📐 ,#{?#{==:#{@role},builder},🧱 ,[#{@role}] }},}'
-  local account_tag='#{?@account_mark,#{@account_mark} ,#{?@account,· #{@account} ,}}'
+  local account_tag='#{?@account_mark,#{@account_mark}#{?@role,, },#{?@account,· #{@account} ,}}'
   # Truncation reserve bumped modestly (20 → 30 base) for the two new prefix segments; not split further per
   # role/account combination — a long unmarked account name can still crowd a narrow pane, but that is a rare
   # cosmetic edge case, not one worth a wider conditional.
-  $TMUX set -g pane-border-format "#[align=left] #{@sc}${role_tag}${account_tag}#{=/#{e|-|:#{pane_width},#{?@role,42,30}}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] "
+  $TMUX set -g pane-border-format "#[align=left] #{@sc}${account_tag}${role_tag}#{=/#{e|-|:#{pane_width},#{?@role,42,30}}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] "
   # box borders: uniform neutral; only the active pane is highlighted (the one
   # case with no shared-edge ambiguity).
   $TMUX set -g pane-border-style 'fg=colour238'
