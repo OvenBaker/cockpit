@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # cockpit-send — resume a Claude session as a cockpit pane.
 #
-#   cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME] [--account NAME]
+#   cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME]
+#                [--account NAME|default] [--pick-account]
 #
 # If a cockpit grid is running: split a new pane onto the session, stamp it so
 # the poller tracks it, and re-tile. If not: append it to a pending queue that
@@ -14,6 +15,20 @@
 # account that does not fully resolve refuses the resume outright: an empty CLAUDE_CODE_OAUTH_TOKEN is read by
 # Claude Code as unset, which would silently resume on the primary account and bill the quota this protects.
 # The account rides the pending queue too (5th field), so a cold `cockpit --santa` build keeps the binding.
+# `--account default` forces the PRIMARY account explicitly (skips the auto-rebind below); so does an
+# explicitly empty `--account ""`.
+#
+# AUTO-REBIND: with neither --account nor --pick-account, the session's most recently recorded @account
+# (across this cockpit session's whole snapshot history, via cockpit_session_last_account) is used
+# automatically — santa itself only ever passes sessionId/--cwd/--agent, so without this every santa resume
+# silently lands on the default account regardless of what it last ran on. Same resolve-or-refuse guard as
+# an explicit --account; the refusal message names the looked-up account so an unflagged resume that
+# refuses doesn't look like it came from nowhere.
+#
+# --pick-account interactively chooses the account before the pane spawns (a popup reusing cockpit-pick's
+# account-row convention, the looked-up account listed first). Needs a real attached tmux client to render;
+# degrades to printing the account list on stderr and refusing (use --account instead) when it can't —
+# including whenever invoked as santa's own resume action, which runs inside santa's own popup already.
 #
 # This is the bridge that lets santa's TUI "resume" feed cockpit instead
 # of opening a wt.exe tab — see shim/wt.exe.
@@ -24,16 +39,27 @@ PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
 LOG="${TMPDIR:-/tmp}/cockpit-send.log"
 log() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true; }
 
-id=""; cwd=""; agent=""; ws=""; account=""; account_token=""; declare -a account_env=()
+id=""; cwd=""; agent=""; ws=""; account=""; account_given=0; pick_account=0
+account_token=""; declare -a account_env=()
 while [[ $# -gt 0 ]]; do case "$1" in
   --cwd) cwd="${2:-}"; shift;; --agent) agent="${2:-}"; shift;; --workspace) ws="${2:-}"; shift;;
-  --account) account="${2:-}"; shift;; *) id="$1";; esac; shift; done
+  --account) account="${2:-}"; account_given=1; shift;;
+  --pick-account) pick_account=1;;
+  *) id="$1";; esac; shift; done
 # The account NAME is logged; the TOKEN is never read into this script until the launch, and never logged.
-log "invoked: id='$id' cwd-arg='$cwd' agent='$agent' account='$account' COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}'"
-[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME] [--account NAME]" >&2; log "ABORT: no id"; exit 2; }
+log "invoked: id='$id' cwd-arg='$cwd' agent='$agent' account='$account' account_given=$account_given pick_account=$pick_account COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}'"
+[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME] [--account NAME|default] [--pick-account]" >&2; log "ABORT: no id"; exit 2; }
+if (( account_given && pick_account )); then
+  echo "cockpit-send: --account and --pick-account are mutually exclusive" >&2; log "ABORT: both --account and --pick-account"; exit 2
+fi
 # Name syntax first, before the id is even resolved — a bad name is a caller bug, not a session fact.
-if [[ -n "$account" ]] && ! cockpit_account_name_ok "$account"; then
-  echo "cockpit-send: --account '$account' is not [A-Za-z0-9][A-Za-z0-9_-]{0,31}" >&2; log "ABORT: bad account name"; exit 2
+# `default` (or an explicitly empty --account "") is a reserved keyword here: force the primary account
+# and skip the auto-rebind lookup below, never a real account name to be validated/resolved as one.
+if (( account_given )); then
+  if [[ "$account" == default || -z "$account" ]]; then account=""
+  elif ! cockpit_account_name_ok "$account"; then
+    echo "cockpit-send: --account '$account' is not [A-Za-z0-9][A-Za-z0-9_-]{0,31}" >&2; log "ABORT: bad account name"; exit 2
+  fi
 fi
 
 # resolve agent + full id + cwd + title. Claude resolves via santa's DB (handles
@@ -67,21 +93,87 @@ fi
 [[ -n "$title" ]] || title="${id:0:8}"
 log "resolved: agent=$agent id=$id cwd=$cwd"
 
-# ── --account, once the provider is actually known ──────────────────────────────────────────────────────────
+# ── --pick-account: interactive choice, once the provider is actually known ─────────────────────────────────
+# Reuses cockpit-pick's account-row convention (its "new session" step 1) rather than a new chooser, via the
+# SAME cockpit-select binary lib.sh already resolves for it. Needs a real attached tmux client to render a
+# popup — degrades to "print the choices, refuse, tell the operator to pass --account explicitly" whenever
+# it can't. That degrade path is ALSO taken whenever SANTA_RESUME_CMD is set (i.e. we were invoked as
+# santa's own resume action): that runs INSIDE santa's own already-open popup, and tmux does not support a
+# second, nested display-popup safely — this is a conservative heuristic (untested against santa's actual
+# child-process environment, which is out of scope here), not a verified fact about tmux's nesting behaviour.
+if (( pick_account )); then
+  [[ "$agent" == claude ]] \
+    || { echo "cockpit-send: --pick-account is Claude-only ($id resolves to $agent, which has no CLAUDE_CODE_OAUTH_TOKEN equivalent)" >&2
+         log "ABORT: --pick-account with agent=$agent"; exit 2; }
+  last=$(cockpit_session_last_account "$id")
+  can_popup=1
+  [[ -z "${SANTA_RESUME_CMD:-}" ]] || can_popup=0
+  if (( can_popup )); then $TMUX list-clients 2>/dev/null | grep -q . || can_popup=0; fi
+  if (( can_popup )) && bin=$(ck_select_bin 2>/dev/null); then
+    rows=""
+    if [[ -n "$last" ]]; then rows+="$last"$'\t'"account $last (last used)"$'\n'"default"$'\t'"default account"$'\n'
+    else rows+="default"$'\t'"default account (last used)"$'\n'; fi
+    while read -r a; do [[ -n "$a" && "$a" != "$last" ]] && rows+="$a"$'\t'"account $a"$'\n'; done < <(cockpit_accounts_list)
+    rowfile=$(mktemp "${TMPDIR:-/tmp}/cockpit-send-accounts.XXXXXX")
+    printf '%s' "$rows" > "$rowfile"
+    sel=$($TMUX display-popup -E -w 60 -h 16 \
+      "$(printf %q "$bin") --title $(printf %q "Resume ${id:0:8} · which account?") --hide 1 --match 2 < $(printf %q "$rowfile")" 2>/dev/null)
+    poprc=$?
+    rm -f "$rowfile"
+    if (( poprc != 0 )) || [[ -z "$sel" ]]; then
+      echo "cockpit-send: account pick cancelled" >&2; log "ABORT: pick-account cancelled"; exit 0
+    fi
+    account="${sel%%$'\t'*}"; [[ "$account" != default ]] || account=""
+  else
+    {
+      echo "cockpit-send: --pick-account needs an interactive popup, which isn't available here"
+      echo "cockpit-send: available accounts (last used: ${last:-default}):"
+      { [[ -n "$last" ]] && printf '  %s\n' "$last"; cockpit_accounts_list; } | sort -u | sed 's/^/  /'
+      echo "cockpit-send: default"
+      echo "cockpit-send: use --account <name> (or --account default) instead"
+    } >&2
+    log "ABORT: --pick-account degraded, no interactive context (santa=${SANTA_RESUME_CMD:+set} client=$can_popup)"
+    exit 2
+  fi
+fi
+
+# ── auto-rebind: no --account/--pick-account at all → resume on whatever this session last ran on ──────────
+# A session dormant long enough to need resuming almost never has its account carried anywhere else — santa
+# only ever passes sessionId/--cwd/--agent. Explicit --account (including --account default, normalized to
+# empty above) always overrides this and is never consulted here.
+account_source="explicit"
+if (( ! account_given && ! pick_account )); then
+  account=$(cockpit_session_last_account "$id")
+  account_source="lookup"
+fi
+
+# ── resolve the account to a token, once the provider is actually known ─────────────────────────────────────
 # The agent is DISCOVERED here (santa's DB, then a Codex rollout), not declared, so the Claude-only check has
 # to wait until now. Resolved before any tmux side effect and before the pending queue, because a refusal must
 # leave nothing behind. Never silently ignored: a caller who asked for a second subscription and got the first
 # one has no way to see that from the outside, which is precisely the failure this whole flag exists to stop.
+# A LOOKED-UP account is held to the exact same guard as an explicit one — the only difference is the
+# refusal message names where it came from, so the operator isn't left guessing why an unflagged resume
+# suddenly refused.
 if [[ -n "$account" ]]; then
-  [[ "$agent" == claude ]] \
-    || { echo "cockpit-send: --account is Claude-only ($id resolves to $agent, which has no CLAUDE_CODE_OAUTH_TOKEN equivalent)" >&2
-         log "ABORT: --account with agent=$agent"; exit 2; }
-  if ! account_token=$(cockpit_account_token "$account" 2>/dev/null); then
-    echo "cockpit-send: --account '$account': $(cockpit_account_reason "$account")" >&2
+  if [[ "$agent" != claude ]]; then
+    if [[ "$account_source" == lookup ]]; then
+      echo "cockpit-send: $id last ran on account '$account', but resolves to $agent here — accounts are Claude-only, resuming on the default account instead" >&2
+      account=""
+    else
+      echo "cockpit-send: --account is Claude-only ($id resolves to $agent, which has no CLAUDE_CODE_OAUTH_TOKEN equivalent)" >&2
+      log "ABORT: --account with agent=$agent"; exit 2
+    fi
+  elif ! account_token=$(cockpit_account_token "$account" 2>/dev/null); then
+    if [[ "$account_source" == lookup ]]; then
+      echo "cockpit-send: $id previously ran on account '$account', which no longer resolves: $(cockpit_account_reason "$account")" >&2
+    else
+      echo "cockpit-send: --account '$account': $(cockpit_account_reason "$account")" >&2
+    fi
     echo "cockpit-send: refusing to resume — an unset CLAUDE_CODE_OAUTH_TOKEN is read as 'use the primary account'" >&2
-    log "ABORT: account '$account' did not resolve"; exit 2
+    log "ABORT: account '$account' ($account_source) did not resolve"; exit 2
   fi
-  account_env=(-e "CLAUDE_CODE_OAUTH_TOKEN=$account_token")
+  [[ -n "$account_token" ]] && account_env=(-e "CLAUDE_CODE_OAUTH_TOKEN=$account_token")
 fi
 
 if ! $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then

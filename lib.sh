@@ -146,6 +146,18 @@ cockpit_pane_account_mark() {
   printf '%s' "$mark"
 }
 
+# Compact "what account" text for LISTING surfaces (cockpit-pick's dormant-session rows, `cockpit --list`)
+# where there is no live pane to attach a tmux format fragment to — the same rule the header uses, just
+# as one plain string: the mark if one exists, else "·name" so an unmarked bound account is still visible,
+# else "" for no binding (including every non-claude agent, since accounts are Claude-only).
+cockpit_pane_account_display() {
+  local acct="${1:-}" agent="${2:-}" mark
+  mark=$(cockpit_pane_account_mark "$acct" "$agent")
+  if [[ -n "$mark" ]]; then printf '%s' "$mark"
+  elif [[ -n "$acct" ]]; then printf '·%s' "$acct"
+  else printf ''; fi
+}
+
 # Resolve an account to its token. SUCCESS: the token alone on stdout, rc 0.
 # FAILURE: nothing on stdout, one human-readable line on stderr, rc 1.
 # Callers that need the reason as a VALUE (the restore path bakes it into the pane) capture stderr:
@@ -531,6 +543,23 @@ cockpit_layout_peak() {
        WHERE s.session=$(ck_sqesc "$sess")
        GROUP BY s.id ORDER BY s.at DESC, s.id DESC LIMIT $lim)
      ORDER BY ws DESC, panes DESC, id DESC LIMIT 1;" 2>/dev/null
+}
+
+# The most recently recorded @account for a session id, across this cockpit session's ENTIRE snapshot
+# history (not just the newest snapshot) — a session dormant long enough to need resuming has usually
+# rotated out of the newest snapshot already. Empty output (rc 0) covers two indistinguishable-and-
+# correctly-so cases: the session's most recent recorded pane ran on the default account, or the session
+# has no history at all — both mean "nothing to auto-rebind to". A row that fails cockpit_account_name_ok
+# (shouldn't happen — cockpit_layout_save already validates on the way in — but never trust a persisted
+# value blindly) is treated the same as empty rather than propagated.
+cockpit_session_last_account() {
+  local sid="${1:-}" sess="${COCKPIT_SESSION}" result
+  [[ -n "$sid" && -f "$COCKPIT_LAYOUT_DB" ]] || { printf ''; return 0; }
+  result=$(sqlite3 "$COCKPIT_LAYOUT_DB" \
+    "SELECT p.account FROM panes p JOIN snapshots s ON s.id = p.snapshot_id
+     WHERE s.session=$(ck_sqesc "$sess") AND p.session_id=$(ck_sqesc "$sid")
+     ORDER BY s.at DESC, s.id DESC LIMIT 1;" 2>/dev/null)
+  cockpit_account_name_ok "$result" && printf '%s' "$result" || printf ''
 }
 
 # One-time adoption of the pre-SQLite TSV so an upgrade doesn't start blind.

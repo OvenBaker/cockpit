@@ -228,23 +228,25 @@ fi
 # columns. The picker returns the line verbatim, so the caller reads the machine fields straight
 # back out without a lookup table or an index to get wrong.
 pick_rows() {
-  local row id cwd title agent jsonl age tag
+  local row id cwd title agent jsonl age tag acct mark
   for row in "${CAND[@]}"; do
     IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
     jsonl=$(agent_transcript "$agent" "$id" "$cwd")
     age=$(fmt_age "$(idle_seconds "$jsonl")")
     tag=$([[ "$agent" == codex ]] && echo cx || echo cl)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$id" "$cwd" "$title" "$agent" "$tag" "$age" "${cwd/#$HOME/\~}" "${title:0:80}"
+    acct=$(cockpit_session_last_account "$id")
+    mark=$(cockpit_pane_account_display "$acct" "$agent")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "$cwd" "$title" "$agent" "$tag" "$mark" "$age" "${cwd/#$HOME/\~}" "${title:0:80}"
   done
 }
-# hidden: 1 id, 2 cwd, 3 title, 4 agent · shown: 5 tag, 6 age, 7 ~cwd, 8 title · filter: cwd+title
+# hidden: 1 id, 2 cwd, 3 title, 4 agent · shown: 5 tag, 6 account mark, 7 age, 8 ~cwd, 9 title · filter: cwd+title
 PICK_ARGS=(--hide 1,2,3,4 --match 2,3)
 
 # the numbered render is startup-only now (see the case below)
 if [[ "$MODE" == startup ]]; then
   say ""
-  say "  cockpit · dormant sessions  (cl=claude  cx=codex)"
+  say "  cockpit · dormant sessions  (cl=claude  cx=codex  ·  account, if any resumed it last)"
   say "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
   i=0
   for row in "${CAND[@]}"; do
@@ -253,7 +255,8 @@ if [[ "$MODE" == startup ]]; then
     jsonl=$(agent_transcript "$agent" "$id" "$cwd")
     age=$(fmt_age "$(idle_seconds "$jsonl")")
     tag=$([[ "$agent" == codex ]] && echo cx || echo cl)
-    printf '  %2d  %s %4s  %-22s  %s\n' "$i" "$tag" "$age" "${cwd/#$HOME/\~}" "${title:0:44}" >/dev/tty
+    mark=$(cockpit_pane_account_display "$(cockpit_session_last_account "$id")" "$agent")
+    printf '  %2d  %s %-8.8s %4s  %-22s  %s\n' "$i" "$tag" "$mark" "$age" "${cwd/#$HOME/\~}" "${title:0:44}" >/dev/tty
   done
   say ""
 fi

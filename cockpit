@@ -80,9 +80,10 @@ case "$MODE" in
        WHERE s.session='$COCKPIT_SESSION' GROUP BY s.id ORDER BY s.at DESC, s.id DESC LIMIT ${N:-20};"
     exit 0;;
   list)
-    printf '%-7s %-10s %-28s %s\n' "AGENT" "SESSION" "CWD" "TITLE"
+    printf '%-7s %-10s %-8s %-28s %s\n' "AGENT" "SESSION" "ACCOUNT" "CWD" "TITLE"
     cockpit_candidates "$N" | while IFS=$'\t' read -r id cwd title agent; do
-      printf '%-7s %-10s %-28s %s\n' "${agent:-claude}" "${id:0:8}" "${cwd/#$HOME/\~}" "$title"
+      mark=$(cockpit_pane_account_display "$(cockpit_session_last_account "$id")" "${agent:-claude}")
+      printf '%-7s %-10s %-8s %-28s %s\n' "${agent:-claude}" "${id:0:8}" "$mark" "${cwd/#$HOME/\~}" "$title"
     done; exit 0;;
 esac
 
