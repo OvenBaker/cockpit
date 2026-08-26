@@ -180,9 +180,13 @@ apply_chrome() {
   $TMUX bind -n M-N   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick new"
   # find sessions related to the focused pane's session → add a chosen one here
   $TMUX bind -n M-f   display-popup -E -w 88 -h 22 "$HERE/cockpit-related #{pane_id}"
-  # browse in santa's TUI; its resume key drops the session into the grid
+  # browse in santa's TUI; its resume key drops the session into the grid.
+  # --no-refresh is load-bearing: the TUI's launch-time ingest can take minutes on a large
+  # history (and repaints a progress bar per file), so the popup would sit blank and never
+  # reach the browse list. The hourly santa refresh cron keeps the index current anyway, so
+  # the only cost is sessions started within the last hour (2026-08-25).
   $TMUX bind -n M-s   display-popup -E -w 95% -h 90% \
-    "SANTA_RESUME_CMD=$HERE/cockpit-send SANTA_RESUME_LABEL=cockpit PATH=$HERE/shim:\$PATH COCKPIT_SEND=$HERE/cockpit-send COCKPIT_TMUX='$TMUX' santa tui --provider cuda"
+    "SANTA_RESUME_CMD=$HERE/cockpit-send SANTA_RESUME_LABEL=cockpit PATH=$HERE/shim:\$PATH COCKPIT_SEND=$HERE/cockpit-send COCKPIT_TMUX='$TMUX' santa tui --provider cuda --no-refresh"
   $TMUX bind -n M-x   run-shell "$HERE/cockpit-pane remove"
   $TMUX bind    x     run-shell "$HERE/cockpit-pane remove"   # C-b x → same recoverable kill
   # Swallow C-z: panes are `exec claude`, so an accidental Ctrl+Z suspends the agent
