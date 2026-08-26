@@ -147,9 +147,12 @@ apply_chrome() {
   # right; the heavy line fills the gap. @sc is set per-pane by the poller.
   # The label is stored full and truncated HERE to pane_width-20 (≈ badge+pad),
   # so it uses whatever room the pane has — wide panes show more, narrow less.
-  # A stamped @role prefixes the label as "[role] " and eats a bit more of the truncation budget (32 vs 20)
-  # so the role tag doesn't shove the label itself off the edge of a narrow pane.
-  $TMUX set -g pane-border-format '#[align=left] #{@sc}#{?@role,[#{@role}] ,}#{=/#{e|-|:#{pane_width},#{?@role,32,20}}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] '
+  # A stamped @role prefixes the label with a compact glyph for known roles (bare codepoint, no VS16 — the
+  # variation selector breaks tmux's border width math) or a bracketed text tag for anything else, and eats
+  # a bit more of the truncation budget (32 vs 20) so the tag doesn't shove the label off a narrow pane.
+  # Nested #{?...} conditionals read poorly inline, so the tag piece is built in a variable first.
+  local role_tag='#{?@role,#{?#{==:#{@role},architect},📐 ,#{?#{==:#{@role},builder},🧱 ,[#{@role}] }},}'
+  $TMUX set -g pane-border-format "#[align=left] #{@sc}${role_tag}#{=/#{e|-|:#{pane_width},#{?@role,32,20}}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] "
   # box borders: uniform neutral; only the active pane is highlighted (the one
   # case with no shared-edge ambiguity).
   $TMUX set -g pane-border-style 'fg=colour238'
