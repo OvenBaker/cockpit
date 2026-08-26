@@ -599,7 +599,7 @@ cockpit_stamp_known_agent() { # pane session-id cwd label agent [role]
   $tmux set -p -t "$pane" @agent "$agent"
   $tmux set -p -t "$pane" @born ""
   $tmux set -p -t "$pane" @badge "starting"
-  [[ -n "$role" ]] && $tmux set -p -t "$pane" @role "$role"
+  [[ -z "$role" ]] || $tmux set -p -t "$pane" @role "$role"
 }
 
 cockpit_stamp_pending_agent() { # pane cwd label agent [role]
@@ -611,7 +611,7 @@ cockpit_stamp_pending_agent() { # pane cwd label agent [role]
   $tmux set -p -t "$pane" @agent "$agent"
   $tmux set -p -t "$pane" @born "$(date +%s)"
   $tmux set -p -t "$pane" @badge "starting"
-  [[ -n "$role" ]] && $tmux set -p -t "$pane" @role "$role"
+  [[ -z "$role" ]] || $tmux set -p -t "$pane" @role "$role"
 }
 
 # --- seeded first-turn requests (cockpit-spawn --request-id …) ---------------

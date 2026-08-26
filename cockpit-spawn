@@ -323,7 +323,7 @@ if [[ "$agent" == shell ]]; then
   $TMUX set -p -t "$pane" @born ""            # no @born → poller won't chase a transcript
   $TMUX set -p -t "$pane" @label "$(basename "$cwd") · bash"
   $TMUX set -p -t "$pane" @badge "shell"
-  [[ -n "$role" ]] && $TMUX set -p -t "$pane" @role "$role"
+  [[ -z "$role" ]] || $TMUX set -p -t "$pane" @role "$role"
 else
   cockpit_stamp_pending_agent "$pane" "$cwd" "$name" "$agent" "$role"
 fi
