@@ -104,6 +104,10 @@ cockpit_account_token_path() { printf '%s/%s.token' "${COCKPIT_ACCOUNTS_DIR:-$HO
 # @account is stamped, from ${COCKPIT_ACCOUNTS_DIR}/<name>.mark (one trimmed line). An unrecognized name,
 # a missing mark file, or an empty one all resolve the same way — no mark — never an error: this is
 # decoration, not a binding, and must never be why a spawn or restore refuses.
+#
+# Letter convention (assigned by hand in each account's .mark file, not derived here): α is reserved for
+# the DEFAULT/primary account, which carries no @account option at all and therefore never resolves through
+# this function — named accounts start at β and continue γ, δ, … in the order they're introduced.
 cockpit_account_mark() {
   local name="${1:-}" path="" mark=""
   cockpit_account_name_ok "$name" || { printf ''; return 0; }
