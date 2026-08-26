@@ -1033,6 +1033,52 @@ agent_resume_inner() {
   esac
 }
 
+# The validated respawn-resume core shared by cockpit-account (switch binding, resume) and cockpit-restart
+# (same binding, resume — e.g. to pick up a freshly released provider binary). $2 is the Claude account NAME
+# to deliver (empty = default/primary); it is IGNORED for a codex pane, which has no such concept. Refuses
+# (rc 1, pane untouched) before any kill: no resumable @agent, no @session_id, or (claude + named account)
+# a token that no longer resolves. Reads the pane's own @cwd/@label/@orb_server_file — it always resumes
+# THIS pane's tracked session, never a different one. On success, re-stamps identity exactly like
+# cockpit-reboot does (cockpit_stamp_known_agent — clears @state/@hook_state/@hook_at, resets @born, sets
+# @badge "starting") and then the same transient "rebooting" badge on top. Never touches @account/
+# @account_mark itself — stamping the BINDING is the caller's job (cockpit-account does it before calling
+# this; cockpit-restart never changes it at all).
+cockpit_respawn_resume() {
+  local pane="$1" account="${2:-}" tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
+  local agent sid cwd label orb tok=""
+  IFS="$TAB" read -r agent sid cwd label orb < <($tmux display -p -t "$pane" \
+    -F "#{?@agent,#{@agent},$NIL}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}" 2>/dev/null)
+  [[ "$agent" == "$NIL" ]] && agent=""; [[ "$sid" == "$NIL" ]] && sid=""
+  [[ "$cwd" == "$NIL" ]] && cwd=""; [[ "$label" == "$NIL" ]] && label=""
+  [[ "$orb" == "$NIL" ]] && orb=""
+
+  case "$agent" in
+    claude|codex) ;;
+    *) echo "cockpit_respawn_resume: pane $pane has no resumable agent ('${agent:-<untracked>}')" >&2; return 1;;
+  esac
+  [[ -n "$sid" ]] || { echo "cockpit_respawn_resume: pane $pane has no session id to resume" >&2; return 1; }
+
+  if [[ "$agent" == claude && -n "$account" ]]; then
+    if ! tok=$(cockpit_account_token "$account" 2>/dev/null); then
+      echo "cockpit_respawn_resume: account '$account' — $(cockpit_account_reason "$account")" >&2
+      return 1
+    fi
+  fi
+
+  local cmd; cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label" "$orb")")
+  if [[ "$agent" == claude ]]; then
+    $tmux respawn-pane -k -t "$pane" -e "CLAUDE_CODE_OAUTH_TOKEN=$tok" "bash -lc $(printf %q "$cmd")" 2>/dev/null \
+      || { echo "cockpit_respawn_resume: respawn failed" >&2; return 1; }
+  else
+    $tmux respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")" 2>/dev/null \
+      || { echo "cockpit_respawn_resume: respawn failed" >&2; return 1; }
+  fi
+
+  cockpit_stamp_known_agent "$pane" "$sid" "$cwd" "$label" "$agent"
+  $tmux set -p -t "$pane" @badge "rebooting"
+  return 0
+}
+
 # Wrap a launch command so a FAILED start leaves the pane alive instead of
 # taking the workspace down with it. tmux closes a pane when its command exits,
 # and closes the WINDOW when that was its last pane — so one resume that exits

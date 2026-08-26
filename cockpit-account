@@ -59,28 +59,15 @@ if [[ "$target" == "$cur" ]]; then
   exit 0
 fi
 
-cwd=$($TMUX show -pqv -t "$pane" @cwd 2>/dev/null)
-label=$($TMUX show -pqv -t "$pane" @label 2>/dev/null)
-
 # Stamp the new binding BEFORE respawning, not after — same reasoning as cockpit-pick's retarget: a
 # stamp-then-respawn that fails mid-flight leaves a stamp whose token was not yet applied (restore reads the
 # stamp and re-applies it — recoverable), while respawn-then-stamp can leave a pane RUNNING on the new
 # account with no stamp at all. Both set UNCONDITIONALLY (empty clears it): this is by definition a REUSED
 # pane, and a stale @account/@account_mark left standing would claim a binding the running process doesn't
-# have.
+# have. `target` was already validated above (name format + token resolution), so cockpit_respawn_resume's
+# own internal re-check of the same account is a redundant safety net, not the primary guard.
 $TMUX set -p -t "$pane" @account "$target"
 $TMUX set -p -t "$pane" @account_mark "$(cockpit_pane_account_mark "$target" "$agent")"
 
-# Exact respawn/launch composition copied from cockpit-reboot: same env-array shape (`-e` only, never in the
-# command string), same cockpit_keep_pane_on_failure wrap, same bash -lc %q quoting.
-cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
-$TMUX respawn-pane -k -t "$pane" -e "CLAUDE_CODE_OAUTH_TOKEN=$token" "bash -lc $(printf %q "$cmd")" 2>/dev/null \
-  || { echo "cockpit-account: respawn failed" >&2; exit 1; }
-
-# Same @born/@badge/projection handling as cockpit-reboot: re-stamp identity (clears @state/@hook_state/
-# @hook_at via cockpit_clear_projection, resets @born so the poller re-adopts cleanly), then the transient
-# "rebooting" badge — no role argument, so the pane's existing @role (if any) is left untouched.
-cockpit_stamp_known_agent "$pane" "$sid" "$cwd" "$label" "$agent"
-$TMUX set -p -t "$pane" @badge "rebooting"
-
+cockpit_respawn_resume "$pane" "$target" || exit 1
 echo "cockpit-account: $pane switched to ${target:-default} and resumed ${sid:0:8}"

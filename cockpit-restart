@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# cockpit-restart — respawn a pane onto a fresh resume of its CURRENT session, keeping whatever binding it
+# already had exactly as it was (unlike cockpit-account, this never touches @account/@account_mark).
+#
+#   cockpit-restart <pane>
+#
+# Purpose: pick up a newly released claude/codex binary, or recover a pane whose provider process died in a
+# way tmux didn't notice, without a workspace-level reboot. Supports BOTH claude and codex (cockpit-account
+# is claude-only, since accounts are a Claude subscription concept — codex has none). The in-flight turn
+# dies (same as any respawn) and the resumed session continues from the last completed turn.
+#
+# Shell panes refuse — there is nothing to resume; re-exec the pane directly instead. No no-op detection: a
+# restart is always meaningful, that's the whole point.
+#
+# Exit codes: 0 ok · 1 no such pane / respawn failed · 2 validation refused.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+# This is the one cockpit script routinely invoked SILENTLY (menu run-shell has no visible output path), so
+# every refusal goes to both stderr (plain CLI callers) and the tmux status line (menu callers) — otherwise
+# a refused restart from the right-click menu looks exactly like nothing happened. Best-effort on the
+# display-message: a plain CLI run with no client attached just has it swallowed.
+refuse() {  # message  [exit-code, default 2]
+  echo "cockpit-restart: $1" >&2
+  $TMUX display-message "cockpit-restart: $1" 2>/dev/null || true
+  exit "${2:-2}"
+}
+
+pane="${1:-}"
+[[ -n "$pane" ]] || { echo "usage: cockpit-restart <pane>" >&2; exit 2; }
+# list-panes -a is the reliable existence check — `display -p -t <bad-pane>` does NOT fail (see cockpit-role).
+$TMUX list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx -- "$pane" || refuse "no such pane '$pane'" 1
+
+# `show -pqv`, NEVER `show -p | awk` — a cleared option prints quoted-empty and awk's field-split would
+# return the literal quotes, misreporting "cleared" as a bound value.
+agent=$($TMUX show -pqv -t "$pane" @agent 2>/dev/null)
+case "$agent" in
+  claude|codex) ;;
+  shell) refuse "pane $pane is a shell pane — nothing to resume, re-exec it directly instead";;
+  *) refuse "pane $pane is not a tracked claude/codex pane (agent='${agent:-<none>}')";;
+esac
+
+# The pane's CURRENT account binding, unchanged — cockpit_respawn_resume re-resolves its token (claude only;
+# ignored for codex) and refuses before killing if it no longer resolves, same guard as cockpit-account.
+# Its stderr (the actual reason) is captured rather than discarded, so refuse() can relay it verbatim.
+account=$($TMUX show -pqv -t "$pane" @account 2>/dev/null)
+err=$(cockpit_respawn_resume "$pane" "$account" 2>&1 >/dev/null); rc=$?
+(( rc == 0 )) || refuse "${err:-respawn refused}" 1
+
+echo "cockpit-restart: $pane restarted"
+$TMUX display-message "cockpit-restart: $pane restarted" 2>/dev/null || true
