@@ -161,7 +161,7 @@ apply_chrome() {
   # (flush, no space — the role segment's own trailing space separates from the label) or, when there is no
   # role, a centered dot before the label ("α· label", not "α label"). The "· name" unmarked-account
   # fallback is unaffected — it already carries its own trailing space either way.
-  local account_tag='#{?@account_mark,#{@account_mark}#{?@role,,· },#{?@account,· #{@account} ,}}'
+  local account_tag='#{?@account_mark,#{@account_mark}#{?@role,,·},#{?@account,· #{@account} ,}}'
   # Truncation reserve bumped modestly (20 → 30 base) for the two new prefix segments; not split further per
   # role/account combination — a long unmarked account name can still crowd a narrow pane, but that is a rare
   # cosmetic edge case, not one worth a wider conditional.
