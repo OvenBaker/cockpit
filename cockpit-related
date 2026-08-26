@@ -16,7 +16,20 @@ sid=$($TMUX show -p -t "$pane" @session_id 2>/dev/null | awk '{print $2}')
 [[ -n "$sid" ]] || { say "  this pane has no tracked session to relate from."; pause "(any key) "; exit 0; }
 
 say ""; say "  finding sessions related to ${sid:0:8} …"
-mapfile -t R < <("$SANTA" related "$sid" --limit 10 --porcelain 2>/dev/null)
+# Keep santa's exit status: "more like this" is a vector query, so it refuses outright when the
+# shared GPU lease is held or CUDA is unavailable. Swallowing that (2>/dev/null, status ignored)
+# reported a real refusal as "no related sessions found" — the operator's own history looking
+# empty rather than the GPU being busy (2026-08-26).
+out=$(mktemp); err=$(mktemp)
+trap 'rm -f "$out" "$err"' EXIT
+"$SANTA" related "$sid" --limit 10 --porcelain >"$out" 2>"$err"; rc=$?
+mapfile -t R < "$out"
+if (( rc != 0 )); then
+  msg=$(tr -d '\r' <"$err" | grep -v '^[[:space:]]*$' | tail -2 | tr '\n' ' ')
+  [[ -n "$msg" ]] || msg="santa related failed (exit $rc)."
+  say "  $msg"
+  pause "(any key) "; exit 0
+fi
 (( ${#R[@]} )) || { say "  no related sessions found."; pause "(any key) "; exit 0; }
 
 say ""; say "  Related sessions — pick one to add to this workspace:"; say ""
