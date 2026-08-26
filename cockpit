@@ -216,27 +216,28 @@ apply_chrome() {
   # agent never sees ^Z → can't be suspended), and cockpit-cont resumes anything
   # already stopped (no-op otherwise). C-b C-z still suspends the whole tmux client.
   $TMUX bind -n C-z   run-shell "$HERE/cockpit-cont #{pane_id}"
-  # Plain right-click is left ALONE (terminal-native — the operator uses it to copy selected text, and a
-  # tmux menu popping up on every click broke that). Explicitly unbound rather than just never (re)bound,
-  # so a stale binding from a previous apply_chrome on a long-running server is cleared too. tmux's own
-  # STOCK defaults also pop menus on every other MouseDown3 variant — the Alt-modified pane click, both
-  # status-bar right-clicks, and THEIR Alt-modified variants too — none of these are cockpit's doing
-  # (grepped: cockpit never binds them), but no stock menu should be one accidental modifier away, so they
-  # all go. C-MouseDown3Pane below is deliberately the ONLY MouseDown3-family binding left standing.
+  # tmux's own STOCK menus are unbound first — every MouseDown3 variant EXCEPT plain MouseDown3Pane below
+  # (the Alt-modified pane click, both status-bar right-clicks, and their Alt-modified variants; none of
+  # these are cockpit's doing, grepped first) — so nothing pops a menu without an explicit choice below.
+  # unbind-then-rebind on the same key (MouseDown3Pane) stays idempotent across repeated apply_chrome calls
+  # on a long-running server: a stale prior binding is cleared before the current one is installed.
   $TMUX unbind -n MouseDown3Pane
   $TMUX unbind -n M-MouseDown3Pane
   $TMUX unbind -n MouseDown3Status
   $TMUX unbind -n MouseDown3StatusLeft
   $TMUX unbind -n M-MouseDown3Status
   $TMUX unbind -n M-MouseDown3StatusLeft
-  # The cockpit pane menu instead lives on ctrl+right-click: routes Kill through the soft-kill so Alt-u can
-  # undo it, and Restart onto cockpit-restart (respawns the CLICKED pane's resume in place — same session,
-  # same binding — to pick up a freshly released provider binary; #{pane_id} in a display-menu bound via
-  # -t = resolves to the pane under the mouse, not the one that happened to be focused).
-  $TMUX bind -n C-MouseDown3Pane select-pane -t = '\;' display-menu -T "#[align=centre] pane #{pane_index} " -x M -y M \
+  # The cockpit pane menu lives on plain right-click, WITH a y/n guard on its two destructive entries (tmux
+  # `confirm-before`) — so a stray/accidental click can't fire a kill or a restart; only an explicit menu
+  # choice followed by an explicit confirm does. Kill routes through the soft-kill so Alt-u can undo it;
+  # Restart onto cockpit-restart (respawns the CLICKED pane's resume in place — same session, same binding —
+  # to pick up a freshly released provider binary; #{pane_id} in a display-menu bound via -t = resolves to
+  # the pane under the mouse, not the one that happened to be focused). Zoom/Move/Swap are non-destructive
+  # and stay unconfirmed.
+  $TMUX bind -n MouseDown3Pane select-pane -t = '\;' display-menu -T "#[align=centre] pane #{pane_index} " -x M -y M \
     "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z" \
-    "Kill (undoable)" k "run-shell \"$HERE/cockpit-pane remove\"" \
-    "Restart"         r "run-shell \"$HERE/cockpit-restart '#{pane_id}'\"" \
+    "Kill (undoable)" k "confirm-before -p \"kill pane #{pane_index}? (y/n)\" \"run-shell \\\"$HERE/cockpit-pane remove\\\"\"" \
+    "Restart"         r "confirm-before -p \"restart pane #{pane_index}? (y/n)\" \"run-shell \\\"$HERE/cockpit-restart '#{pane_id}'\\\"\"" \
     "Move to next ws" m "run-shell \"$HERE/cockpit-move next\"" \
     "Swap up"         u "swap-pane -U" \
     "Swap down"       d "swap-pane -D"
