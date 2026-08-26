@@ -108,6 +108,7 @@
   .tag { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); color: var(--ink-dim); }
   .tag.cx { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); }
   .tag.aide { color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .tag.acct { color: var(--ink); border-color: color-mix(in srgb, var(--ink) 35%, var(--line)); }
   .reboot { appearance: none; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); border-radius: 9px; padding: 7px 11px; flex: none; }
   .reboot:active { transform: translateY(1px); }
 
@@ -316,6 +317,9 @@
     var canReboot = isClaude && !isOrderly && p.session_id && (p.state === 'idle' || p.state === 'just-finished');
     var badge = p.badge || p.state || '…';
     var tag = isOrderly ? '<span class="tag aide">' + esc(p.orderly) + '</span>' : (p.agent === 'codex' ? '<span class="tag cx">codex</span>' : '');
+    // Which Claude subscription this pane runs under. The default account shows nothing; a bound pane is
+    // named, because "whose quota is this burning" is invisible from the terminal and expensive to guess wrong.
+    if (p.account) { tag += '<span class="tag acct">' + esc(p.account) + '</span>'; }
     var label = p.label || (p.session_id ? p.session_id.slice(0, 8) : '(new)');
     return '<div class="pane' + (isOrderly ? ' orderly' : '') + '">' +
       '<span class="pdot ' + esc(p.state || '') + '"></span>' +

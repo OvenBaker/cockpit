@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # cockpit-send — resume a Claude session as a cockpit pane.
 #
-#   cockpit-send <id|prefix> [--cwd PATH]
+#   cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME] [--account NAME]
 #
 # If a cockpit grid is running: split a new pane onto the session, stamp it so
 # the poller tracks it, and re-tile. If not: append it to a pending queue that
 # `cockpit --santa` drains into a fresh grid when the picker TUI exits.
+#
+# --account NAME resumes the session under a SECOND Claude subscription: the token from
+# ${COCKPIT_ACCOUNTS_DIR:-~/.config/cockpit/accounts}/NAME.token reaches the pane's child process as
+# CLAUDE_CODE_OAUTH_TOKEN through tmux's `-e`, and only the NAME is persisted (@account). Claude only — Codex
+# has no equivalent token, so a session that RESOLVES to codex refuses the flag rather than ignoring it. An
+# account that does not fully resolve refuses the resume outright: an empty CLAUDE_CODE_OAUTH_TOKEN is read by
+# Claude Code as unset, which would silently resume on the primary account and bill the quota this protects.
+# The account rides the pending queue too (5th field), so a cold `cockpit --santa` build keeps the binding.
 #
 # This is the bridge that lets santa's TUI "resume" feed cockpit instead
 # of opening a wt.exe tab — see shim/wt.exe.
@@ -16,11 +24,17 @@ PENDING="${TMPDIR:-/tmp}/cockpit-pending.${COCKPIT_SESSION}"
 LOG="${TMPDIR:-/tmp}/cockpit-send.log"
 log() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG" 2>/dev/null || true; }
 
-id=""; cwd=""; agent=""; ws=""
+id=""; cwd=""; agent=""; ws=""; account=""; account_token=""; declare -a account_env=()
 while [[ $# -gt 0 ]]; do case "$1" in
-  --cwd) cwd="${2:-}"; shift;; --agent) agent="${2:-}"; shift;; --workspace) ws="${2:-}"; shift;; *) id="$1";; esac; shift; done
-log "invoked: id='$id' cwd-arg='$cwd' agent='$agent' COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}'"
-[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME]" >&2; log "ABORT: no id"; exit 2; }
+  --cwd) cwd="${2:-}"; shift;; --agent) agent="${2:-}"; shift;; --workspace) ws="${2:-}"; shift;;
+  --account) account="${2:-}"; shift;; *) id="$1";; esac; shift; done
+# The account NAME is logged; the TOKEN is never read into this script until the launch, and never logged.
+log "invoked: id='$id' cwd-arg='$cwd' agent='$agent' account='$account' COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}'"
+[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME] [--account NAME]" >&2; log "ABORT: no id"; exit 2; }
+# Name syntax first, before the id is even resolved — a bad name is a caller bug, not a session fact.
+if [[ -n "$account" ]] && ! cockpit_account_name_ok "$account"; then
+  echo "cockpit-send: --account '$account' is not [A-Za-z0-9][A-Za-z0-9_-]{0,31}" >&2; log "ABORT: bad account name"; exit 2
+fi
 
 # resolve agent + full id + cwd + title. Claude resolves via santa's DB (handles
 # prefixes); otherwise try a Codex rollout; default claude.
@@ -53,8 +67,27 @@ fi
 [[ -n "$title" ]] || title="${id:0:8}"
 log "resolved: agent=$agent id=$id cwd=$cwd"
 
+# ── --account, once the provider is actually known ──────────────────────────────────────────────────────────
+# The agent is DISCOVERED here (santa's DB, then a Codex rollout), not declared, so the Claude-only check has
+# to wait until now. Resolved before any tmux side effect and before the pending queue, because a refusal must
+# leave nothing behind. Never silently ignored: a caller who asked for a second subscription and got the first
+# one has no way to see that from the outside, which is precisely the failure this whole flag exists to stop.
+if [[ -n "$account" ]]; then
+  [[ "$agent" == claude ]] \
+    || { echo "cockpit-send: --account is Claude-only ($id resolves to $agent, which has no CLAUDE_CODE_OAUTH_TOKEN equivalent)" >&2
+         log "ABORT: --account with agent=$agent"; exit 2; }
+  if ! account_token=$(cockpit_account_token "$account" 2>/dev/null); then
+    echo "cockpit-send: --account '$account': $(cockpit_account_reason "$account")" >&2
+    echo "cockpit-send: refusing to resume — an unset CLAUDE_CODE_OAUTH_TOKEN is read as 'use the primary account'" >&2
+    log "ABORT: account '$account' did not resolve"; exit 2
+  fi
+  account_env=(-e "CLAUDE_CODE_OAUTH_TOKEN=$account_token")
+fi
+
 if ! $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
-  printf '%s\t%s\t%s\t%s\n' "$id" "$cwd" "$title" "$agent" >> "$PENDING"   # queue for cold build
+  # 5th field = the account NAME (never the token), so the cold `cockpit --santa` build keeps the binding.
+  # Rows without it are the four-field legacy shape and read as "no account", which is what they are.
+  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$cwd" "$title" "$agent" "$account" >> "$PENDING"   # queue for cold build
   exit 0
 fi
 
@@ -79,13 +112,18 @@ W=$(cockpit_resolve_workspace "$ws")   # named → reuse/create; empty → works
 # reuse a bare untracked shell (e.g. a freshly-created workspace) if it's active
 act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
 actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
+# The token crosses as tmux `-e` START-ENVIRONMENT only — never inside $cmd, so it is absent from the pane's
+# start command, the layout DB, cockpit-state and this script's log. Only the NAME is stamped below.
 if [[ -z "$actsid" && -n "$act" ]]; then
-  pane="$act"; $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
+  pane="$act"; $TMUX respawn-pane -k -t "$pane" "${account_env[@]}" "bash -lc $(printf %q "$cmd")"
 else
-  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${account_env[@]}" "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
     || { $TMUX display-message "cockpit: no room for another pane at this width"; exit 0; }
 fi
 cockpit_stamp_known_agent "$pane" "$id" "$cwd" "$title" "$agent"
+# Unconditional (empty clears it) — this may be a REUSED bare pane, and a stale @account would claim a
+# binding whose token was never applied to the process now running in it.
+$TMUX set -p -t "$pane" @account "$account"
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 $TMUX display-message "cockpit: + ${title:0:40}"
 echo "resumed ${id:0:8} → ${title:0:60}"

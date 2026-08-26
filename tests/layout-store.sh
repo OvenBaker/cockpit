@@ -62,7 +62,7 @@ ok "codex resume re-attaches the orb server as -c values" \
    'agent_resume_inner codex 019f-abc "$T/work" x "$ORB" | grep -q "mcp_servers.orb.command"'
 
 echo "== fix 3: SQLite store round-trips, keeps history, survives nasty labels"
-SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\tcpw_test\tcpp_test\t3\t7\tworking\t'"$ORB"$'\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>'
+SNAP=$'@active\tworkspace-b\n0\tworkspace-a\t'"$SID"$'\t'"$T/work"$'\tlabel with \'quotes\' and, commas\tclaude\tcpw_test\tcpp_test\t3\t7\tworking\t'"$ORB"$'\twork2\n1\tworkspace-b\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>'
 ok "save accepts a snapshot"            'cockpit_layout_save "$SNAP"'
 ok "load returns it verbatim"           '[[ "$(cockpit_layout_load)" == "$SNAP" ]]'
 ok "single quotes survive storage"      'cockpit_layout_load | grep -q "with .quotes. and, commas"'
@@ -71,6 +71,10 @@ ok "controller identity survives storage" 'cockpit_layout_load | grep -q $'"'"'c
 # The orb binding is what lets a RESUMED execution keep the channel it was launched with, so it has to survive
 # the layout store or the resume has nothing to re-attach.
 ok "orb binding survives storage"       '[[ "$(cockpit_layout_load | sed -n 2p | cut -f12)" == "$ORB" ]]'
+# The Claude account binding has to survive for the same reason, with a sharper failure mode: a lost binding
+# does not degrade to "no channel", it degrades to "resumed on the PRIMARY subscription", silently.
+ok "account binding survives storage"   '[[ "$(cockpit_layout_load | sed -n 2p | cut -f13)" == "work2" ]]'
+ok "the account column stores a NAME only" '! grep -aq "sk-ant" "$COCKPIT_LAYOUT_DB"'
 ok "a pane with no orb binding stays empty" \
    '[[ "$(cockpit_layout_load | sed -n 3p | cut -f12)" == "<nil>" ]]'
 ok "empty snapshot is refused"          '! cockpit_layout_save ""'

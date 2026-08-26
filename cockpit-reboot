@@ -40,9 +40,26 @@ reboot_pane() {
   if (( ! force )) && [[ "$state" == "working" || "$state" == "needs-input" ]]; then
     echo "skip $pid: $state (use --force to reboot anyway)" >&2; return 1
   fi
+  # A reboot re-execs the provider, so a pane bound to a second Claude subscription needs its token handed to
+  # the NEW process — otherwise the reboot quietly moves the session onto the primary account, which is the
+  # one thing the binding exists to prevent. An account that no longer resolves SKIPS the pane rather than
+  # rebooting it onto the default: the session stays as it is, unrebooted, and the operator is told why.
+  local acct tok; local -a eargs=()
+  # `show -pv`, not `show -p | awk '{print $2}'`: an option explicitly cleared to "" prints as `@account ''`,
+  # so the awk form yields the literal two-quote string and a cleared binding would read as a bound one.
+  acct=$($TMUX show -pv -t "$pid" @account 2>/dev/null)
+  if [[ -n "$acct" ]]; then
+    if tok=$(cockpit_account_token "$acct" 2>/dev/null); then
+      eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
+    else
+      echo "skip $pid: bound to Claude account '$acct' — $(cockpit_account_reason "$acct")" >&2
+      echo "         not rebooting it onto the primary account; fix the token file and retry" >&2
+      return 1
+    fi
+  fi
   local cmd; cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
-  if (( dry )); then echo "would reboot $pid  ${sid:0:8}  [$state]  ${label:0:40}"; return 0; fi
-  $TMUX respawn-pane -k -t "$pid" "bash -lc $(printf %q "$cmd")" 2>/dev/null || { echo "skip $pid: respawn failed" >&2; return 1; }
+  if (( dry )); then echo "would reboot $pid  ${sid:0:8}  [$state]${acct:+  account=$acct}  ${label:0:40}"; return 0; fi
+  $TMUX respawn-pane -k -t "$pid" "${eargs[@]}" "bash -lc $(printf %q "$cmd")" 2>/dev/null || { echo "skip $pid: respawn failed" >&2; return 1; }
   cockpit_stamp_known_agent "$pid" "$sid" "$cwd" "$label" "$agent"
   $TMUX set -p -t "$pid" @badge "rebooting"
   echo "rebooted $pid  ${sid:0:8}  ${label:0:40}"

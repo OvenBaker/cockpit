@@ -49,6 +49,62 @@ the shared `CODEX_HOME` SQLite state simultaneously. During restore, Codex panes
 in the saved active workspace start first; workspace and pane order do not
 change. Override the interval with `COCKPIT_CODEX_STAGGER_SECS` (`0` disables it).
 
+## Claude accounts (per pane)
+
+Run some panes under a **second Claude subscription** while the rest stay on the
+primary one. This is auth only: transcripts, santa's index, the poller and the
+hooks all keep using `~/.claude`, because the binding is a token handed to the
+pane's child process — not a relocated config directory.
+
+**Mint the token.** Log in to the CLI as the account you want, then:
+
+```
+claude setup-token                    # prints a long-lived token
+install -m 600 /dev/null ~/.config/cockpit/accounts/work2.token
+printf '%s' '<the token>' > ~/.config/cockpit/accounts/work2.token
+```
+
+**The file convention.** `${COCKPIT_ACCOUNTS_DIR:-~/.config/cockpit/accounts}/<name>.token`
+holds the token alone. It is a credential, so cockpit refuses it unless it is a
+real regular file (not a symlink), readable by you, mode **0600** (any group or
+other bit at all refuses), and non-empty after trimming whitespace. The account
+`<name>` must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$` — it becomes a filename
+and a tmux option value.
+
+**Use it.**
+
+```
+cockpit-spawn --cwd ~/repos/thing --account work2
+cockpit-send  <session-id>        --account work2
+```
+
+Claude only. `--agent codex` and shell panes **refuse** the flag rather than
+ignoring it — Codex has no equivalent token, and a pane you *think* is on the
+second account but isn't is the exact thing this feature exists to prevent.
+
+The pane carries an `@account` stamp with the NAME, which is persisted with the
+layout, re-applied on restore, and reported by `cockpit-state` (`panes[].account`)
+so the web surface and Orbital's fleet view can show it. **Only the name is ever
+persisted.** The token reaches the pane through tmux's `-e` start-environment at
+creation, so it is absent from the `bash -lc` command string, the pane's start
+command, the layout DB, `cockpit-state` and the logs.
+
+**Two verified facts about Claude Code (2.1.246) that shape all of the above:**
+
+1. `CLAUDE_CODE_OAUTH_TOKEN` **takes precedence** over `~/.claude/.credentials.json`,
+   per process — an invalid value fails loudly with `401 OAuth access token is invalid`.
+   That is what makes per-pane accounts work at all.
+2. `CLAUDE_CODE_OAUTH_TOKEN=""` **is treated as unset**: the run silently succeeds
+   on the *primary* account. That is why cockpit refuses an empty or missing token
+   instead of passing it through — passing it through is indistinguishable from
+   having no binding, and burns the exact quota the binding exists to protect
+   with nothing on screen to say so.
+
+Same rule at restore: if a pane's `@account` no longer resolves to a valid token
+file, the pane comes up **refusing**, in red, naming the account and the reason,
+and stays alive so you can read it. It is never quietly restarted on the default
+account.
+
 ## Live state
 
 Each pane's **top title** is coloured by the session's live state, read from its

@@ -304,21 +304,41 @@ build_from_cand() {
   declare -A SEEN_SESSION=()
   codex_queue_reset
   for row in "${CAND[@]}"; do
-    IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
+    # A 5th field is the optional Claude account NAME. cockpit-send writes it when it queues a session for a
+    # cold build; every other producer (cockpit_candidates, cockpit-pick) emits four fields and reads as "".
+    local acct acct_ok acct_reason tok; local -a eargs
+    IFS=$'\t' read -r id cwd title agent acct <<< "$row"; [[ -n "$agent" ]] || agent=claude
+    acct_ok=1; acct_reason=""; tok=""; eargs=()
+    cockpit_account_name_ok "${acct:-}" || acct=""
     key="$agent:$id"
     [[ -n "${SEEN_SESSION[$key]:-}" ]] && continue
     SEEN_SESSION[$key]=1
+    # Same rule as restore: the token rides `-e` at pane creation, and an account that no longer resolves
+    # refuses visibly rather than falling back to the primary subscription (see cockpit_account_token).
+    if [[ -n "$acct" ]]; then
+      if tok=$(cockpit_account_token "$acct" 2>/dev/null); then eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
+      else acct_ok=0; acct_reason=$(cockpit_account_token "$acct" 2>&1 >/dev/null) || true; fi
+    fi
     cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
     [[ "$agent" == codex ]] && cmd="exec sleep infinity"
+    (( acct_ok )) || cmd=$(cockpit_account_refuse_cmd "$acct" "$acct_reason")
     if (( first )); then
-      pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
+      # See restore_grid: `new-session -e` sets the SESSION environment (readable, and inherited by every
+      # later pane), so an account-bound first pane is created on a holder and respawned with the token.
+      if (( ${#eargs[@]} )); then
+        pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "exec sleep infinity")
+        $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$cmd")"
+      else
+        pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
+      fi
       apply_chrome; first=0
     else
-      pane=$($TMUX split-window -t "$COCKPIT_SESSION:work" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
+      pane=$($TMUX split-window -t "$COCKPIT_SESSION:work" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$cmd")")
       $TMUX select-layout -t "$COCKPIT_SESSION:work" "$COCKPIT_LAYOUT"
     fi
     stamp_pane "$pane" "$id" "$cwd" "$title" "$agent"
-    if [[ "$agent" == codex ]]; then
+    { [[ -n "$acct" ]] && $TMUX set -p -t "$pane" @account "$acct"; } || true
+    if (( acct_ok )) && [[ "$agent" == codex ]]; then
       cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$id" "$cwd" "$title")")
       codex_queue_add "$pane" work "$cmd"
     fi
@@ -343,8 +363,8 @@ restore_grid() {
   fi
   [[ -n "$snap" ]] || return 1
   local active="" first=1 curwin="" awin="" i n resumable=0 duplicates=0 key duplicate_noun
-  declare -a W S C L A WR PR PG PV B O; local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
+  declare -a W S C L A WR PR PG PV B O AC; local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     # Guard against a malformed layout file: a pane row's f1 is a window index
     # and f2 a workspace name. Skip anything else (blank lines, or continuation
@@ -356,9 +376,13 @@ restore_grid() {
     [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
     [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
     [[ "$f11" == "$NIL" ]] && f11=""; [[ "$f12" == "$NIL" ]] && f12=""
+    [[ "$f13" == "$NIL" ]] && f13=""
     [[ "$f6" == claude || "$f6" == codex ]] || f6=""
+    # f13 is a Claude account NAME (never a token). A row that does not parse as one is dropped rather than
+    # carried: the launch below treats "has an account" as "must resolve", so a junk value must not reach it.
+    cockpit_account_name_ok "$f13" || f13=""
     W+=("$f2"); S+=("$f3"); C+=("$f4"); L+=("$f5"); A+=("$f6")
-    WR+=("$f7"); PR+=("$f8"); PG+=("$f9"); PV+=("$f10"); B+=("$f11"); O+=("$f12")
+    WR+=("$f7"); PR+=("$f8"); PG+=("$f9"); PV+=("$f10"); B+=("$f11"); O+=("$f12"); AC+=("$f13")
   done <<<"$snap"
   n=${#W[@]}; (( n > 0 )) || return 1
   declare -A SEEN_RESUMABLE=()
@@ -387,6 +411,20 @@ restore_grid() {
   for ((i=0;i<n;i++)); do
     local wname="${W[$i]}" sid="${S[$i]}" cwd="${C[$i]}" label="${L[$i]}" agent="${A[$i]}" issess=0 cmd pane
     local wref="${WR[$i]}" pref="${PR[$i]}" gen="${PG[$i]}" ver="${PV[$i]}" badge="${B[$i]}" orb="${O[$i]:-}"
+    local acct="${AC[$i]:-}" acct_ok=1 acct_reason="" tok=""; local -a eargs=()
+    # ── the per-pane Claude account, resolved BEFORE the pane is created ──────────────────────────────────
+    # The token is delivered through tmux's `-e`, which applies the environment to the child process at
+    # exec — so it has to be decided here, not stamped on afterwards. And if it no longer resolves we must
+    # NOT fall through to a normal launch: CLAUDE_CODE_OAUTH_TOKEN empty/absent means "use the primary
+    # account", so a silent fallback bills the exact subscription this binding exists to protect, with
+    # nothing on screen. Refuse visibly instead, in a pane that stays alive to be read.
+    if [[ -n "$acct" ]]; then
+      if tok=$(cockpit_account_token "$acct" 2>/dev/null); then
+        eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
+      else
+        acct_ok=0; acct_reason=$(cockpit_account_token "$acct" 2>&1 >/dev/null) || true
+      fi
+    fi
     [[ ( "$agent" == claude || "$agent" == codex ) && -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
     if (( issess )); then
       key="$agent:$sid"
@@ -397,26 +435,45 @@ restore_grid() {
     else
       cmd="bash -l"
     fi
+    # An unresolved account overrides every launch above. issess is deliberately left alone so the pane is
+    # still stamped with its session id/cwd/label — otherwise the next autosave would write the binding AND
+    # the session away, and the refusal would cost the operator the pane it was protecting.
+    (( acct_ok )) || cmd=$(cockpit_account_refuse_cmd "$acct" "$acct_reason")
     if [[ -z "${NAMEWIN[$wname]:-}" ]]; then      # first sighting of this workspace → open its window
       if (( first )); then
-        pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
+        if (( ${#eargs[@]} )); then
+          # `new-session -e` is NOT the same as `split-window -e`/`new-window -e`/`respawn-pane -e`. Those
+          # three set the environment of the newly created PROCESS; new-session sets it on the SESSION, where
+          # it is readable via `show-environment` for the rest of the grid's life AND inherited by every pane
+          # created afterwards. Both are wrong for a credential: the token would be dumpable from any pane,
+          # and unbound panes would silently run on the second account. So the first pane is created on a
+          # holder and respawned with the token instead — respawn-pane -e is process-scoped (verified).
+          pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "exec sleep infinity")
+          $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$cmd")"
+        else
+          pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
+        fi
         apply_chrome; first=0
       else
-        pane=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{pane_id}' -n "$wname" "bash -lc $(printf %q "$cmd")")
+        pane=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{pane_id}' -n "$wname" "${eargs[@]}" "bash -lc $(printf %q "$cmd")")
       fi
       curwin=$($TMUX display -p -t "$pane" '#{window_id}'); SEENW[$curwin]=1; NAMEWIN[$wname]="$curwin"
       [[ "$wname" == "$active" ]] && awin="$curwin"
       (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
     else                                          # workspace already open → add this pane to its window
       curwin="${NAMEWIN[$wname]}"
-      pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")")
+      pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$cmd")")
       (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
     fi
     # Carry the orb binding forward, or the fix survives exactly one reboot. Braced with `|| true` because this
     # is the loop body's last command under `set -e`, and no binding is the normal case for every other pane.
     { [[ -n "$orb" ]] && $TMUX set -p -t "$pane" @orb_server_file "$orb"; } || true
+    # Re-stamp the account NAME (never the token) so it survives THIS restore into the next snapshot. A pane
+    # that came up refusing keeps its binding too: the operator fixes the token file and restores again.
+    { [[ -n "$acct" ]] && $TMUX set -p -t "$pane" @account "$acct"; } || true
     stamp_controller_identity "$pane" "$curwin" "$wref" "$pref" "$gen" "$ver" "$badge" || true
-    if (( issess )) && [[ "$agent" == codex ]]; then
+    # A refusing pane is never queued for a real provider start — that is the whole point of refusing.
+    if (( issess && acct_ok )) && [[ "$agent" == codex ]]; then
       cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label" "$orb")")
       codex_queue_add "$pane" "$wname" "$cmd"
     fi
