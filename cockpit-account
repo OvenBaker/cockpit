@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# cockpit-account — rebind a claude pane's Claude account and resume its session on the new one.
+#
+#   cockpit-account <pane>                print the pane's current account (or "default")
+#   cockpit-account <pane> <name>         switch to the named account (must resolve — see cockpit_account_token)
+#   cockpit-account <pane> default        switch to the DEFAULT/primary account (clears the binding)
+#
+# A switch respawns the pane onto `claude --resume <session_id>` under the new binding: the IN-FLIGHT TURN
+# DIES (whatever the provider was mid-doing when respawned is gone, same as any respawn), and the resumed
+# session continues from the LAST COMPLETED TURN in its transcript — nothing is lost beyond that one turn.
+#
+# Validate FIRST, destroy LAST: every refusal below happens before any stamp or kill, so a refused switch
+# leaves the pane exactly as it was. v1 stays narrow — only a pane that already has a live session id
+# (i.e. not a pending/shell pane) is eligible; there's no session to `--resume` otherwise.
+#
+# Exit codes: 0 ok (switched, no-op, or read) · 1 no such pane / respawn failed · 2 validation refused.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+pane="${1:-}"; name="${2:-}"
+[[ -n "$pane" ]] || { echo "usage: cockpit-account <pane> [<name>|default]" >&2; exit 2; }
+# list-panes -a is the reliable existence check — `display -p -t <bad-pane>` does NOT fail (see cockpit-role).
+$TMUX list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx -- "$pane" \
+  || { echo "cockpit-account: no such pane '$pane'" >&2; exit 1; }
+
+if [[ $# -lt 2 ]]; then
+  # Read-only: `show -pqv`, NEVER `show -p | awk` — a cleared option prints quoted-empty and awk's
+  # field-split would return the literal quotes, misreporting "cleared" as a bound value.
+  cur=$($TMUX show -pqv -t "$pane" @account 2>/dev/null)
+  echo "${cur:-default}"
+  exit 0
+fi
+
+agent=$($TMUX show -pqv -t "$pane" @agent 2>/dev/null)
+[[ "$agent" == claude ]] || { echo "cockpit-account: pane $pane is a '${agent:-<untracked>}' pane — accounts are a Claude subscription concept, refusing" >&2; exit 2; }
+
+sid=$($TMUX show -pqv -t "$pane" @session_id 2>/dev/null)
+[[ -n "$sid" ]] || { echo "cockpit-account: pane $pane has no session id yet (pending/shell pane) — refusing rather than resuming nothing" >&2; exit 2; }
+
+# Resolve the TARGET before touching anything. `default` clears the binding (token explicitly empty — tmux
+# `-e CLAUDE_CODE_OAUTH_TOKEN=` reads as unset, same as no binding at all). A named account must resolve to
+# a real token here, exactly like cockpit-spawn's own refusal guard: an empty/absent token must never be
+# passed through as "named", because that silently bills the primary subscription with nothing on screen.
+target=""; token=""
+if [[ "$name" != default ]]; then
+  cockpit_account_name_ok "$name" \
+    || { echo "cockpit-account: '$name' is not a valid account name ([A-Za-z0-9][A-Za-z0-9_-]{0,31})" >&2; exit 2; }
+  if ! token=$(cockpit_account_token "$name" 2>/dev/null); then
+    echo "cockpit-account: account '$name' — $(cockpit_account_reason "$name")" >&2
+    exit 2
+  fi
+  target="$name"
+fi
+
+cur=$($TMUX show -pqv -t "$pane" @account 2>/dev/null)
+if [[ "$target" == "$cur" ]]; then
+  echo "cockpit-account: pane $pane is already bound to ${target:-default}"
+  exit 0
+fi
+
+cwd=$($TMUX show -pqv -t "$pane" @cwd 2>/dev/null)
+label=$($TMUX show -pqv -t "$pane" @label 2>/dev/null)
+
+# Stamp the new binding BEFORE respawning, not after — same reasoning as cockpit-pick's retarget: a
+# stamp-then-respawn that fails mid-flight leaves a stamp whose token was not yet applied (restore reads the
+# stamp and re-applies it — recoverable), while respawn-then-stamp can leave a pane RUNNING on the new
+# account with no stamp at all. Both set UNCONDITIONALLY (empty clears it): this is by definition a REUSED
+# pane, and a stale @account/@account_mark left standing would claim a binding the running process doesn't
+# have.
+$TMUX set -p -t "$pane" @account "$target"
+$TMUX set -p -t "$pane" @account_mark "$(cockpit_pane_account_mark "$target" "$agent")"
+
+# Exact respawn/launch composition copied from cockpit-reboot: same env-array shape (`-e` only, never in the
+# command string), same cockpit_keep_pane_on_failure wrap, same bash -lc %q quoting.
+cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label")")
+$TMUX respawn-pane -k -t "$pane" -e "CLAUDE_CODE_OAUTH_TOKEN=$token" "bash -lc $(printf %q "$cmd")" 2>/dev/null \
+  || { echo "cockpit-account: respawn failed" >&2; exit 1; }
+
+# Same @born/@badge/projection handling as cockpit-reboot: re-stamp identity (clears @state/@hook_state/
+# @hook_at via cockpit_clear_projection, resets @born so the poller re-adopts cleanly), then the transient
+# "rebooting" badge — no role argument, so the pane's existing @role (if any) is left untouched.
+cockpit_stamp_known_agent "$pane" "$sid" "$cwd" "$label" "$agent"
+$TMUX set -p -t "$pane" @badge "rebooting"
+
+echo "cockpit-account: $pane switched to ${target:-default} and resumed ${sid:0:8}"
