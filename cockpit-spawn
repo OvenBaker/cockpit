@@ -338,6 +338,9 @@ if [[ -n "$orb_file" ]]; then $TMUX set -p -t "$pane" @orb_server_file "$orb_fil
 # a spawn with no --account would claim a binding whose token was never applied — the surfaces would say
 # "second subscription" while the work billed the first, and the next restore would then act on the claim.
 $TMUX set -p -t "$pane" @account "$account"
+# @account_mark is cosmetic and derived, but the same reused-pane staleness applies: set it unconditionally
+# right beside @account so a mark from a PRIOR binding can never survive onto this one.
+$TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$account")"
 if (( seeded )); then
   # Bind pane → request in both directions (the launcher does the same from inside the pane, whichever runs
   # first; the record update is flock-serialized and first-writer-wins).

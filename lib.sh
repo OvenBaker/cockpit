@@ -99,6 +99,22 @@ cockpit_role_ok() { [[ "${1:-}" =~ ^[a-z0-9_-]+$ ]]; }
 
 cockpit_account_token_path() { printf '%s/%s.token' "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}" "$1"; }
 
+# The header mark for a bound account (a single Greek letter, typically) — purely cosmetic, so it is
+# DERIVED here, never persisted: @account is the durable identity, and the mark is recomputed wherever
+# @account is stamped, from ${COCKPIT_ACCOUNTS_DIR}/<name>.mark (one trimmed line). An unrecognized name,
+# a missing mark file, or an empty one all resolve the same way — no mark — never an error: this is
+# decoration, not a binding, and must never be why a spawn or restore refuses.
+cockpit_account_mark() {
+  local name="${1:-}" path="" mark=""
+  cockpit_account_name_ok "$name" || { printf ''; return 0; }
+  path="${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}/$name.mark"
+  # `read` trims surrounding IFS whitespace for us. Its exit status is NOT gated on: a mark file with no
+  # trailing newline (the common `printf 'α' > file` shape) still reads correctly but reports EOF, which
+  # would otherwise be misread as "no mark".
+  [[ -f "$path" ]] && read -r mark < "$path" 2>/dev/null
+  printf '%s' "$mark"
+}
+
 # Resolve an account to its token. SUCCESS: the token alone on stdout, rc 0.
 # FAILURE: nothing on stdout, one human-readable line on stderr, rc 1.
 # Callers that need the reason as a VALUE (the restore path bakes it into the pane) capture stderr:

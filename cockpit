@@ -148,11 +148,17 @@ apply_chrome() {
   # The label is stored full and truncated HERE to pane_width-20 (≈ badge+pad),
   # so it uses whatever room the pane has — wide panes show more, narrow less.
   # A stamped @role prefixes the label with a compact glyph for known roles (bare codepoint, no VS16 — the
-  # variation selector breaks tmux's border width math) or a bracketed text tag for anything else, and eats
-  # a bit more of the truncation budget (32 vs 20) so the tag doesn't shove the label off a narrow pane.
-  # Nested #{?...} conditionals read poorly inline, so the tag piece is built in a variable first.
+  # variation selector breaks tmux's border width math) or a bracketed text tag for anything else.
+  # A bound Claude account follows the role: its @account_mark (a single Greek letter, single-cell — see
+  # cockpit_account_mark) if one is assigned, else a "· name " fallback so an unmarked account is still
+  # visible rather than silently blank. Nested #{?...} conditionals read poorly inline, so both tag pieces
+  # are built in variables first.
   local role_tag='#{?@role,#{?#{==:#{@role},architect},📐 ,#{?#{==:#{@role},builder},🧱 ,[#{@role}] }},}'
-  $TMUX set -g pane-border-format "#[align=left] #{@sc}${role_tag}#{=/#{e|-|:#{pane_width},#{?@role,32,20}}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] "
+  local account_tag='#{?@account_mark,#{@account_mark} ,#{?@account,· #{@account} ,}}'
+  # Truncation reserve bumped modestly (20 → 30 base) for the two new prefix segments; not split further per
+  # role/account combination — a long unmarked account name can still crowd a narrow pane, but that is a rare
+  # cosmetic edge case, not one worth a wider conditional.
+  $TMUX set -g pane-border-format "#[align=left] #{@sc}${role_tag}${account_tag}#{=/#{e|-|:#{pane_width},#{?@role,42,30}}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] "
   # box borders: uniform neutral; only the active pane is highlighted (the one
   # case with no shared-edge ambiguity).
   $TMUX set -g pane-border-style 'fg=colour238'
@@ -351,6 +357,9 @@ build_from_cand() {
     fi
     stamp_pane "$pane" "$id" "$cwd" "$title" "$agent"
     { [[ -n "$acct" ]] && $TMUX set -p -t "$pane" @account "$acct"; } || true
+    # @account_mark is cosmetic and derived (never persisted) — recomputed right beside @account. `[[ -z ]] ||`,
+    # not a trailing `[[ -n ]] &&`, so this line's own rc never depends on whether there's an account to mark.
+    { [[ -z "$acct" ]] || $TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$acct")"; } || true
     if (( acct_ok )) && [[ "$agent" == codex ]]; then
       cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$id" "$cwd" "$title")")
       codex_queue_add "$pane" work "$cmd"
@@ -488,6 +497,9 @@ restore_grid() {
     # Re-stamp the account NAME (never the token) so it survives THIS restore into the next snapshot. A pane
     # that came up refusing keeps its binding too: the operator fixes the token file and restores again.
     { [[ -n "$acct" ]] && $TMUX set -p -t "$pane" @account "$acct"; } || true
+    # @account_mark is cosmetic and derived (never persisted in the layout DB) — recomputed here the same
+    # way, right beside the account it marks. `[[ -z ]] ||`, never a trailing `[[ -n ]] &&`.
+    { [[ -z "$acct" ]] || $TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$acct")"; } || true
     # Re-stamp @role the same way — it's a property of the pane the operator dedicated, not of whether this
     # pane happens to hold a resumable session (stamp_pane above only fires when issess is true).
     { [[ -n "$role" ]] && $TMUX set -p -t "$pane" @role "$role"; } || true

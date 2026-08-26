@@ -124,6 +124,9 @@ cockpit_stamp_known_agent "$pane" "$id" "$cwd" "$title" "$agent"
 # Unconditional (empty clears it) — this may be a REUSED bare pane, and a stale @account would claim a
 # binding whose token was never applied to the process now running in it.
 $TMUX set -p -t "$pane" @account "$account"
+# @account_mark is cosmetic and derived (never persisted), but stamped unconditionally alongside @account
+# for the same reused-pane reason — a mark left over from a prior binding must not survive onto this one.
+$TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$account")"
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 $TMUX display-message "cockpit: + ${title:0:40}"
 echo "resumed ${id:0:8} → ${title:0:60}"

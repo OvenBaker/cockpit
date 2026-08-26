@@ -99,6 +99,7 @@ spawn_new() {
     # respawn-then-stamp can leave a pane RUNNING on the second account with no stamp at all, which restore
     # silently returns to the primary. Fail towards the recoverable one.
     $TMUX set -p -t "$pane" @account "$acct"
+    $TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$acct")"
     $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$cmd")"
   else
     pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
@@ -109,6 +110,9 @@ spawn_new() {
   # applied: the display would say "second subscription" while the work billed the first, and restore
   # would then act on that false claim.
   $TMUX set -p -t "$pane" @account "$acct"
+  # @account_mark is cosmetic and derived (never persisted); stamped unconditionally right beside @account
+  # so it clears the same way when there is no account.
+  $TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$acct")"
   if [[ "$agent" == shell ]]; then                 # plain terminal — not tracked
     $TMUX set -p -t "$pane" @session_id ""
     $TMUX set -p -t "$pane" @cwd "$cwd"
