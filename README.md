@@ -143,6 +143,9 @@ The label hugs the left; status + time hug the right.
 - `lib.sh` — session selection + JSONL state classification.
 - `cockpit-poller` — background daemon (singleton) painting live state onto borders.
 - `cockpit-pick` — numbered chooser (startup multi-select / retarget / add).
+- `cockpit-select` — shared list picker (Go) used by the popups: arrow keys, `/` to filter,
+  Enter to commit, Esc to cancel. Reads TSV on stdin, prints the chosen row to stdout, and
+  touches nothing else — callers keep the single tmux mutation.
 - `cockpit-send` — resume a given session as a pane (or queue if no grid).
 - `shim/wt.exe` — stand-in so santa's resume can target cockpit.
 - `cockpit-next`, `cockpit-toggle-idle`, `cockpit-pane`, `cockpit-help`.
@@ -152,6 +155,17 @@ The label hugs the left; status + time hug the right.
 `tmux` (≥3.4), `bash`, `jq`, `sqlite3`, and
 [santa](https://github.com/OvenBaker/santa) for session metadata and the
 `--santa` picker. Designed for WSL + Windows Terminal.
+
+The Go binaries build from this repo with the standard toolchain and no third-party
+dependencies beyond `golang.org/x/sys`:
+
+```
+go build -o ~/.local/bin/cockpit-core   ./cmd/cockpit-core
+go build -o ~/.local/bin/cockpit-select ./cmd/cockpit-select
+```
+
+`cockpit-select` is resolved beside the scripts first (a pinned deploy dir), then from `PATH`;
+`COCKPIT_SELECT` overrides both.
 
 ---
 

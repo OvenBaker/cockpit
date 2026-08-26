@@ -177,7 +177,9 @@ apply_chrome() {
   $TMUX bind -n M-i   run-shell "$HERE/cockpit-toggle-idle"
   $TMUX bind -n M-r   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick retarget #{pane_id}"
   $TMUX bind -n M-n   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick add"
-  $TMUX bind -n M-N   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick new"
+  # Alt-N is three picker steps; the directory step lists every indexed cwd, so it wants height.
+  # Fixed columns rather than 90%: the rows are paths and short labels, not the full grid width.
+  $TMUX bind -n M-N   display-popup -E -w 96 -h 34 "$HERE/cockpit-pick new"
   # find sessions related to the focused pane's session → add a chosen one here
   $TMUX bind -n M-f   display-popup -E -w 88 -h 22 "$HERE/cockpit-related #{pane_id}"
   # browse in santa's TUI; its resume key drops the session into the grid.
@@ -203,7 +205,11 @@ apply_chrome() {
     "Swap up"         u "swap-pane -U" \
     "Swap down"       d "swap-pane -D"
   # move the active pane to another workspace: Alt-m to pick/create, Alt-Shift-←/→ to shove
-  $TMUX bind -n M-m       display-popup -E -w 70 -h 24 "$HERE/cockpit-move pick #{pane_id}"
+  # -h 32 fits ~24 rows of list: enough to show every workspace without scrolling at the counts
+  # this grid actually runs. The picker scrolls inside its frame when it doesn't fit, so a small
+  # client clamps gracefully rather than pushing the border off-screen the way the old numbered
+  # prompt did (28 emitted lines into a 24-row popup once you passed ~19 workspaces).
+  $TMUX bind -n M-m       display-popup -E -w 72 -h 32 "$HERE/cockpit-move pick #{pane_id}"
   $TMUX bind -n M-S-Left  run-shell "$HERE/cockpit-move prev"
   $TMUX bind -n M-S-Right run-shell "$HERE/cockpit-move next"
   # workspaces: switch with Alt-←/→, create with Alt-w, close with Alt-W

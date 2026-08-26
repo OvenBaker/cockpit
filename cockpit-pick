@@ -125,65 +125,89 @@ spawn_new() {
 # new-session mode runs before the dormant-session gather (it needs cwds, not sessions)
 if [[ "$MODE" == new ]]; then
   W=$(cockpit_cur_window)
-  say ""
-  say "  cockpit · new session"
-  say "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
-  # Claude accounts get NUMERIC keys: 1 is always the default (logged-in) account, 2 the first configured
-  # second subscription, and so on — so "2" means the same thing tomorrow as today, and adding a third
-  # account does not renumber the second. Only accounts that RESOLVE are offered; a token file that is
-  # missing, empty or mis-chmodded is named separately rather than silently absent, because an offered key
-  # that then refuses is worse than no key at all.
-  mapfile -t ACCTS < <(cockpit_accounts_list)
-  acct=""
-  menu="Enter = claude"; i=1   # NB: top level, not a function — `local` would be a runtime error here
-  if (( ${#ACCTS[@]} )); then
-    menu="Enter/1 = claude (default)"
-    for a in "${ACCTS[@]}"; do i=$((i+1)); menu+=" · $i = claude ($a)"; done
-  fi
-  say "  type?   [$menu · c = codex · b = bash shell]"
-  while IFS=$'\t' read -r bad why; do say "  (account '$bad' unavailable: $why)"; done < <(cockpit_accounts_broken)
-  printf '  > ' >/dev/tty; read -r ag </dev/tty || ag=""
-  case "${ag,,}" in
-    c|cx|codex) agent=codex;;
-    b|sh|bash|shell) agent=shell;;
-    [0-9]*)
-      agent=claude
-      # 1 (or anything past the end) is the default account; 2..N select ACCTS[n-2].
-      if (( ag >= 2 && ag - 1 <= ${#ACCTS[@]} )); then acct="${ACCTS[$((ag-2))]}"
-      elif (( ag != 1 )); then say "  no account $ag — using the default."; fi
-      ;;
-    *) agent=claude;;
-  esac
+  # Three picker steps that only COLLECT. Nothing below touches tmux until the commit block at
+  # the end, so cancelling — or an interrupted popup — leaves no half-made workspace or pane.
+  wname=$($TMUX display -p -t "$W" '#{window_name}' 2>/dev/null)
+
+  # --- step 1: agent (+ Claude account) --------------------------------------
+  # Accounts are rows now, not numeric keys packed into one line of prose. The old menu grew a
+  # segment per account ("Enter/1 = claude (default) · 2 = claude (work2) · c = codex · b = …")
+  # and was already at the width of the popup with two accounts configured.
+  broken=""
+  while IFS=$'\t' read -r bad why; do broken+="${broken:+ · }$bad unavailable: $why"; done \
+    < <(cockpit_accounts_broken)
+  agentrows=$'claude\t\tClaude\tdefault account\n'
+  while read -r a; do
+    [[ -n "$a" ]] && agentrows+="claude"$'\t'"$a"$'\t'"Claude"$'\t'"account $a"$'\n'
+  done < <(cockpit_accounts_list)
+  agentrows+=$'codex\t\tCodex\tfresh codex session\n'
+  agentrows+=$'shell\t\tBash shell\tplain terminal, not tracked'
+
+  fargs=(); [[ -n "$broken" ]] && fargs=(--footer "$broken")
+  sel=$(printf '%s\n' "$agentrows" | ck_select "New session · what?" \
+          --hide 1,2 --match 3,4 "${fargs[@]}") || exit 0
+  agent="${sel%%$'\t'*}"; rest="${sel#*$'\t'}"; acct="${rest%%$'\t'*}"
   what=$([[ "$agent" == shell ]] && echo "bash shell" || echo "$agent session")
   [[ -n "$acct" ]] && what="$what on account '$acct'"
-  mapfile -t CWDS < <(cockpit_recent_cwds 15)
-  say ""; say "  directory for the new $what:"
-  i=0; for d in "${CWDS[@]}"; do i=$((i+1)); printf '  %2d  %s\n' "$i" "${d/#$HOME/\~}" >/dev/tty; done
-  say ""
-  say "  Pick a number, or type a path (~ ok).  Enter = cancel."
-  printf '  > ' >/dev/tty
-  read -r line </dev/tty || line=""
-  [[ -n "${line// }" ]] || { say "  cancelled."; sleep 0.4; exit 0; }
-  if [[ "$line" =~ ^[0-9]+$ ]] && (( line >= 1 && line <= ${#CWDS[@]} )); then
-    target="${CWDS[$((line-1))]}"
-  else
-    target="${line/#\~/$HOME}"
+
+  # --- step 2: directory -----------------------------------------------------
+  # 200, not 15. Filtering makes a long list navigable, and the old 15-row window covered ~9% of
+  # the directories santa has indexed — so the ordinary case was typing a full path blind, where
+  # one typo closed the popup and discarded the agent choice.
+  dirrows=""
+  while IFS= read -r d; do dirrows+="$d"$'\t'"${d/#$HOME/\~}"$'\n'; done \
+    < <(cockpit_recent_cwds 200)
+  dirrows+="+type"$'\t'"type a path…"
+  sel=$(printf '%s\n' "$dirrows" | ck_select "New $what · directory" --hide 1 --match 2) || exit 0
+  target="${sel%%$'\t'*}"
+  if [[ "$target" == "+type" ]]; then
+    target=""
+    # Re-prompt rather than exit: throwing away the agent choice over a mistyped path was the
+    # sharpest edge in the old flow.
+    for _ in 1 2 3; do
+      printf '  path (~ ok · empty cancels): ' >/dev/tty
+      read -r line </dev/tty || line=""
+      [[ -n "${line// }" ]] || exit 0
+      cand="${line/#\~/$HOME}"
+      [[ -d "$cand" ]] && { target="$cand"; break; }
+      say "  not a directory: $cand"
+    done
+    [[ -n "$target" ]] || { say "  no directory chosen."; sleep 0.6; exit 0; }
   fi
-  [[ -d "$target" ]] || { say "  not a directory: $target"; sleep 1; exit 0; }
-  # placement: drop it in the workspace you're viewing (Enter) or spin up a brand
-  # new one (type its name). W defaults to the current window (set above).
-  say ""
-  say "  workspace?  [Enter = this one · or type a name for a NEW workspace]"
-  printf '  > ' >/dev/tty
-  read -r wsname </dev/tty || wsname=""
-  wsname="${wsname#"${wsname%%[![:space:]]*}"}"; wsname="${wsname%"${wsname##*[![:space:]]}"}"  # trim
+
+  # --- step 3: placement -----------------------------------------------------
+  # Existing workspaces are selectable at last. Typing a name here used to be the ONLY way past
+  # "this one", and tmux happily accepts a duplicate window name — so naming a workspace that
+  # already existed silently built a second one beside it instead of targeting it.
+  wsrows="+this"$'\t'"this workspace"$'\t'"${wname:-current}"$'\n'
+  while IFS=$'\t' read -r wid wn wp; do
+    [[ "$wid" == "$W" ]] && continue                     # already offered as "+this"
+    wsrows+="$wid"$'\t'"$wn"$'\t'"$wp pane$( ((wp==1)) || echo s)"$'\n'
+  done < <($TMUX list-windows -t "$COCKPIT_SESSION" -F '#{window_id}	#{window_name}	#{window_panes}')
+  wsrows+="+new"$'\t'"+ new workspace…"$'\t'
+  sel=$(printf '%s\n' "$wsrows" | ck_select "New $what · where?" --hide 1 --match 2) || exit 0
+  dstw="${sel%%$'\t'*}"
+
+  # --- commit ----------------------------------------------------------------
   placement="this workspace"
-  if [[ -n "$wsname" ]]; then
-    W=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{window_id}' -n "$wsname" "bash -l" 2>/dev/null) \
-      || { say "  couldn't create workspace '$wsname'."; sleep 1; exit 0; }
-    placement="new workspace '$wsname'"
-  fi
-  spawn_new "$W" "$target" "$agent" "" "$acct" && { say "  → new $what in ${target/#$HOME/\~} · $placement"; sleep 0.5; }
+  case "$dstw" in
+    +this) ;;
+    +new)
+      printf '  name for the new workspace: ' >/dev/tty
+      read -r nm </dev/tty || nm=""
+      nm="${nm#"${nm%%[![:space:]]*}"}"; nm="${nm%"${nm##*[![:space:]]}"}"   # trim
+      [[ -n "$nm" ]] || exit 0
+      W=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{window_id}' -n "$nm" "bash -l" 2>/dev/null) \
+        || { say "  couldn't create workspace '$nm'."; sleep 1; exit 0; }
+      placement="new workspace '$nm'"
+      ;;
+    *)
+      W="$dstw"
+      placement=$($TMUX display -p -t "$W" '#{window_name}' 2>/dev/null)
+      ;;
+  esac
+  spawn_new "$W" "$target" "$agent" "" "$acct" \
+    && $TMUX display-message "new $what in ${target/#$HOME/\~} · $placement"
   exit 0
 fi
 
