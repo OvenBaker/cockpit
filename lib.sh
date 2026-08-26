@@ -108,6 +108,28 @@ cockpit_account_token() {
 # let it land on their own stderr. Prints nothing and returns 1 when the account actually resolves.
 cockpit_account_reason() { cockpit_account_token "$1" >/dev/null 2>&1 && return 1; cockpit_account_token "$1" 2>&1 >/dev/null; }
 
+# Every account that currently RESOLVES, one name per line, sorted. Only valid ones are listed: an entry the
+# operator cannot actually launch on is worse than no entry, because the chooser would offer a key that then
+# refuses. `cockpit_accounts_broken` names the rest, so a mistyped or mis-chmodded token file is visible
+# rather than mysteriously absent.
+cockpit_accounts_list() {
+  local f name
+  for f in "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"/*.token; do
+    [[ -e "$f" ]] || continue
+    name=$(basename "$f" .token)
+    cockpit_account_token "$name" >/dev/null 2>&1 && printf '%s\n' "$name"
+  done | sort
+}
+
+cockpit_accounts_broken() {
+  local f name
+  for f in "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"/*.token; do
+    [[ -e "$f" ]] || continue
+    name=$(basename "$f" .token)
+    cockpit_account_token "$name" >/dev/null 2>&1 || printf '%s\t%s\n' "$name" "$(cockpit_account_token "$name" 2>&1 >/dev/null)"
+  done | sort
+}
+
 # An inner pane command that REFUSES visibly instead of starting on the default account. Restore uses this
 # when a pane's @account no longer resolves: silently falling back would bill the subscription the binding
 # exists to protect, and nothing on screen would say so. Wrapped in cockpit_keep_pane_on_failure so the pane
