@@ -126,7 +126,8 @@ cockpit_stamp_known_agent "$pane" "$id" "$cwd" "$title" "$agent"
 $TMUX set -p -t "$pane" @account "$account"
 # @account_mark is cosmetic and derived (never persisted), but stamped unconditionally alongside @account
 # for the same reused-pane reason — a mark left over from a prior binding must not survive onto this one.
-$TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$account")"
+# cockpit_pane_account_mark folds in the "unmarked default account still gets its own mark" rule.
+$TMUX set -p -t "$pane" @account_mark "$(cockpit_pane_account_mark "$account" "$agent")"
 $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
 $TMUX display-message "cockpit: + ${title:0:40}"
 echo "resumed ${id:0:8} → ${title:0:60}"

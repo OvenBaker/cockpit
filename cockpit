@@ -157,7 +157,11 @@ apply_chrome() {
   # trailing space regardless, since "· name 🧱 label" reads fine either way. Nested #{?...} conditionals
   # read poorly inline, so both tag pieces are built in variables first.
   local role_tag='#{?@role,#{?#{==:#{@role},architect},📐 ,#{?#{==:#{@role},builder},🧱 ,[#{@role}] }},}'
-  local account_tag='#{?@account_mark,#{@account_mark}#{?@role,, },#{?@account,· #{@account} ,}}'
+  # A letter mark is never left bare: it's always terminated by either the role glyph that follows it
+  # (flush, no space — the role segment's own trailing space separates from the label) or, when there is no
+  # role, a centered dot before the label ("α· label", not "α label"). The "· name" unmarked-account
+  # fallback is unaffected — it already carries its own trailing space either way.
+  local account_tag='#{?@account_mark,#{@account_mark}#{?@role,,· },#{?@account,· #{@account} ,}}'
   # Truncation reserve bumped modestly (20 → 30 base) for the two new prefix segments; not split further per
   # role/account combination — a long unmarked account name can still crowd a narrow pane, but that is a rare
   # cosmetic edge case, not one worth a wider conditional.
@@ -328,7 +332,7 @@ build_from_cand() {
   for row in "${CAND[@]}"; do
     # A 5th field is the optional Claude account NAME. cockpit-send writes it when it queues a session for a
     # cold build; every other producer (cockpit_candidates, cockpit-pick) emits four fields and reads as "".
-    local acct acct_ok acct_reason tok; local -a eargs
+    local acct acct_ok acct_reason tok mark; local -a eargs
     IFS=$'\t' read -r id cwd title agent acct <<< "$row"; [[ -n "$agent" ]] || agent=claude
     acct_ok=1; acct_reason=""; tok=""; eargs=()
     cockpit_account_name_ok "${acct:-}" || acct=""
@@ -360,9 +364,12 @@ build_from_cand() {
     fi
     stamp_pane "$pane" "$id" "$cwd" "$title" "$agent"
     { [[ -n "$acct" ]] && $TMUX set -p -t "$pane" @account "$acct"; } || true
-    # @account_mark is cosmetic and derived (never persisted) — recomputed right beside @account. `[[ -z ]] ||`,
-    # not a trailing `[[ -n ]] &&`, so this line's own rc never depends on whether there's an account to mark.
-    { [[ -z "$acct" ]] || $TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$acct")"; } || true
+    # @account_mark is cosmetic and derived (never persisted) — recomputed right beside @account.
+    # cockpit_pane_account_mark folds in the "unmarked default account still gets its own mark, Claude-only"
+    # rule, so this can no longer gate on $acct alone (a claude pane with NO account still needs a mark).
+    # `[[ -z ]] ||`, not a trailing `[[ -n ]] &&`, so this line's own rc never depends on the mark's content.
+    mark=$(cockpit_pane_account_mark "$acct" "$agent")
+    { [[ -z "$mark" ]] || $TMUX set -p -t "$pane" @account_mark "$mark"; } || true
     if (( acct_ok )) && [[ "$agent" == codex ]]; then
       cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$id" "$cwd" "$title")")
       codex_queue_add "$pane" work "$cmd"
@@ -440,7 +447,7 @@ restore_grid() {
     local wname="${W[$i]}" sid="${S[$i]}" cwd="${C[$i]}" label="${L[$i]}" agent="${A[$i]}" issess=0 cmd pane
     local wref="${WR[$i]}" pref="${PR[$i]}" gen="${PG[$i]}" ver="${PV[$i]}" badge="${B[$i]}" orb="${O[$i]:-}"
     local acct="${AC[$i]:-}" acct_ok=1 acct_reason="" tok=""; local -a eargs=()
-    local role="${RL[$i]:-}"
+    local role="${RL[$i]:-}" mark
     # ── the per-pane Claude account, resolved BEFORE the pane is created ──────────────────────────────────
     # The token is delivered through tmux's `-e`, which applies the environment to the child process at
     # exec — so it has to be decided here, not stamped on afterwards. And if it no longer resolves we must
@@ -501,8 +508,11 @@ restore_grid() {
     # that came up refusing keeps its binding too: the operator fixes the token file and restores again.
     { [[ -n "$acct" ]] && $TMUX set -p -t "$pane" @account "$acct"; } || true
     # @account_mark is cosmetic and derived (never persisted in the layout DB) — recomputed here the same
-    # way, right beside the account it marks. `[[ -z ]] ||`, never a trailing `[[ -n ]] &&`.
-    { [[ -z "$acct" ]] || $TMUX set -p -t "$pane" @account_mark "$(cockpit_account_mark "$acct")"; } || true
+    # way, right beside the account it marks. cockpit_pane_account_mark folds in the "unmarked default
+    # account still gets its own mark, Claude-only" rule, so this gates on the RESULT, not on $acct alone
+    # (a restored claude pane with no account still needs a mark). `[[ -z ]] ||`, never `[[ -n ]] &&`.
+    mark=$(cockpit_pane_account_mark "$acct" "$agent")
+    { [[ -z "$mark" ]] || $TMUX set -p -t "$pane" @account_mark "$mark"; } || true
     # Re-stamp @role the same way — it's a property of the pane the operator dedicated, not of whether this
     # pane happens to hold a resumable session (stamp_pane above only fires when issess is true).
     { [[ -n "$role" ]] && $TMUX set -p -t "$pane" @role "$role"; } || true

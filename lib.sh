@@ -107,7 +107,8 @@ cockpit_account_token_path() { printf '%s/%s.token' "${COCKPIT_ACCOUNTS_DIR:-$HO
 #
 # Letter convention (assigned by hand in each account's .mark file, not derived here): α is reserved for
 # the DEFAULT/primary account, which carries no @account option at all and therefore never resolves through
-# this function — named accounts start at β and continue γ, δ, … in the order they're introduced.
+# THIS function (it has no name to look up) — see cockpit_default_account_mark for its own mark. Named
+# accounts start at β and continue γ, δ, … in the order they're introduced.
 cockpit_account_mark() {
   local name="${1:-}" path="" mark=""
   cockpit_account_name_ok "$name" || { printf ''; return 0; }
@@ -116,6 +117,32 @@ cockpit_account_mark() {
   # trailing newline (the common `printf 'α' > file` shape) still reads correctly but reports EOF, which
   # would otherwise be misread as "no mark".
   [[ -f "$path" ]] && read -r mark < "$path" 2>/dev/null
+  printf '%s' "$mark"
+}
+
+# The DEFAULT/primary account's own mark — it has no NAME to pass to cockpit_account_mark, so it is looked
+# up separately at ${COCKPIT_ACCOUNTS_DIR}/default.mark (same one-trimmed-line semantics). α unless that
+# file exists and says otherwise — an operator can blank it (empty file → no mark on default-account panes)
+# or repoint it, without touching code.
+cockpit_default_account_mark() {
+  local path="${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}/default.mark" mark='α'
+  [[ -f "$path" ]] || { printf '%s' "$mark"; return 0; }
+  mark=""
+  read -r mark < "$path" 2>/dev/null
+  printf '%s' "$mark"
+}
+
+# What @account_mark should be stamped as for a given (account NAME, agent) pair — the single place that
+# folds the "unmarked default account still gets a mark" rule in, so all 6 stamp sites call one function
+# instead of repeating this conditional. A bound NAMED account uses its own mark (possibly "" — the header
+# then falls back to "· name"). No bound account on a CLAUDE pane uses the default mark. Anything else
+# (no account, non-Claude agent — accounts are a Claude-only concept) gets no mark at all.
+cockpit_pane_account_mark() {
+  local acct="${1:-}" agent="${2:-}" mark
+  mark=$(cockpit_account_mark "$acct")
+  if [[ -z "$mark" && -z "$acct" && "$agent" == claude ]]; then
+    mark=$(cockpit_default_account_mark)
+  fi
   printf '%s' "$mark"
 }
 
