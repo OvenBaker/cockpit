@@ -177,7 +177,9 @@ apply_chrome() {
   $TMUX bind -n M-i   run-shell "$HERE/cockpit-toggle-idle"
   $TMUX bind -n M-r   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick retarget #{pane_id}"
   $TMUX bind -n M-n   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick add"
-  $TMUX bind -n M-N   display-popup -E -w 90% -h 80% "$HERE/cockpit-pick new"
+  # Alt-N is three picker steps; the directory step lists every indexed cwd, so it wants height.
+  # Fixed columns rather than 90%: the rows are paths and short labels, not the full grid width.
+  $TMUX bind -n M-N   display-popup -E -w 96 -h 34 "$HERE/cockpit-pick new"
   # find sessions related to the focused pane's session → add a chosen one here
   $TMUX bind -n M-f   display-popup -E -w 88 -h 22 "$HERE/cockpit-related #{pane_id}"
   # browse in santa's TUI; its resume key drops the session into the grid.

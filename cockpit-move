@@ -45,15 +45,6 @@ case "${1:-pick}" in
     srcidx=$($TMUX display -p -t "$src" '#{pane_index}' 2>/dev/null)
     say() { printf '%s\n' "$*" >/dev/tty; }
 
-    # Prefer a copy beside the scripts (a pinned deploy dir), else PATH. Failing loudly beats
-    # keeping a second, divergent numbered-prompt UI alive as a fallback.
-    SELECT="${COCKPIT_SELECT:-$HERE/cockpit-select}"
-    [[ -x "$SELECT" ]] || SELECT=$(command -v cockpit-select 2>/dev/null || true)
-    [[ -n "$SELECT" ]] || {
-      say "  cockpit-select not found on PATH or in $HERE."
-      say "  build it:  go build -o ~/.local/bin/cockpit-select ./cmd/cockpit-select"
-      read -rsn1 -p "  (any key to close) " </dev/tty || true; exit 0; }
-
     # Rows are built HERE and merely chosen THERE: cockpit-select gets no pane id and issues no
     # tmux call, so the join-pane/break-pane below stays the single mutation for this action.
     # The source window is dropped from the list rather than rejected after you pick it.
@@ -66,8 +57,8 @@ case "${1:-pick}" in
 
     # --match 2 keeps the filter on workspace names. Without it "a" matches every row, because
     # the decorative "N panes" column contains one.
-    sel=$(printf '%s\n' "$rows" | "$SELECT" \
-            --title "Move pane ${srcidx:-?} · ${srcname:-?} → workspace" \
+    sel=$(printf '%s\n' "$rows" | ck_select \
+            "Move pane ${srcidx:-?} · ${srcname:-?} → workspace" \
             --hide 1 --match 2) || exit 0     # non-zero = cancelled; nothing was touched
 
     dst="${sel%%$'\t'*}"

@@ -17,6 +17,31 @@ COCKPIT_LAYOUT="${COCKPIT_LAYOUT:-even-horizontal}"
 # affects claude launches.
 COCKPIT_REMOTE_CONTROL="${COCKPIT_REMOTE_CONTROL:-1}"
 
+# --- shared picker ----------------------------------------------------------
+# cockpit-select renders a filterable list and returns the chosen row; it makes no tmux calls, so
+# the caller keeps the single mutation for its action. Resolved beside the scripts first — a
+# pinned deploy dir carries its own copy, so a deploy stays self-contained instead of drifting
+# against whatever happens to be on PATH — then PATH. COCKPIT_SELECT overrides both.
+COCKPIT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ck_select_bin() {
+  local b="${COCKPIT_SELECT:-$COCKPIT_LIB_DIR/cockpit-select}"
+  [[ -x "$b" ]] || b=$(command -v cockpit-select 2>/dev/null || true)
+  [[ -n "$b" ]] || return 1
+  printf '%s\n' "$b"
+}
+
+# ck_select <title> [args…] — rows on stdin, the chosen row on stdout.
+# Exit 1 = cancelled (caller should abort without mutating), 2 = picker missing.
+ck_select() {
+  local title="$1"; shift
+  local bin; bin=$(ck_select_bin) || {
+    printf '  cockpit-select not found on PATH or in %s\n' "$COCKPIT_LIB_DIR" >/dev/tty
+    printf '  build it:  go build -o ~/.local/bin/cockpit-select ./cmd/cockpit-select\n' >/dev/tty
+    read -rsn1 -p "  (any key to close) " </dev/tty || true
+    return 2; }
+  "$bin" --title "$title" "$@"
+}
+
 # Emit the ` --remote-control <name>` fragment for a claude launch — leading
 # space, empty string when RC is off. <name> is what the Claude app shows in its
 # session list; defaults to the cwd basename (trimmed) when a caller has no nicer
