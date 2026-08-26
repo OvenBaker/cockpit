@@ -64,6 +64,17 @@ install -m 600 /dev/null ~/.config/cockpit/accounts/work2.token
 printf '%s' '<the token>' > ~/.config/cockpit/accounts/work2.token
 ```
 
+**Choosing an account when you spawn (Alt-N).** The type prompt lists every account that
+resolves, on numeric keys — `1` (or Enter) is always the default logged-in account and `2`
+onward are your configured ones, so a key means the same thing tomorrow as today:
+
+```
+type?   [Enter/1 = claude (default) · 2 = claude (work2) · c = codex · b = bash shell]
+```
+
+A token file that is missing, empty or mis-chmodded is named as unavailable rather than
+silently omitted — an offered key that then refuses is worse than no key.
+
 **The file convention.** `${COCKPIT_ACCOUNTS_DIR:-~/.config/cockpit/accounts}/<name>.token`
 holds the token alone. It is a credential, so cockpit refuses it unless it is a
 real regular file (not a symlink), readable by you, mode **0600** (any group or
