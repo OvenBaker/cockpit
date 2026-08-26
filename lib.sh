@@ -47,6 +47,80 @@ cockpit_codex_launch_args() {
   while IFS= read -r arg; do printf ' %q' "$arg"; done < <(cockpit_codex_launch_argv)
 }
 
+# ── per-pane Claude account (a SECOND Claude Max subscription) ──────────────────────────────────────────────
+# The operator runs some panes under a second Claude subscription, whose long-lived token comes from
+# `claude setup-token` and is delivered to the child process as CLAUDE_CODE_OAUTH_TOKEN.
+#
+# Two facts about the installed Claude Code (2.1.246), both verified against it, drive every rule below:
+#   1. CLAUDE_CODE_OAUTH_TOKEN takes PRECEDENCE over ~/.claude/.credentials.json, per process — an invalid
+#      value fails loudly with `401 OAuth access token is invalid`. That is what makes per-pane accounts work.
+#   2. CLAUDE_CODE_OAUTH_TOKEN="" (empty) is treated as UNSET — the run silently succeeds on the PRIMARY
+#      account. That is the dangerous failure: it burns the exact quota the binding exists to protect, with
+#      nothing on screen to say so.
+# So everything here fails VISIBLY. An account that does not fully resolve is REFUSED; an empty or absent
+# token is never passed through, because passing it through is indistinguishable from having no binding.
+#
+# Deliberately NOT CLAUDE_CONFIG_DIR: that would relocate ~/.claude/projects and break santa's index, the
+# poller's transcript-based state classification, and the hooks. This is auth-only, which is the whole point.
+COCKPIT_ACCOUNTS_DIR="${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"
+
+# The account NAME becomes a tmux option value, a filename component and a JSON field, so it is deliberately
+# narrow: it can never be a path traversal, an option-parsing surprise or a control character.
+cockpit_account_name_ok() { [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]]; }
+
+cockpit_account_token_path() { printf '%s/%s.token' "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}" "$1"; }
+
+# Resolve an account to its token. SUCCESS: the token alone on stdout, rc 0.
+# FAILURE: nothing on stdout, one human-readable line on stderr, rc 1.
+# Callers that need the reason as a VALUE (the restore path bakes it into the pane) capture stderr:
+#   reason=$(cockpit_account_token "$n" 2>&1 >/dev/null)
+cockpit_account_token() {
+  local name="${1:-}" path mode token
+  [[ -n "$name" ]] || { echo "account name is empty" >&2; return 1; }
+  cockpit_account_name_ok "$name" \
+    || { echo "account name '$name' is not [A-Za-z0-9][A-Za-z0-9_-]{0,31}" >&2; return 1; }
+  path=$(cockpit_account_token_path "$name")
+  # A symlink is refused outright: its own mode is meaningless (symlinks are 0777), so the credential mode
+  # check below would be reading the wrong inode's permissions. Same leaf discipline as the seed state dir.
+  [[ -L "$path" ]] && { echo "token file $path is a symlink" >&2; return 1; }
+  [[ -e "$path" ]] || { echo "no token file at $path (mint one: claude setup-token)" >&2; return 1; }
+  [[ -f "$path" ]] || { echo "token file $path is not a regular file" >&2; return 1; }
+  [[ -r "$path" ]] || { echo "token file $path is not readable" >&2; return 1; }
+  # It is a credential: any group or other bit at all refuses. 0600 (or 0400) is the only shape accepted.
+  mode=$(stat -c '%a' "$path" 2>/dev/null) || { echo "cannot stat token file $path" >&2; return 1; }
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || { echo "cannot read mode of token file $path" >&2; return 1; }
+  (( (8#$mode & 077) == 0 )) \
+    || { echo "token file $path is mode $mode — group/other accessible; chmod 600 it" >&2; return 1; }
+  token=$(cat -- "$path" 2>/dev/null) || { echo "cannot read token file $path" >&2; return 1; }
+  token="${token#"${token%%[![:space:]]*}"}"; token="${token%"${token##*[![:space:]]}"}"   # trim both ends
+  # THE hazard (fact 2 above): an empty token is treated as UNSET by Claude Code, so a pane bound to a second
+  # account would run silently on the FIRST one. Refuse rather than ever pass it through.
+  [[ -n "$token" ]] \
+    || { echo "token file $path is empty (an empty CLAUDE_CODE_OAUTH_TOKEN is read as UNSET — it would silently run on the primary account)" >&2; return 1; }
+  # A real setup-token value is one opaque whitespace-free word. Anything else is a mangled paste, and it is
+  # also the only value here capable of confusing a VAR=VALUE env assignment.
+  case "$token" in *[[:space:]]*|*[[:cntrl:]]*)
+    echo "token file $path does not contain a single whitespace-free token" >&2; return 1;; esac
+  printf '%s' "$token"
+}
+
+# The refusal reason alone, as a VALUE, for callers that must prefix it or show it inside a pane rather than
+# let it land on their own stderr. Prints nothing and returns 1 when the account actually resolves.
+cockpit_account_reason() { cockpit_account_token "$1" >/dev/null 2>&1 && return 1; cockpit_account_token "$1" 2>&1 >/dev/null; }
+
+# An inner pane command that REFUSES visibly instead of starting on the default account. Restore uses this
+# when a pane's @account no longer resolves: silently falling back would bill the subscription the binding
+# exists to protect, and nothing on screen would say so. Wrapped in cockpit_keep_pane_on_failure so the pane
+# (and therefore the workspace, and therefore the layout row) survives to be read and fixed.
+cockpit_account_refuse_cmd() {   # account-name  reason → inner command
+  local name="$1" reason="$2" msg
+  printf -v msg '\033[31mcockpit: this pane is bound to Claude account "%s", which no longer resolves:\033[0m\n  %s\nRefusing to start it on the DEFAULT account — that would bill the subscription this\nbinding exists to protect, with nothing on screen to say so.\nFix the token file, then re-run: cockpit --restore\n' "$name" "$reason"
+  # `(exit 78)` and NOT a bare `exit 78`: a bare exit ends the `bash -lc` shell right there, so the keep-pane
+  # wrapper appended after it never runs and tmux closes the pane — taking the workspace with it when it was
+  # the last one. The subshell sets $? without leaving the shell, which is what the wrapper reads.
+  cockpit_keep_pane_on_failure "printf %s $(printf %q "$msg"); (exit 78)"
+}
+
 # ── brief-studio launch posture (Orbital's `orb` MCP channel) ───────────────────────────────────────────────
 # A brief-studio pane is a workshop session Orbital launched to develop a brief. Three things make it usable
 # from Orbital and NOTHING else about the spawn contract changes:
@@ -172,7 +246,7 @@ cockpit_snapshot() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
   printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
   $tmux list-panes -s -t "$COCKPIT_SESSION" -f '#{==:#{@orderly},}' \
-    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@cockpit_workspace_ref,#{@cockpit_workspace_ref},$NIL}${TAB}#{?@cockpit_pane_ref,#{@cockpit_pane_ref},$NIL}${TAB}#{?@cockpit_pane_generation,#{@cockpit_pane_generation},$NIL}${TAB}#{?@cockpit_pane_version,#{@cockpit_pane_version},$NIL}${TAB}#{?@cockpit_badge,#{@cockpit_badge},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}" 2>/dev/null |
+    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@cockpit_workspace_ref,#{@cockpit_workspace_ref},$NIL}${TAB}#{?@cockpit_pane_ref,#{@cockpit_pane_ref},$NIL}${TAB}#{?@cockpit_pane_generation,#{@cockpit_pane_generation},$NIL}${TAB}#{?@cockpit_pane_version,#{@cockpit_pane_version},$NIL}${TAB}#{?@cockpit_badge,#{@cockpit_badge},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}${TAB}#{?@account,#{@account},$NIL}" 2>/dev/null |
     awk -F "$TAB" -v nil="$NIL" '
       $3 != nil && ($6 == "claude" || $6 == "codex") {
         key=$6 SUBSEP $3; if (seen[key]++) next
@@ -242,6 +316,7 @@ pane_generation|TEXT NOT NULL DEFAULT ''
 pane_version|TEXT NOT NULL DEFAULT ''
 badge|TEXT NOT NULL DEFAULT ''
 orb_server_file|TEXT NOT NULL DEFAULT ''
+account|TEXT NOT NULL DEFAULT ''
 COLUMNS
 }
 
@@ -250,11 +325,14 @@ COLUMNS
 # bounded without a separate sweep.
 cockpit_layout_save() {
   local snap="$1" sess="${COCKPIT_SESSION}" NIL='<nil>' sql active="" seq=0
-  local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12
+  local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13
   [[ -n "$snap" ]] || return 1
   cockpit_layout_init
   sql="BEGIN IMMEDIATE;"
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
+  # f13 is the Claude account NAME only — never its token. The token is delivered to the pane's child process
+  # through tmux's `-e` at creation and is deliberately absent from this row, so the layout DB can be read,
+  # copied or diffed without carrying a credential.
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     [[ -n "$f1" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""
@@ -262,10 +340,12 @@ cockpit_layout_save() {
     [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
     [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
     [[ "$f11" == "$NIL" ]] && f11=""; [[ "$f12" == "$NIL" ]] && f12=""
-    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,workspace_ref,pane_ref,pane_generation,pane_version,badge,orb_server_file) VALUES("
+    [[ "$f13" == "$NIL" ]] && f13=""
+    cockpit_account_name_ok "$f13" || f13=""   # a row that is not a valid account name is not one
+    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,workspace_ref,pane_ref,pane_generation,pane_version,badge,orb_server_file,account) VALUES("
     sql+="(SELECT MAX(id) FROM snapshots),$seq,$(ck_sqesc "$f1"),$(ck_sqesc "$f2"),"
     sql+="$(ck_sqesc "$f3"),$(ck_sqesc "$f4"),$(ck_sqesc "$f5"),$(ck_sqesc "$f6"),"
-    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"),$(ck_sqesc "$f10"),$(ck_sqesc "$f11"),$(ck_sqesc "$f12"));"
+    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"),$(ck_sqesc "$f10"),$(ck_sqesc "$f11"),$(ck_sqesc "$f12"),$(ck_sqesc "$f13"));"
     seq=$((seq+1))
   done <<<"$snap"
   (( seq > 0 )) || return 1        # never persist an empty grid over a good one
@@ -319,7 +399,8 @@ cockpit_layout_emit() {
             CASE WHEN pane_generation='' THEN '$NIL' ELSE pane_generation END,
             CASE WHEN pane_version='' THEN '$NIL' ELSE pane_version END,
             CASE WHEN badge='' THEN '$NIL' ELSE badge END,
-            CASE WHEN orb_server_file='' THEN '$NIL' ELSE orb_server_file END
+            CASE WHEN orb_server_file='' THEN '$NIL' ELSE orb_server_file END,
+            CASE WHEN account='' THEN '$NIL' ELSE account END
      FROM panes WHERE snapshot_id=$sid ORDER BY seq;" 2>/dev/null
 }
 

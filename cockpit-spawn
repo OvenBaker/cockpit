@@ -3,7 +3,7 @@
 # (or new) workspace. The scriptable sibling of cockpit-pick's Alt-N flow, so a
 # web/remote surface can open a session without driving the interactive picker.
 #
-#   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME]
+#   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME] [--account NAME]
 #                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N
 #                  [--interaction-profile human|agent|brief-studio|execution]]  # codex: human, brief-studio, execution
 #                 [--interaction-profile brief-studio|execution --orb-server-file ABS]
@@ -59,6 +59,14 @@
 # server is missing, or whose cwd cannot be asserted trusted, REFUSES by name rather than spawning a session
 # that would sit on a dialog or have nowhere to ask.
 #
+# ACCOUNT: --account NAME runs this pane under a SECOND Claude subscription, by handing the child process
+# CLAUDE_CODE_OAUTH_TOKEN from ${COCKPIT_ACCOUNTS_DIR:-~/.config/cockpit/accounts}/NAME.token. Claude only —
+# Codex has no equivalent token and a shell pane has no provider, so the flag is refused there rather than
+# ignored. The token reaches the pane through tmux's `-e` and NOTHING else; only the NAME is ever persisted
+# (@account, the layout DB, cockpit-state). An account that does not fully resolve — missing, wrong mode,
+# empty after trimming — REFUSES the spawn: an empty CLAUDE_CODE_OAUTH_TOKEN is read by Claude Code as unset,
+# so passing one through would silently run on the primary account and bill the quota this flag protects.
+#
 # Exit codes: 0 ok (pane id on stdout) · 1 no grid/workspace · 2 validation refused ·
 #             4 seed terminally failed (bounded code on stderr) · 5 seed request conflict (changed material).
 set -uo pipefail
@@ -71,8 +79,9 @@ export COCKPIT_REMOTE_CONTROL=1
 
 cwd=""; ws=""; agent="claude"; name=""
 req_id=""; prompt_file=""; prompt_sha=""; prompt_bytes=""; profile=""; profile_given=0
-orb_file=""; orb_spec=""
+orb_file=""; orb_spec=""; account=""; account_token=""; declare -a account_env=()
 while [[ $# -gt 0 ]]; do case "$1" in
+  --account)   account="${2:-}"; shift;;
   --orb-server-file)       orb_file="${2:-}"; shift;;
   --cwd)       cwd="${2:-}"; shift;;
   --workspace) ws="${2:-}"; shift;;
@@ -89,6 +98,22 @@ esac; shift; done
 cwd="${cwd/#\~/$HOME}"
 [[ -n "$cwd" && -d "$cwd" ]] || { echo "cockpit-spawn: --cwd must be an existing directory (got '${cwd:-<empty>}')" >&2; exit 2; }
 case "$agent" in claude|codex|shell) ;; *) echo "cockpit-spawn: --agent must be claude|codex|shell" >&2; exit 2;; esac
+
+# ── --account: bind this pane to a second Claude subscription ───────────────────────────────────────────────
+# Resolved HERE, before any reservation or tmux side effect, because the token has to be handed to the child
+# process at creation time (tmux `-e`) — there is no stamping it on afterwards. Claude-only and never silently
+# ignored: Codex has no CLAUDE_CODE_OAUTH_TOKEN equivalent, and a shell pane has no provider to authenticate,
+# so accepting the flag there would tell the caller a binding exists when nothing is bound.
+if [[ -n "$account" ]]; then
+  [[ "$agent" == claude ]] \
+    || { echo "cockpit-spawn: --account is Claude-only (--agent $agent has no CLAUDE_CODE_OAUTH_TOKEN equivalent)" >&2; exit 2; }
+  if ! account_token=$(cockpit_account_token "$account" 2>/dev/null); then
+    echo "cockpit-spawn: --account '$account': $(cockpit_account_reason "$account")" >&2
+    echo "cockpit-spawn: refusing to spawn — an unset CLAUDE_CODE_OAUTH_TOKEN is read as 'use the primary account'" >&2
+    exit 2
+  fi
+  account_env=(-e "CLAUDE_CODE_OAUTH_TOKEN=$account_token")
+fi
 
 # ── seeded-mode validation: ALL before any reservation or tmux side effect ──────────────────────────────────
 MAX_SEED_PROMPT_BYTES="${COCKPIT_SEED_MAX_BYTES:-65536}"
@@ -273,10 +298,13 @@ cmd="cd $(printf %q "$cwd") && $launch"
 # freshly-created workspace's placeholder), else split a new pane.
 act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
 actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
+# The account token crosses to the child as tmux `-e` START-ENVIRONMENT, NOT through $cmd. That keeps it out
+# of the `bash -lc` string, out of the pane's start command, out of #{pane_start_command}, out of the layout
+# DB and out of cockpit-state — everything that persists or is readable back carries only the account NAME.
 if [[ -z "$actsid" && -n "$act" ]]; then
-  pane="$act"; $TMUX respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")"
+  pane="$act"; $TMUX respawn-pane -k -t "$pane" "${account_env[@]}" "bash -lc $(printf %q "$cmd")"
 else
-  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${account_env[@]}" "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
     || { echo "cockpit-spawn: no room for another pane in this workspace" >&2; exit 1; }
 fi
 
@@ -294,6 +322,13 @@ fi
 # pane so it is persisted with the layout and re-passed on resume — otherwise the ask and declare channels are
 # lost to the first reboot, silently, while the spec file itself is still sitting on disk.
 if [[ -n "$orb_file" ]]; then $TMUX set -p -t "$pane" @orb_server_file "$orb_file"; fi
+# The account NAME rides the pane the same way, for the same reason: without it the binding is lost to the
+# first reboot and the session comes back on the primary subscription, silently. The NAME only — the token is
+# re-derived from the token file at restore, and refused rather than defaulted if it no longer resolves.
+# Set UNCONDITIONALLY (empty clears it): this may be a REUSED bare pane, and a stale @account left standing on
+# a spawn with no --account would claim a binding whose token was never applied — the surfaces would say
+# "second subscription" while the work billed the first, and the next restore would then act on the claim.
+$TMUX set -p -t "$pane" @account "$account"
 if (( seeded )); then
   # Bind pane → request in both directions (the launcher does the same from inside the pane, whichever runs
   # first; the record update is flock-serialized and first-writer-wins).
