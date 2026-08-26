@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# cockpit-role — stamp, clear, or read a pane's @role tag ad hoc (outside cockpit-spawn --role).
+#
+#   cockpit-role <pane> <role>    stamp <pane> with <role> (must match ^[a-z0-9_-]+$)
+#   cockpit-role <pane> --clear   clear the role
+#   cockpit-role <pane>           print the current role (empty line if none)
+#
+# The role is purely descriptive: it shows as a "[role]" tag in the pane's border-format and is carried
+# through save/restore the same way @account and @orb_server_file are (see lib.sh's stamp helpers and
+# cockpit-spawn --role). It changes no launch behaviour.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
+
+pane="${1:-}"
+[[ -n "$pane" ]] || { echo "usage: cockpit-role <pane> [<role>|--clear]" >&2; exit 2; }
+# `display -p -t <bad-pane>` does NOT fail (it prints an empty line, rc 0) — target resolution errors only
+# surface on commands that actually act on the pane. list-panes -a is the reliable existence check.
+$TMUX list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx -- "$pane" \
+  || { echo "cockpit-role: no such pane '$pane'" >&2; exit 1; }
+
+case "${2-}" in
+  '')
+    # read: `show -pqv`, NEVER `show -p | awk` — a cleared option prints quoted-empty (`@role ''`), and
+    # awk's field-split would return the literal quotes, misreporting "cleared" as a bound value.
+    $TMUX show -pqv -t "$pane" @role 2>/dev/null
+    ;;
+  --clear)
+    $TMUX set-option -pu -t "$pane" @role
+    ;;
+  *)
+    role="$2"
+    cockpit_role_ok "$role" || { echo "cockpit-role: role must match ^[a-z0-9_-]+$ (got '$role')" >&2; exit 2; }
+    $TMUX set-option -p -t "$pane" @role "$role"
+    ;;
+esac

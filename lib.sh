@@ -93,6 +93,10 @@ COCKPIT_ACCOUNTS_DIR="${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"
 # narrow: it can never be a path traversal, an option-parsing surprise or a control character.
 cockpit_account_name_ok() { [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]]; }
 
+# A pane @role is free-text-adjacent tmux option value, so it stays as narrow as the account name: lowercase
+# only (it also lands in the pane-border-format, where case noise is a distraction, not information).
+cockpit_role_ok() { [[ "${1:-}" =~ ^[a-z0-9_-]+$ ]]; }
+
 cockpit_account_token_path() { printf '%s/%s.token' "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}" "$1"; }
 
 # Resolve an account to its token. SUCCESS: the token alone on stdout, rc 0.
@@ -293,7 +297,7 @@ cockpit_snapshot() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
   printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
   $tmux list-panes -s -t "$COCKPIT_SESSION" -f '#{==:#{@orderly},}' \
-    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@cockpit_workspace_ref,#{@cockpit_workspace_ref},$NIL}${TAB}#{?@cockpit_pane_ref,#{@cockpit_pane_ref},$NIL}${TAB}#{?@cockpit_pane_generation,#{@cockpit_pane_generation},$NIL}${TAB}#{?@cockpit_pane_version,#{@cockpit_pane_version},$NIL}${TAB}#{?@cockpit_badge,#{@cockpit_badge},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}${TAB}#{?@account,#{@account},$NIL}" 2>/dev/null |
+    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@cockpit_workspace_ref,#{@cockpit_workspace_ref},$NIL}${TAB}#{?@cockpit_pane_ref,#{@cockpit_pane_ref},$NIL}${TAB}#{?@cockpit_pane_generation,#{@cockpit_pane_generation},$NIL}${TAB}#{?@cockpit_pane_version,#{@cockpit_pane_version},$NIL}${TAB}#{?@cockpit_badge,#{@cockpit_badge},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}${TAB}#{?@account,#{@account},$NIL}${TAB}#{?@role,#{@role},$NIL}" 2>/dev/null |
     awk -F "$TAB" -v nil="$NIL" '
       $3 != nil && ($6 == "claude" || $6 == "codex") {
         key=$6 SUBSEP $3; if (seen[key]++) next
@@ -344,6 +348,7 @@ CREATE TABLE IF NOT EXISTS panes(
   pane_generation TEXT NOT NULL DEFAULT '',
   pane_version    TEXT NOT NULL DEFAULT '',
   badge           TEXT NOT NULL DEFAULT '',
+  role            TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(snapshot_id, seq));
 CREATE INDEX IF NOT EXISTS idx_snapshots_session_at ON snapshots(session, at DESC);
 SQL
@@ -364,6 +369,7 @@ pane_version|TEXT NOT NULL DEFAULT ''
 badge|TEXT NOT NULL DEFAULT ''
 orb_server_file|TEXT NOT NULL DEFAULT ''
 account|TEXT NOT NULL DEFAULT ''
+role|TEXT NOT NULL DEFAULT ''
 COLUMNS
 }
 
@@ -372,14 +378,14 @@ COLUMNS
 # bounded without a separate sweep.
 cockpit_layout_save() {
   local snap="$1" sess="${COCKPIT_SESSION}" NIL='<nil>' sql active="" seq=0
-  local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13
+  local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14
   [[ -n "$snap" ]] || return 1
   cockpit_layout_init
   sql="BEGIN IMMEDIATE;"
   # f13 is the Claude account NAME only — never its token. The token is delivered to the pane's child process
   # through tmux's `-e` at creation and is deliberately absent from this row, so the layout DB can be read,
-  # copied or diffed without carrying a credential.
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13; do
+  # copied or diffed without carrying a credential. f14 is the pane's @role tag.
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     [[ -n "$f1" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""
@@ -387,12 +393,13 @@ cockpit_layout_save() {
     [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
     [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
     [[ "$f11" == "$NIL" ]] && f11=""; [[ "$f12" == "$NIL" ]] && f12=""
-    [[ "$f13" == "$NIL" ]] && f13=""
+    [[ "$f13" == "$NIL" ]] && f13=""; [[ "$f14" == "$NIL" ]] && f14=""
     cockpit_account_name_ok "$f13" || f13=""   # a row that is not a valid account name is not one
-    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,workspace_ref,pane_ref,pane_generation,pane_version,badge,orb_server_file,account) VALUES("
+    cockpit_role_ok "$f14" || f14=""           # a row that is not a valid role is not one
+    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,workspace_ref,pane_ref,pane_generation,pane_version,badge,orb_server_file,account,role) VALUES("
     sql+="(SELECT MAX(id) FROM snapshots),$seq,$(ck_sqesc "$f1"),$(ck_sqesc "$f2"),"
     sql+="$(ck_sqesc "$f3"),$(ck_sqesc "$f4"),$(ck_sqesc "$f5"),$(ck_sqesc "$f6"),"
-    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"),$(ck_sqesc "$f10"),$(ck_sqesc "$f11"),$(ck_sqesc "$f12"),$(ck_sqesc "$f13"));"
+    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"),$(ck_sqesc "$f10"),$(ck_sqesc "$f11"),$(ck_sqesc "$f12"),$(ck_sqesc "$f13"),$(ck_sqesc "$f14"));"
     seq=$((seq+1))
   done <<<"$snap"
   (( seq > 0 )) || return 1        # never persist an empty grid over a good one
@@ -447,7 +454,8 @@ cockpit_layout_emit() {
             CASE WHEN pane_version='' THEN '$NIL' ELSE pane_version END,
             CASE WHEN badge='' THEN '$NIL' ELSE badge END,
             CASE WHEN orb_server_file='' THEN '$NIL' ELSE orb_server_file END,
-            CASE WHEN account='' THEN '$NIL' ELSE account END
+            CASE WHEN account='' THEN '$NIL' ELSE account END,
+            CASE WHEN role='' THEN '$NIL' ELSE role END
      FROM panes WHERE snapshot_id=$sid ORDER BY seq;" 2>/dev/null
 }
 
@@ -582,8 +590,8 @@ cockpit_clear_projection() {
   $tmux set -p -t "$pane" @hook_at ""
 }
 
-cockpit_stamp_known_agent() { # pane session-id cwd label agent
-  local pane="$1" sid="$2" cwd="$3" label="$4" agent="$5" tmux=${COCKPIT_TMUX:-"tmux -L cockpit"}
+cockpit_stamp_known_agent() { # pane session-id cwd label agent [role]
+  local pane="$1" sid="$2" cwd="$3" label="$4" agent="$5" role="${6:-}" tmux=${COCKPIT_TMUX:-"tmux -L cockpit"}
   cockpit_clear_projection "$pane"
   $tmux set -p -t "$pane" @session_id "$sid"
   $tmux set -p -t "$pane" @cwd "$cwd"
@@ -591,10 +599,11 @@ cockpit_stamp_known_agent() { # pane session-id cwd label agent
   $tmux set -p -t "$pane" @agent "$agent"
   $tmux set -p -t "$pane" @born ""
   $tmux set -p -t "$pane" @badge "starting"
+  [[ -n "$role" ]] && $tmux set -p -t "$pane" @role "$role"
 }
 
-cockpit_stamp_pending_agent() { # pane cwd label agent
-  local pane="$1" cwd="$2" label="$3" agent="$4" tmux=${COCKPIT_TMUX:-"tmux -L cockpit"}
+cockpit_stamp_pending_agent() { # pane cwd label agent [role]
+  local pane="$1" cwd="$2" label="$3" agent="$4" role="${5:-}" tmux=${COCKPIT_TMUX:-"tmux -L cockpit"}
   cockpit_clear_projection "$pane"
   $tmux set -p -t "$pane" @session_id ""
   $tmux set -p -t "$pane" @cwd "$cwd"
@@ -602,6 +611,7 @@ cockpit_stamp_pending_agent() { # pane cwd label agent
   $tmux set -p -t "$pane" @agent "$agent"
   $tmux set -p -t "$pane" @born "$(date +%s)"
   $tmux set -p -t "$pane" @badge "starting"
+  [[ -n "$role" ]] && $tmux set -p -t "$pane" @role "$role"
 }
 
 # --- seeded first-turn requests (cockpit-spawn --request-id …) ---------------

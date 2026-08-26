@@ -147,7 +147,9 @@ apply_chrome() {
   # right; the heavy line fills the gap. @sc is set per-pane by the poller.
   # The label is stored full and truncated HERE to pane_width-20 (≈ badge+pad),
   # so it uses whatever room the pane has — wide panes show more, narrow less.
-  $TMUX set -g pane-border-format '#[align=left] #{@sc}#{=/#{e|-|:#{pane_width},20}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] '
+  # A stamped @role prefixes the label as "[role] " and eats a bit more of the truncation budget (32 vs 20)
+  # so the role tag doesn't shove the label itself off the edge of a narrow pane.
+  $TMUX set -g pane-border-format '#[align=left] #{@sc}#{?@role,[#{@role}] ,}#{=/#{e|-|:#{pane_width},#{?@role,32,20}}/…:#{?@label,#{@label},#{pane_index}}}#[default] #[align=right] #{@sc}#{?@badge,#{@badge},…}#[default] '
   # box borders: uniform neutral; only the active pane is highlighted (the one
   # case with no shared-edge ambiguity).
   $TMUX set -g pane-border-style 'fg=colour238'
@@ -228,8 +230,8 @@ apply_chrome() {
   $TMUX bind -n M-?   display-popup -E -w 64 -h 42 "$HERE/cockpit-help show"
 }
 
-stamp_pane() {  # pane-id  session-id  cwd  label  [agent]
-  cockpit_stamp_known_agent "$1" "$2" "$3" "$4" "${5:-claude}"
+stamp_pane() {  # pane-id  session-id  cwd  label  [agent]  [role]
+  cockpit_stamp_known_agent "$1" "$2" "$3" "$4" "${5:-claude}" "${6:-}"
 }
 
 # Restore controller-owned identity from the snapshot. Legacy snapshots carry no
@@ -371,8 +373,8 @@ restore_grid() {
   fi
   [[ -n "$snap" ]] || return 1
   local active="" first=1 curwin="" awin="" i n resumable=0 duplicates=0 key duplicate_noun
-  declare -a W S C L A WR PR PG PV B O AC; local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13; do
+  declare -a W S C L A WR PR PG PV B O AC RL; local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     # Guard against a malformed layout file: a pane row's f1 is a window index
     # and f2 a workspace name. Skip anything else (blank lines, or continuation
@@ -385,12 +387,15 @@ restore_grid() {
     [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
     [[ "$f11" == "$NIL" ]] && f11=""; [[ "$f12" == "$NIL" ]] && f12=""
     [[ "$f13" == "$NIL" ]] && f13=""
+    [[ "$f14" == "$NIL" ]] && f14=""
     [[ "$f6" == claude || "$f6" == codex ]] || f6=""
     # f13 is a Claude account NAME (never a token). A row that does not parse as one is dropped rather than
     # carried: the launch below treats "has an account" as "must resolve", so a junk value must not reach it.
     cockpit_account_name_ok "$f13" || f13=""
+    # f14 is the pane's @role tag; a row that does not parse as one is dropped the same way.
+    cockpit_role_ok "$f14" || f14=""
     W+=("$f2"); S+=("$f3"); C+=("$f4"); L+=("$f5"); A+=("$f6")
-    WR+=("$f7"); PR+=("$f8"); PG+=("$f9"); PV+=("$f10"); B+=("$f11"); O+=("$f12"); AC+=("$f13")
+    WR+=("$f7"); PR+=("$f8"); PG+=("$f9"); PV+=("$f10"); B+=("$f11"); O+=("$f12"); AC+=("$f13"); RL+=("$f14")
   done <<<"$snap"
   n=${#W[@]}; (( n > 0 )) || return 1
   declare -A SEEN_RESUMABLE=()
@@ -420,6 +425,7 @@ restore_grid() {
     local wname="${W[$i]}" sid="${S[$i]}" cwd="${C[$i]}" label="${L[$i]}" agent="${A[$i]}" issess=0 cmd pane
     local wref="${WR[$i]}" pref="${PR[$i]}" gen="${PG[$i]}" ver="${PV[$i]}" badge="${B[$i]}" orb="${O[$i]:-}"
     local acct="${AC[$i]:-}" acct_ok=1 acct_reason="" tok=""; local -a eargs=()
+    local role="${RL[$i]:-}"
     # ── the per-pane Claude account, resolved BEFORE the pane is created ──────────────────────────────────
     # The token is delivered through tmux's `-e`, which applies the environment to the child process at
     # exec — so it has to be decided here, not stamped on afterwards. And if it no longer resolves we must
@@ -467,11 +473,11 @@ restore_grid() {
       fi
       curwin=$($TMUX display -p -t "$pane" '#{window_id}'); SEENW[$curwin]=1; NAMEWIN[$wname]="$curwin"
       [[ "$wname" == "$active" ]] && awin="$curwin"
-      (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
+      (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent" "$role"
     else                                          # workspace already open → add this pane to its window
       curwin="${NAMEWIN[$wname]}"
       pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$cmd")")
-      (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent"
+      (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent" "$role"
     fi
     # Carry the orb binding forward, or the fix survives exactly one reboot. Braced with `|| true` because this
     # is the loop body's last command under `set -e`, and no binding is the normal case for every other pane.
@@ -479,6 +485,9 @@ restore_grid() {
     # Re-stamp the account NAME (never the token) so it survives THIS restore into the next snapshot. A pane
     # that came up refusing keeps its binding too: the operator fixes the token file and restores again.
     { [[ -n "$acct" ]] && $TMUX set -p -t "$pane" @account "$acct"; } || true
+    # Re-stamp @role the same way — it's a property of the pane the operator dedicated, not of whether this
+    # pane happens to hold a resumable session (stamp_pane above only fires when issess is true).
+    { [[ -n "$role" ]] && $TMUX set -p -t "$pane" @role "$role"; } || true
     stamp_controller_identity "$pane" "$curwin" "$wref" "$pref" "$gen" "$ver" "$badge" || true
     # A refusing pane is never queued for a real provider start — that is the whole point of refusing.
     if (( issess && acct_ok )) && [[ "$agent" == codex ]]; then
