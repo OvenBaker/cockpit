@@ -219,13 +219,16 @@ apply_chrome() {
   # Plain right-click is left ALONE (terminal-native — the operator uses it to copy selected text, and a
   # tmux menu popping up on every click broke that). Explicitly unbound rather than just never (re)bound,
   # so a stale binding from a previous apply_chrome on a long-running server is cleared too. tmux's own
-  # STOCK defaults also pop menus on the Alt-modified pane click and both status-bar right-clicks — none of
-  # these are cockpit's doing (grepped: cockpit never binds them), but they're the same "right-click means a
-  # menu, not terminal-native behaviour" surprise, so they go too.
+  # STOCK defaults also pop menus on every other MouseDown3 variant — the Alt-modified pane click, both
+  # status-bar right-clicks, and THEIR Alt-modified variants too — none of these are cockpit's doing
+  # (grepped: cockpit never binds them), but no stock menu should be one accidental modifier away, so they
+  # all go. C-MouseDown3Pane below is deliberately the ONLY MouseDown3-family binding left standing.
   $TMUX unbind -n MouseDown3Pane
   $TMUX unbind -n M-MouseDown3Pane
   $TMUX unbind -n MouseDown3Status
   $TMUX unbind -n MouseDown3StatusLeft
+  $TMUX unbind -n M-MouseDown3Status
+  $TMUX unbind -n M-MouseDown3StatusLeft
   # The cockpit pane menu instead lives on ctrl+right-click: routes Kill through the soft-kill so Alt-u can
   # undo it, and Restart onto cockpit-restart (respawns the CLICKED pane's resume in place — same session,
   # same binding — to pick up a freshly released provider binary; #{pane_id} in a display-menu bound via
