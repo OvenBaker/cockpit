@@ -40,7 +40,9 @@ if [[ "${1:-popup}" == "show" ]]; then
      yellow border = the active (focused) pane
 
    mouse   click = focus · drag border = resize
-           right-click = pane menu (Kill is undoable)
+           right-click a pane = pane menu (Kill/Restart ask first)
+           right-click a workspace tab = workspace menu
+             switch · rename · move left/right · new · close (undoable)
 
    tmux    C-b d detach   (cockpit --attach to return)
            C-b x kill pane (undoable) · C-b { } swap panes

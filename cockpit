@@ -217,11 +217,11 @@ apply_chrome() {
   # agent never sees ^Z → can't be suspended), and cockpit-cont resumes anything
   # already stopped (no-op otherwise). C-b C-z still suspends the whole tmux client.
   $TMUX bind -n C-z   run-shell "$HERE/cockpit-cont #{pane_id}"
-  # tmux's own STOCK menus are unbound first — every MouseDown3 variant EXCEPT plain MouseDown3Pane below
-  # (the Alt-modified pane click, both status-bar right-clicks, and their Alt-modified variants; none of
-  # these are cockpit's doing, grepped first) — so nothing pops a menu without an explicit choice below.
-  # unbind-then-rebind on the same key (MouseDown3Pane) stays idempotent across repeated apply_chrome calls
-  # on a long-running server: a stale prior binding is cleared before the current one is installed.
+  # tmux's own STOCK menus are unbound first — every MouseDown3 variant — so nothing pops a menu that
+  # cockpit didn't write. The two cockpit menus below (plain right-click on a pane, plain right-click on a
+  # workspace tab) are then bound back; the Alt-modified variants stay dead. unbind-then-rebind on the same
+  # key stays idempotent across repeated apply_chrome calls on a long-running server: a stale prior binding
+  # is cleared before the current one is installed.
   $TMUX unbind -n MouseDown3Pane
   $TMUX unbind -n M-MouseDown3Pane
   $TMUX unbind -n MouseDown3Status
@@ -242,6 +242,26 @@ apply_chrome() {
     "Move to next ws" m "run-shell \"$HERE/cockpit-move next\"" \
     "Swap up"         u "swap-pane -U" \
     "Swap down"       d "swap-pane -D"
+  # Workspace menu on right-clicking a tab. Same shape of guard as the pane menu: the one destructive
+  # entry (Close) is behind `confirm-before` AND routes through cockpit-ws's 10s soft-close, so it is
+  # doubly recoverable — y/n first, then Alt-u for the ten seconds after. Everything else here (switch,
+  # rename, swap, new) is non-destructive and unconfirmed. Unlike tmux's stock status menu this has no
+  # Kill and no Respawn: a workspace holds live agent panes, and neither had an undo.
+  # #{window_id}/#{window_name} resolve against the tab UNDER THE MOUSE (display-menu -t =), not the
+  # focused workspace, so the menu acts on what you clicked even from another tab. Move left/right must
+  # select the clicked tab FIRST: swap-window's `:-1`/`:+1` are relative to the CURRENT window, so without
+  # that they'd shuffle the focused workspace's neighbours instead of the clicked one's (tmux's own stock
+  # status menu has exactly that bug).
+  $TMUX bind -n MouseDown3Status display-menu -T "#[align=centre] #{window_name} " -t = -x W -y W \
+    "Switch here"      s "select-window -t =" \
+    "Rename…"          n "command-prompt -F -I \"#{window_name}\" \"rename-window -t '#{window_id}' -- '%%'\"" \
+    "" \
+    "#{?#{>:#{session_windows},1},,-}Move left"  "<" "select-window -t = ; swap-window -t:-1" \
+    "#{?#{>:#{session_windows},1},,-}Move right" ">" "select-window -t = ; swap-window -t:+1" \
+    "" \
+    "New workspace"    w "command-prompt -p \"new workspace:\" \"new-window -a -t '#{window_id}' -n '%%' 'bash -l'\"" \
+    "" \
+    "Close (undoable)" k "confirm-before -p \"close workspace '#{window_name}' and its panes? (y/n)\" \"run-shell \\\"$HERE/cockpit-ws close '#{window_id}'\\\"\""
   # move the active pane to another workspace: Alt-m to pick/create, Alt-Shift-←/→ to shove
   # -h 32 fits ~24 rows of list: enough to show every workspace without scrolling at the counts
   # this grid actually runs. The picker scrolls inside its frame when it doesn't fit, so a small

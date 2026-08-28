@@ -4,7 +4,7 @@
 # instead of doing it immediately we mark it, switch away, and reap it after a
 # grace period — leaving a window to hit Alt-u and get it back.
 #
-#   cockpit-ws close            mark the current workspace; it dies in ~10s
+#   cockpit-ws close [win]      mark a workspace (default: the current one); it dies in ~10s
 #   cockpit-ws undo             cancel the most-recent pending close
 #   cockpit-ws reap <win> <tok> (internal) kill <win> after the grace iff still pending
 set -uo pipefail
@@ -16,7 +16,10 @@ wopt() { $TMUX show -wqv -t "$1" "$2" 2>/dev/null; }   # window option (quiet, v
 
 case "${1:-close}" in
   close)
-    win=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_id}')
+    # An explicit window id lets the status-bar right-click menu close the tab
+    # that was CLICKED rather than whichever workspace happened to be focused.
+    win="${2:-}"
+    [[ -n "$win" ]] || win=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_id}')
     # Count what would SURVIVE, not what currently exists — closes already in
     # flight are still live windows, and counting them let a held-down Alt-W mark
     # every workspace in the grid before the first one had died.
@@ -30,7 +33,10 @@ case "${1:-close}" in
     $TMUX set -w -t "$win" @closing  "$tok"
     $TMUX rename-window -t "$win" "✗ $name"               # visible cue on the tab
     cockpit_ws_undo_push "$win" "$tok"
-    $TMUX previous-window -t "$COCKPIT_SESSION" 2>/dev/null || true   # get it out of view
+    # Only steal focus when the doomed workspace is the one on screen; closing a
+    # tab you right-clicked from elsewhere should leave you where you were.
+    cur=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_id}')
+    [[ "$win" == "$cur" ]] && { $TMUX previous-window -t "$COCKPIT_SESSION" 2>/dev/null || true; }   # get it out of view
     pending=$(cockpit_ws_undo_pending)
     if (( pending > 1 )); then
       $TMUX display-message "closing '$name' in ${GRACE}s — $pending workspaces now closing, Alt-u to undo each"
@@ -61,5 +67,5 @@ case "${1:-close}" in
       $TMUX display-message "recovered '${name}'"
     fi
     ;;
-  *) echo "usage: cockpit-ws {close|undo}" >&2; exit 2;;
+  *) echo "usage: cockpit-ws {close [window]|undo}" >&2; exit 2;;
 esac
