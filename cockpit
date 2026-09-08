@@ -97,7 +97,9 @@ fi
 
 # already running? With --santa, open the picker TUI first (its resume key adds
 # panes live via the wt.exe shim), then attach. Otherwise just attach.
-if $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
+# (--reload wants the running session and is handled after the function
+# definitions below, so it must not fall into the attach short-cut here.)
+if [[ "$MODE" != reload ]] && $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
   if [[ "$SANTA" == 1 ]]; then
     echo "cockpit: opening santa — resume sends sessions into the grid…" >&2
     SANTA_RESUME_CMD="$HERE/cockpit-send" SANTA_RESUME_LABEL=cockpit PATH="$HERE/shim:$PATH" \
