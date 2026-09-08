@@ -40,7 +40,8 @@ if [[ "${1:-popup}" == "show" ]]; then
      yellow border = the active (focused) pane
 
    mouse   click = focus · drag border = resize
-           right-click a pane = pane menu (Kill/Restart ask first)
+           right-click a pane = pane menu (Kill/Restart ask first;
+                                Half/Full width flips the solo fit)
            right-click a workspace tab = workspace menu
              switch · rename · move left/right · new · close (undoable)
 

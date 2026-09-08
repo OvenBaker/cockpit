@@ -15,6 +15,7 @@
 #   cockpit -n N         default selection / --auto pane count (default 5)
 #   cockpit --attach     just attach to an existing cockpit
 #   cockpit --kill       tear down the cockpit server
+#   cockpit --reload     after a deploy: re-apply binds/hooks to the running grid, restart the poller
 #
 # Workspaces = tmux windows. A fresh build seeds one: 'work' (your picked
 # sessions); spin up more on demand (Alt-N into a new workspace, or Alt-w). The
@@ -47,7 +48,7 @@ TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 ensure_orderlies() { [[ -x "$HOME/tools/orderlies/orderlies-up" ]] && ( ORDERLIES_TMUX_SOCKET=orderlies ORDERLIES_SESSION=orderlies "$HOME/tools/orderlies/orderlies-up" >/dev/null 2>&1 & ) || true; }
 N=5; MODE=build; AUTO=0; REBUILD=0; SANTA=0; RESTORE=0; FRESH=0
 while [[ $# -gt 0 ]]; do case "$1" in
-  --list|-l) MODE=list;; --attach|-a) MODE=attach;; --kill) MODE=kill;;
+  --list|-l) MODE=list;; --attach|-a) MODE=attach;; --kill) MODE=kill;; --reload) MODE=reload;;
   --rebuild) REBUILD=1;; --auto) AUTO=1;; --santa) SANTA=1;;
   --restore) RESTORE=1;; --fresh) FRESH=1;; --save) MODE=save;; -n) N="$2"; shift;;
   --history) MODE=history;; --restore-from) RESTORE=1; RESTORE_BACK="$2"; shift;;
@@ -237,6 +238,7 @@ apply_chrome() {
   # and stay unconfirmed.
   $TMUX bind -n MouseDown3Pane select-pane -t = '\;' display-menu -T "#[align=centre] pane #{pane_index} " -x M -y M \
     "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z" \
+    "#{?#{==:#{window-size},manual},Full width,Half width}" w "run-shell \"$HERE/cockpit-ws toggle #{window_id}\"" \
     "Kill (undoable)" k "confirm-before -p \"kill pane #{pane_index}? (y/n)\" \"run-shell \\\"$HERE/cockpit-pane remove\\\"\"" \
     "Restart"         r "confirm-before -p \"restart pane #{pane_index}? (y/n)\" \"run-shell \\\"$HERE/cockpit-restart '#{pane_id}'\\\"\"" \
     "Move to next ws" m "run-shell \"$HERE/cockpit-move next\"" \
@@ -279,6 +281,14 @@ apply_chrome() {
   $TMUX bind -n M-W run-shell "$HERE/cockpit-ws close"
   $TMUX bind -n M-u run-shell "$HERE/cockpit-undo"     # undo last ws-close OR pane-kill
   $TMUX bind '&'    run-shell "$HERE/cockpit-ws close"
+  # Solo width: a one-pane workspace is narrowed to COCKPIT_SOLO_WIDTH% (see
+  # cockpit-ws fit). Hooks catch every way a pane count or terminal size changes;
+  # after-new-window is separate because a brand-new window fires no layout event,
+  # and #{hook_window} is only populated for window-layout-changed (empty → fit all).
+  $TMUX set-hook -g window-layout-changed "run-shell \"$HERE/cockpit-ws fit #{hook_window}\""
+  $TMUX set-hook -g after-new-window      "run-shell \"$HERE/cockpit-ws fit\""
+  $TMUX set-hook -g client-attached       "run-shell \"$HERE/cockpit-ws fit\""
+  $TMUX set-hook -g client-resized        "run-shell \"$HERE/cockpit-ws fit\""
   $TMUX bind -n M-/   display-popup -E -w 64 -h 42 "$HERE/cockpit-help show"
   $TMUX bind -n M-h   display-popup -E -w 64 -h 42 "$HERE/cockpit-help show"
   $TMUX bind -n M-?   display-popup -E -w 64 -h 42 "$HERE/cockpit-help show"
@@ -592,6 +602,20 @@ restore_shrink_check() {
     echo "         restore it with: cockpit --restore-id $pid" >&2
   fi
 }
+
+# ---- reload: hot-apply a deploy to the running grid ----
+# Binds, menus and hooks live in the tmux server and the poller is a long-lived
+# process, so a deploy that only swaps files changes nothing until both are
+# refreshed. This is the deploy's last step (see AGENTS.md); no attach, no rebuild.
+if [[ "$MODE" == reload ]]; then
+  $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null || { echo "no cockpit running to reload" >&2; exit 1; }
+  apply_chrome
+  pkill -f "$HERE/cockpit-poller" 2>/dev/null || true
+  COCKPIT_TMUX="$TMUX" setsid nohup "$HERE/cockpit-poller" >/tmp/cockpit-poller.log 2>&1 &
+  "$HERE/cockpit-ws" fit 2>/dev/null || true
+  echo "cockpit: reloaded chrome + poller from $HERE ($(git -C "$HERE" log --oneline -1 2>/dev/null || echo 'not a checkout'))"
+  exit 0
+fi
 
 # ---- orchestrate: restore the saved layout, else pick fresh ----
 # Default plain `cockpit` auto-restores when a layout exists; --fresh/--auto/

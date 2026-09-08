@@ -9,6 +9,13 @@ COCKPIT_SESSION="${COCKPIT_SESSION:-cockpit}"
 # Pane arrangement. even-horizontal = tall side-by-side columns (best on wide
 # monitors); tiled = grid; even-vertical = stacked rows. Override via env.
 COCKPIT_LAYOUT="${COCKPIT_LAYOUT:-even-horizontal}"
+# Solo-pane width. A workspace holding a single pane is shrunk to this percent of
+# the terminal (tmux draws the window top-left and leaves the rest blank) so a lone
+# agent doesn't sprawl across an ultra-wide. Snaps back to full width the moment a
+# second pane arrives. 0/empty disables; never narrower than COCKPIT_SOLO_MIN cols
+# (below that the terminal is small enough that full width is the right answer).
+COCKPIT_SOLO_WIDTH="${COCKPIT_SOLO_WIDTH:-50}"
+COCKPIT_SOLO_MIN="${COCKPIT_SOLO_MIN:-120}"
 
 # Remote Control: launch claude panes with `--remote-control` so they can be
 # driven from the Claude app (claude.ai / mobile) — the whole point of steering

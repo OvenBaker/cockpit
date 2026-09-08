@@ -7,12 +7,54 @@
 #   cockpit-ws close [win]      mark a workspace (default: the current one); it dies in ~10s
 #   cockpit-ws undo             cancel the most-recent pending close
 #   cockpit-ws reap <win> <tok> (internal) kill <win> after the grace iff still pending
+#   cockpit-ws fit [win]        size single-pane workspaces to COCKPIT_SOLO_WIDTH (all if no win)
+#   cockpit-ws toggle [win]     right-click "Half/Full width": flip the solo fit for one workspace
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 GRACE="${COCKPIT_CLOSE_GRACE:-10}"
 
 wopt() { $TMUX show -wqv -t "$1" "$2" 2>/dev/null; }   # window option (quiet, value-only)
+
+# --- solo width -------------------------------------------------------------
+# tmux can't leave a gap beside a lone pane (a window is always fully tiled), but
+# the WINDOW can be narrower than the client: resize-window -x flips it to
+# window-size=manual and tmux paints the unused area with fill-character. So a
+# one-pane workspace is narrowed to COCKPIT_SOLO_WIDTH% and restored (window-size
+# unset → back to `latest`, i.e. the attached client) once it holds ≥2 panes.
+# Driven by hooks (window-layout-changed / after-new-window / client-attached /
+# client-resized → `fit`) so every creation path — Alt-w, spawn, pick, send,
+# restore — behaves the same. Idempotent: no-op when already right, which is what
+# stops the resize→layout-changed→fit cycle after one round trip.
+solo_target() {   # → "cols rows", or "0" for "full width"
+  local cw ch st pct="${COCKPIT_SOLO_WIDTH:-0}" min="${COCKPIT_SOLO_MIN:-0}" t
+  [[ "$pct" =~ ^[0-9]+$ ]] && (( pct > 0 && pct < 100 )) || { echo 0; return; }
+  read -r cw ch < <($TMUX list-clients -t "$COCKPIT_SESSION" -F '#{client_width} #{client_height}' 2>/dev/null | sort -n | tail -1)
+  [[ "$cw" =~ ^[0-9]+$ ]] && (( cw > 0 )) || { echo 0; return; }   # no client → can't size
+  t=$(( cw * pct / 100 )); (( t < min )) && t=$min
+  (( t < cw )) || { echo 0; return; }
+  # Height is pinned too: a width-only resize-window freezes whatever height the
+  # window had, so a terminal that later grows taller would leave blank rows.
+  # window rows = client rows minus the status line(s).
+  st=$($TMUX display -p -t "$COCKPIT_SESSION" '#{status}' 2>/dev/null)
+  case "$st" in on) st=1;; off|'') st=0;; [0-9]*) ;; *) st=1;; esac
+  echo "$t $(( ch - st ))"
+}
+solo_restore() { [[ "$($TMUX display -p -t "$1" '#{window-size}')" == manual ]] && $TMUX set -wu -t "$1" window-size; }
+solo_fit_window() {   # win
+  local win="$1" panes tw th cur
+  panes=$($TMUX display -p -t "$win" '#{window_panes}' 2>/dev/null) || return 0
+  read -r tw th < <(solo_target)
+  if (( panes != 1 || tw == 0 )) || [[ -n "$(wopt "$win" @solo_off)" ]]; then solo_restore "$win"; return 0; fi
+  cur=$($TMUX display -p -t "$win" '#{window_width}x#{window_height} #{window-size}')
+  [[ "$cur" == "${tw}x${th} manual" ]] && return 0
+  $TMUX resize-window -t "$win" -x "$tw" -y "$th" 2>/dev/null
+}
+solo_fit() {   # [win…]  (none → every workspace in the session)
+  local w
+  if (( $# )); then for w in "$@"; do [[ -n "$w" ]] && solo_fit_window "$w"; done; return 0; fi
+  for w in $($TMUX list-windows -t "$COCKPIT_SESSION" -F '#{window_id}' 2>/dev/null); do solo_fit_window "$w"; done
+}
 
 case "${1:-close}" in
   close)
@@ -67,5 +109,19 @@ case "${1:-close}" in
       $TMUX display-message "recovered '${name}'"
     fi
     ;;
-  *) echo "usage: cockpit-ws {close [window]|undo}" >&2; exit 2;;
+  fit) shift; solo_fit "$@";;
+  toggle)
+    win="${2:-}"; [[ -n "$win" ]] || win=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_id}')
+    panes=$($TMUX display -p -t "$win" '#{window_panes}')
+    if (( panes != 1 )); then
+      $TMUX display-message "cockpit: half width applies to a workspace with a single pane"; exit 0
+    fi
+    if [[ "$($TMUX display -p -t "$win" '#{window-size}')" == manual ]]; then
+      $TMUX set -w -t "$win" @solo_off 1;  solo_fit_window "$win"     # → full width, stays full
+    else
+      $TMUX set -w -t "$win" @solo_off ""; solo_fit_window "$win"     # → half width (if a client is attached)
+      [[ "$(solo_target)" == 0 ]] && $TMUX display-message "cockpit: terminal too narrow to halve (COCKPIT_SOLO_MIN=${COCKPIT_SOLO_MIN})"
+    fi
+    ;;
+  *) echo "usage: cockpit-ws {close [window]|undo|fit [win]|toggle [win]}" >&2; exit 2;;
 esac
