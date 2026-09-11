@@ -67,10 +67,17 @@ The server binds only `127.0.0.1:43129`. Its script loads the user's Node runtim
 uses `~/.local/bin/codex`, and keeps both configuration and databases in the
 Linux home. Enable user lingering if the service should survive logout.
 
-In Windows PowerShell, install the local launcher and Start-menu/sign-in shortcuts:
+From WSL, install the local Windows launcher and Start-menu/sign-in shortcuts.
+Resolve the deployment symlink before crossing the Windows filesystem boundary:
+
+```bash
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+  "$(wslpath -w "$(readlink -f ~/tools/cockpit/windows/Install-CodexLauncher.ps1)")"
+```
+
+Then launch it from Windows PowerShell:
 
 ```powershell
-& '\\wsl.localhost\Ubuntu\home\gareth\tools\cockpit\windows\Install-CodexLauncher.ps1'
 & "$env:LOCALAPPDATA\Cockpit\Launch-Codex.ps1" -Restart
 ```
 
