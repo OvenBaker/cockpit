@@ -20,9 +20,13 @@ COCKPIT_SOLO_MIN="${COCKPIT_SOLO_MIN:-120}"
 # Remote Control: launch claude panes with `--remote-control` so they can be
 # driven from the Claude app (claude.ai / mobile) — the whole point of steering
 # cockpit away from the desk. On by default; set COCKPIT_REMOTE_CONTROL=0 for
-# plain interactive panes. Codex has no remote-control equivalent, so this only
-# affects claude launches.
+# plain interactive Claude panes. Codex uses a shared app-server instead (below).
 COCKPIT_REMOTE_CONTROL="${COCKPIT_REMOTE_CONTROL:-1}"
+
+# The Windows app and terminal panes attach to the same WSL backend. An explicit
+# opt-out restores standalone Codex without affecting Claude remote control.
+COCKPIT_CODEX_REMOTE="${COCKPIT_CODEX_REMOTE:-1}"
+COCKPIT_CODEX_REMOTE_URL="${COCKPIT_CODEX_REMOTE_URL:-ws://127.0.0.1:43129}"
 
 # --- shared picker ----------------------------------------------------------
 # cockpit-select renders a filterable list and returns the chosen row; it makes no tmux calls, so
@@ -71,6 +75,19 @@ cockpit_codex_launch_argv() {
     --sandbox danger-full-access \
     --ask-for-approval on-request \
     -c approvals_reviewer=auto_review
+  if [[ "$COCKPIT_CODEX_REMOTE" == 1 ]]; then
+    printf '%s\n' --remote "$COCKPIT_CODEX_REMOTE_URL"
+  fi
+}
+
+# Check before replacing a live pane. Never silently fall back to an independent
+# backend: it would appear healthy locally while disappearing from mobile.
+cockpit_codex_backend_ready() {
+  [[ "$COCKPIT_CODEX_REMOTE" == 1 ]] || return 0
+  curl --fail --silent --connect-timeout 1 --max-time 3 \
+    "${COCKPIT_CODEX_REMOTE_URL/ws/http}/readyz" >/dev/null && return 0
+  echo "Codex backend unavailable at $COCKPIT_CODEX_REMOTE_URL; start cockpit-codex-server.service or set COCKPIT_CODEX_REMOTE=0 for standalone mode" >&2
+  return 1
 }
 
 # The same argv, %q-quoted for launchers that cross one bash -lc hop.
@@ -1093,6 +1110,10 @@ cockpit_respawn_resume() {
     *) echo "cockpit_respawn_resume: pane $pane has no resumable agent ('${agent:-<untracked>}')" >&2; return 1;;
   esac
   [[ -n "$sid" ]] || { echo "cockpit_respawn_resume: pane $pane has no session id to resume" >&2; return 1; }
+
+  if [[ "$agent" == codex ]]; then
+    cockpit_codex_backend_ready || return 1
+  fi
 
   if [[ "$agent" == claude && -n "$account" ]]; then
     if ! tok=$(cockpit_account_token "$account" 2>/dev/null); then

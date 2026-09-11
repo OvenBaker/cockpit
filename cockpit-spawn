@@ -23,7 +23,7 @@
 #
 # The PROVIDER is part of the reservation identity, so replaying a request id under a different provider is
 # material drift and conflicts (exit 5). A seeded Codex launch differs from a seeded Claude one only in what
-# the provider itself dictates: Codex has no app-side remote control and no hook, so its pane carries no
+# the provider itself dictates: Codex uses the shared app-server and has no seed-acceptance hook, so its pane carries no
 # --remote-control and its seed has NO acceptance signal — the record stays `pending` for the session's life,
 # which is the honest reading of "the prompt was delivered, its submission was never observed". Codex's
 # STARTUP trust gate is suppressed, per invocation only (see cockpit-seed-exec), because a pane sitting on a
@@ -54,8 +54,8 @@
 # avoids) and changes exactly three things: the appended system text says the brief is being AUTHORED and that
 # ambiguity is put through `orb_ask` and the turn ended; provider STARTUP trust gates are suppressed by
 # PER-INVOCATION configuration only; and the `orb` MCP server named by --orb-server-file is provisioned into
-# the session. It is the one profile that also applies to a plain `--agent codex` spawn, because Codex has no
-# seeded path and no app-side remote control, so its pane is the only way in. A brief-studio launch whose orb
+# the session. It also applies to a plain `--agent codex` spawn so an unattended
+# workshop does not block on terminal folder trust. A brief-studio launch whose orb
 # server is missing, or whose cwd cannot be asserted trusted, REFUSES by name rather than spawning a session
 # that would sit on a dialog or have nowhere to ask.
 #
@@ -171,7 +171,7 @@ if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
 fi
 # `human` and `agent` are part of the SEEDED launch contract only; on a plain spawn they have no meaning and
 # are refused rather than silently ignored. `brief-studio` is the one profile that also applies to a plain
-# Codex spawn, because Codex has no seeded path at all and the pane is the ONLY control surface it has.
+# Codex spawn, because its folder-trust prompt can otherwise block automated startup.
 if (( profile_given && ! seeded )); then
   if [[ "$profile" == brief-studio && "$agent" == codex ]]; then :
   else echo "cockpit-spawn: --interaction-profile $profile requires a seeded launch (--request-id …)" >&2; exit 2; fi
@@ -290,8 +290,7 @@ if (( seeded )); then
   launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "$seed_bin") $(printf %q "$profile") $(printf %q "$orb_file") $(printf %q "$agent")"
 else case "$agent" in
   # A brief-studio Codex pane carries its trust assertion and its orb server as per-invocation `-c` overrides.
-  # Codex has no seeded path and no app-side remote control, so this pane is the only way in — which is exactly
-  # why the launch refuses rather than starting a session that would stall on a trust dialog nobody can answer.
+  # Handle folder trust at launch so an unattended workshop does not stall on a terminal dialog.
   codex) if [[ "$profile" == brief-studio ]]; then
            extra=$(cockpit_codex_brief_studio_args "$cwd" "$orb_spec") \
              || { echo "cockpit-spawn: cannot assert Codex folder trust for --cwd '$cwd' (unquotable path); refusing rather than spawning into a stall" >&2; exit 2; }

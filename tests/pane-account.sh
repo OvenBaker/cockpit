@@ -38,7 +38,7 @@ chk() { if eval "$2"; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi; }
 ENVV=(env HOME="$T" TMPDIR="$T/tmp" PROJECTS_DIR="$T/projects" CODEX_SESSIONS="$T/codex"
       SANTA_DB="$T/santa.db" COCKPIT_LAYOUT_DB="$T/layout.db"
       COCKPIT_SESSION="$SESS" COCKPIT_TMUX="$TMUX" COCKPIT_ACCOUNTS_DIR="$T/accounts"
-      COCKPIT_REMOTE_CONTROL=0 COCKPIT_NO_SINGLETON=1)
+      COCKPIT_REMOTE_CONTROL=0 COCKPIT_CODEX_REMOTE=0 COCKPIT_NO_SINGLETON=1)
 
 # Stub provider: records that it ran, its exact argv, and the CLAUDE_CODE_OAUTH_TOKEN it was handed. The
 # token record is the ONLY place in $T the token is allowed to appear besides its own token file — it is the

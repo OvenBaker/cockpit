@@ -494,6 +494,7 @@ assert argv == [
     b'--sandbox', b'danger-full-access',
     b'--ask-for-approval', b'on-request',
     b'-c', b'approvals_reviewer=auto_review',
+    b'--remote', b'ws://127.0.0.1:43129',
     b'-c', trust,
     b'--', prompt,
 ], argv

@@ -8,6 +8,8 @@
 # way tmux didn't notice, without a workspace-level reboot. Supports BOTH claude and codex (cockpit-account
 # is claude-only, since accounts are a Claude subscription concept — codex has none). The in-flight turn
 # dies (same as any respawn) and the resumed session continues from the last completed turn.
+# In shared Codex mode this only replaces the terminal client. The backend and
+# its running turn survive; upgrading that backend is an explicit service restart.
 #
 # Shell panes refuse — there is nothing to resume; re-exec the pane directly instead. No no-op detection: a
 # restart is always meaningful, that's the whole point.

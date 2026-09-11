@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Shared backend only. Restarting this process affects all attached sessions;
+# cockpit-restart replaces a terminal client, not this server.
+set -eo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+export CODEX_HOME="$HOME/.codex"
+unset CODEX_SQLITE_HOME CODEX_THREAD_ID CODEX_SESSION_ID
+export CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop'
+# systemd's PATH lacks the user's Node installation.
+export NVM_DIR="$HOME/.nvm"
+if [[ -s "$NVM_DIR/nvm.sh" ]]; then source "$NVM_DIR/nvm.sh"; fi
+exec "${COCKPIT_CODEX_BIN:-$HOME/.local/bin/codex}" \
+  -c features.code_mode_host=true app-server --listen ws://127.0.0.1:43129
