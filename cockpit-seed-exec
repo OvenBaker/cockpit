@@ -106,10 +106,10 @@ rm -f "$staging" 2>/dev/null || true
 cd "$cwd" || fail "cwd-unavailable"
 # Codex: the prompt is its positional argument. A human launch receives only the startup-trust override. A
 # brief-studio launch receives provider-native per-invocation developer instructions and a REQUIRED orb MCP
-# server. No remote-control (Codex has none), no global configuration writes, and the token VALUE never enters
+# server. Remote mode attaches to the shared backend; there are no global configuration writes, and the token VALUE never enters
 # argv — only the mode-0600 token-file path carried by the validated server spec does.
 if [[ "$provider" == codex ]]; then
-  mapfile -t codex_args < <(cockpit_codex_launch_argv)
+  mapfile -t codex_args < <(cockpit_codex_launch_argv "$cwd" "$orb_file")
   if [[ "$profile" == brief-studio ]]; then
     orb_spec=$(cockpit_orb_read_spec "$orb_file") || fail "orb-server-unavailable"
     values=$(cockpit_codex_brief_studio_values "$cwd" "$orb_spec") || fail "codex-brief-studio-config-unavailable"

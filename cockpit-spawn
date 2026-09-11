@@ -294,8 +294,8 @@ else case "$agent" in
   codex) if [[ "$profile" == brief-studio ]]; then
            extra=$(cockpit_codex_brief_studio_args "$cwd" "$orb_spec") \
              || { echo "cockpit-spawn: cannot assert Codex folder trust for --cwd '$cwd' (unquotable path); refusing rather than spawning into a stall" >&2; exit 2; }
-           launch="exec codex$(cockpit_codex_launch_args)$extra"
-         else launch="exec codex$(cockpit_codex_launch_args)"; fi;;
+           launch="exec codex$(cockpit_codex_launch_args "$cwd" "$orb_file")$extra"
+         else launch="exec codex$(cockpit_codex_launch_args "$cwd")"; fi;;
   shell) launch="exec bash -l";;
   *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;
 esac; fi

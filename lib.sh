@@ -68,15 +68,23 @@ cockpit_rc_args() {
 
 # Cockpit's Codex permission posture. Cockpit sessions deliberately run without
 # the Linux/WSL bwrap sandbox, while keeping on-request approvals routed through
-# Codex's automatic reviewer. Keep this as one argv source so new, resumed,
-# seeded, and brief-studio launches cannot drift apart.
+# Codex's automatic reviewer. Remote TUI resumes reject permission flags, so
+# that mode gets these defaults from cockpit-codex-server instead.
 cockpit_codex_launch_argv() {
-  printf '%s\n' \
-    --sandbox danger-full-access \
-    --ask-for-approval on-request \
-    -c approvals_reviewer=auto_review
-  if [[ "$COCKPIT_CODEX_REMOTE" == 1 ]]; then
-    printf '%s\n' --remote "$COCKPIT_CODEX_REMOTE_URL"
+  local cwd="${1:-$PWD}" orb="${2:-}"
+  # The remote TUI does not forward arbitrary per-invocation config. Keep orb
+  # sessions local until that channel and its developer instructions can be
+  # provisioned through a supported remote API path.
+  if [[ "$COCKPIT_CODEX_REMOTE" == 1 && -z "$orb" ]]; then
+    printf '%s\n' --remote "$COCKPIT_CODEX_REMOTE_URL" --cd "$cwd"
+  else
+    if [[ "$COCKPIT_CODEX_REMOTE" == 1 && -n "$orb" ]]; then
+      echo 'cockpit: using standalone Codex to preserve per-session orb configuration' >&2
+    fi
+    printf '%s\n' \
+      --sandbox danger-full-access \
+      --ask-for-approval on-request \
+      -c approvals_reviewer=auto_review
   fi
 }
 
@@ -84,6 +92,7 @@ cockpit_codex_launch_argv() {
 # backend: it would appear healthy locally while disappearing from mobile.
 cockpit_codex_backend_ready() {
   [[ "$COCKPIT_CODEX_REMOTE" == 1 ]] || return 0
+  [[ -z "${1:-}" ]] || return 0  # orb-bound sessions use standalone mode
   curl --fail --silent --connect-timeout 1 --max-time 3 \
     "${COCKPIT_CODEX_REMOTE_URL/ws/http}/readyz" >/dev/null && return 0
   echo "Codex backend unavailable at $COCKPIT_CODEX_REMOTE_URL; start cockpit-codex-server.service or set COCKPIT_CODEX_REMOTE=0 for standalone mode" >&2
@@ -93,7 +102,7 @@ cockpit_codex_backend_ready() {
 # The same argv, %q-quoted for launchers that cross one bash -lc hop.
 cockpit_codex_launch_args() {
   local arg
-  while IFS= read -r arg; do printf ' %q' "$arg"; done < <(cockpit_codex_launch_argv)
+  while IFS= read -r arg; do printf ' %q' "$arg"; done < <(cockpit_codex_launch_argv "$@")
 }
 
 # ── per-pane Claude account (a SECOND Claude Max subscription) ──────────────────────────────────────────────
@@ -1080,7 +1089,7 @@ cockpit_orb_resume_args() {   # agent  cwd  orb-server-file → argv fragment, %
 agent_resume_inner() {
   local agent="$1" id="$2" cwd="$3" name="${4:-}" orb="${5:-}"
   case "$agent" in
-    codex) printf 'cd %q && exec codex%s%s resume %s' "$cwd" "$(cockpit_codex_launch_args)" "$(cockpit_orb_resume_args "$agent" "$cwd" "$orb")" "$id";;
+    codex) printf 'cd %q && exec codex%s%s resume %s' "$cwd" "$(cockpit_codex_launch_args "$cwd" "$orb")" "$(cockpit_orb_resume_args "$agent" "$cwd" "$orb")" "$id";;
     *)     cwd=$(claude_launch_cwd "$id" "$cwd")
            printf 'cd %q && exec claude --resume %s%s%s' "$cwd" "$id" "$(cockpit_rc_args "$name" "$cwd")" "$(cockpit_orb_resume_args "$agent" "$cwd" "$orb")";;
   esac
@@ -1112,7 +1121,7 @@ cockpit_respawn_resume() {
   [[ -n "$sid" ]] || { echo "cockpit_respawn_resume: pane $pane has no session id to resume" >&2; return 1; }
 
   if [[ "$agent" == codex ]]; then
-    cockpit_codex_backend_ready || return 1
+    cockpit_codex_backend_ready "$orb" || return 1
   fi
 
   if [[ "$agent" == claude && -n "$account" ]]; then

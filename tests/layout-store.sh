@@ -40,9 +40,9 @@ ok "resume command cds to the owning dir" \
 ok "codex resume cwd is untouched" \
    'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q "cd $T/work/sub"'
 ok "codex resume disables the OS sandbox" \
-   'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q -- "--sandbox danger-full-access"'
+   'COCKPIT_CODEX_REMOTE=0 agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q -- "--sandbox danger-full-access"'
 ok "codex resume keeps automatic approval review" \
-   'agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q -- "--ask-for-approval on-request -c approvals_reviewer=auto_review"'
+   'COCKPIT_CODEX_REMOTE=0 agent_resume_inner codex 019f-abc "$T/work/sub" x | grep -q -- "--ask-for-approval on-request -c approvals_reviewer=auto_review"'
 
 # The orb channel is attached per invocation, in argv. A resume that rebuilds argv without it silently strips
 # an execution's ask and declare tools — which is how a session came back from a reboot unable to declare while

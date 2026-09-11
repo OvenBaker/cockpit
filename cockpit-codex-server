@@ -10,4 +10,7 @@ export CODEX_INTERNAL_ORIGINATOR_OVERRIDE='Codex Desktop'
 export NVM_DIR="$HOME/.nvm"
 if [[ -s "$NVM_DIR/nvm.sh" ]]; then source "$NVM_DIR/nvm.sh"; fi
 exec "${COCKPIT_CODEX_BIN:-$HOME/.local/bin/codex}" \
+  -c sandbox_mode=\"danger-full-access\" \
+  -c approval_policy=\"on-request\" \
+  -c approvals_reviewer=\"auto_review\" \
   -c features.code_mode_host=true app-server --listen ws://127.0.0.1:43129

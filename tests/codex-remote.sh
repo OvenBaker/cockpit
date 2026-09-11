@@ -21,6 +21,13 @@ fi
 kill -0 "$before"
 echo 'PASS: backend failure preserves the existing pane and explains recovery'
 [[ "$(cockpit_codex_launch_args)" == *'--remote ws://127.0.0.1:43129'* ]]
+[[ "$(cockpit_codex_launch_args)" != *'--sandbox'* ]]
+[[ "$(cockpit_codex_launch_args)" != *'--ask-for-approval'* ]]
+mapfile -t argv < <(cockpit_codex_launch_argv '/tmp/project with spaces')
+[[ "${argv[2]}" == --cd && "${argv[3]}" == '/tmp/project with spaces' ]]
+[[ "$(cockpit_codex_launch_args /tmp /tmp/orb.json 2>/dev/null)" != *'--remote'* ]]
+cockpit_codex_backend_ready /tmp/orb.json
+echo 'PASS: remote cwd is explicit; orb sessions retain standalone configuration'
 COCKPIT_CODEX_REMOTE=0
 cockpit_codex_backend_ready
 [[ "$(cockpit_codex_launch_args)" != *'--remote'* ]]

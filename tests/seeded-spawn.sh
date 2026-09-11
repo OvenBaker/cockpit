@@ -451,12 +451,13 @@ cmdline=$(tmux -L "$socket" display -p -t "$codexpane" '#{pane_start_command}')
 [[ "$cmdline" == *"mcp_servers.orb.required=true"* ]]
 [[ "$cmdline" == *"developer_instructions="*"orb_ask"* ]]
 [[ "$(md5sum "$HOME/.codex/config.toml" 2>/dev/null | cut -d' ' -f1 || echo none)" == "$codex_before" ]]
-# A plain Codex spawn gets Cockpit's full-access/auto-review posture, but none of
-# the brief-studio trust or MCP configuration leaks into it.
+# A plain Codex spawn gets its policy from the backend and passes its cwd; none
+# of the brief-studio trust or MCP configuration leaks into it.
 plainpane=$("$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace codexws --agent codex)
 plaincmd=$(tmux -L "$socket" display -p -t "$plainpane" '#{pane_start_command}')
 [[ "$plaincmd" != *trust_level* && "$plaincmd" != *mcp_servers* ]]
-[[ "$plaincmd" == *codex* && "$plaincmd" == *danger-full-access* && "$plaincmd" == *approvals_reviewer=auto_review* ]]
+[[ "$plaincmd" == *codex* && "$plaincmd" == *--remote* && "$plaincmd" == *--cd* && "$plaincmd" == *"$root/cwd"* ]]
+[[ "$plaincmd" != *--sandbox* && "$plaincmd" != *--ask-for-approval* ]]
 # an --orb-server-file with no brief-studio profile is refused rather than silently ignored
 refused --cwd "$root/cwd" --workspace codexws --agent codex --orb-server-file "$ORB_SPEC"
 echo "ok 15b brief-studio-codex-launch"
@@ -491,10 +492,8 @@ argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
 prompt = open(sys.argv[2],'rb').read()
 trust = ('projects."%s".trust_level="trusted"' % os.environ['CWD_REAL']).encode()
 assert argv == [
-    b'--sandbox', b'danger-full-access',
-    b'--ask-for-approval', b'on-request',
-    b'-c', b'approvals_reviewer=auto_review',
     b'--remote', b'ws://127.0.0.1:43129',
+    b'--cd', os.environ['CWD_REAL'].encode(),
     b'-c', trust,
     b'--', prompt,
 ], argv

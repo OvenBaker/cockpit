@@ -38,7 +38,7 @@ discovery dispatch per provider:
 |---|---|---|
 | transcripts | `~/.claude/projects/**/<id>.jsonl` | `~/.codex/sessions/**/rollout-*-<id>.jsonl` |
 | done signal | `end_turn` | `event_msg/task_complete` |
-| resume | `claude --resume <id>` | `codex --remote ws://127.0.0.1:43129 --sandbox danger-full-access --ask-for-approval on-request -c approvals_reviewer=auto_review resume <id>` |
+| resume | `claude --resume <id>` | `codex --remote ws://127.0.0.1:43129 resume <id>` |
 
 The picker, candidates, and restore merge both by recency (tagged `cl`/`cx`);
 `Alt-N` asks which agent to start. Cross-agent search/`related` in santa is a
@@ -66,6 +66,10 @@ systemctl --user enable --now cockpit-codex-server.service
 The server binds only `127.0.0.1:43129`. Its script loads the user's Node runtime,
 uses `~/.local/bin/codex`, and keeps both configuration and databases in the
 Linux home. Enable user lingering if the service should survive logout.
+The service supplies cockpit's `danger-full-access`, `on-request` and
+`auto_review` defaults. Remote TUI resumes reject permission flags on the client;
+standalone launches still pass those flags directly. Saved thread settings and
+explicit desktop choices can affect a resumed thread's effective permissions.
 
 From WSL, install the local Windows launcher and Start-menu/sign-in shortcuts.
 Resolve the deployment symlink before crossing the Windows filesystem boundary:
@@ -97,7 +101,11 @@ runCodexInWindowsSubsystemForLinux = true
 integratedTerminalShell = "wsl"
 ```
 
-New, seeded and resumed Codex panes use the shared endpoint. Existing standalone
+Ordinary new, seeded and resumed Codex panes use the shared endpoint and pass
+their cwd explicitly. Orbital sessions bound to an `orb` server (including
+brief-studio and execution profiles) stay standalone with a diagnostic: the
+remote TUI does not preserve their per-invocation MCP/developer configuration.
+They are not mobile-enabled by this integration. Existing standalone
 panes are migrated individually with `cockpit-restart <pane>` when idle. A backend
 readiness failure refuses a pane restart before killing its current process.
 Restarting a pane only replaces its client; `systemctl --user restart
