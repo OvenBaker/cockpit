@@ -20,7 +20,11 @@ func (m *model) draw(t *term) {
 	if m.mode == modeFilter || m.filter != "" {
 		filterLines = 1
 	}
-	listH := t.h - 5 - filterLines
+	optionLines := 0
+	if m.toggleLabel != "" {
+		optionLines = 1
+	}
+	listH := t.h - 5 - filterLines - optionLines
 	if listH < 1 {
 		listH = 1
 	}
@@ -53,6 +57,15 @@ func (m *model) draw(t *term) {
 			bodyPlain++
 		}
 		m.line(&b, frame, body, bodyPlain, inner)
+	}
+
+	if m.toggleLabel != "" {
+		mark := "[ ]"
+		if m.toggled {
+			mark = "[x]"
+		}
+		label := truncate("Ctrl-B "+mark+" "+m.toggleLabel, inner)
+		m.line(&b, frame, fg(th.Highlight)+label+sgrReset, runeLen(label), inner)
 	}
 
 	m.line(&b, frame, "", 0, inner) // spacer
@@ -283,6 +296,9 @@ func (m *model) legend(inner int) (string, int) {
 		hints = []hint{{"type", "filter"}, {"⏎", "accept"}, {"esc", "clear"}}
 	} else {
 		hints = []hint{{"↑↓", "move"}, {"/", "filter"}, {"⏎", "select"}, {"esc", "cancel"}}
+	}
+	if m.newRow != "" {
+		hints = append([]hint{{"Ctrl-N", m.newLabel}}, hints...)
 	}
 	if m.footer != "" {
 		hints = append(hints, hint{"", m.footer})

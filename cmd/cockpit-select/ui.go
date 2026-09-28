@@ -12,11 +12,15 @@ const (
 )
 
 type model struct {
-	rows   []row
-	th     theme
-	title  string
-	empty  string
-	footer string
+	rows        []row
+	th          theme
+	title       string
+	empty       string
+	footer      string
+	toggleLabel string
+	toggled     bool
+	newRow      string
+	newLabel    string
 
 	view   []int // indices into rows that survive the current filter
 	cur    int   // cursor position within view
@@ -62,6 +66,20 @@ func (m *model) handle(k keyEvent) (bool, *row) {
 	}
 
 	switch k.kind {
+	case keyCtrlB:
+		if m.toggleLabel != "" {
+			m.toggled = !m.toggled
+		}
+		return false, nil
+	case keyCtrlN:
+		if m.newRow != "" {
+			for _, r := range m.rows {
+				if strings.SplitN(r.raw, "\t", 2)[0] == m.newRow {
+					return true, &r
+				}
+			}
+		}
+		return false, nil
 	case keyCtrlC:
 		return true, nil
 

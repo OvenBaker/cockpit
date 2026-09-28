@@ -15,6 +15,7 @@
 # dependency, no press-and-hold mouse menu.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
+source "$HERE/picker/new-session.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 POOL="${COCKPIT_POOL:-40}"             # how many candidates to list
 DEF_N="${COCKPIT_DEFAULT_N:-6}"        # default selection count (startup, empty input)
@@ -71,7 +72,7 @@ retarget_pane() {
 # shell if the active pane is one, else splitting. No @session_id — the poller
 # adopts the transcript once the agent writes it (cockpit_adopt_agent), via @born.
 spawn_new() {
-  local W="$1" cwd="$2" agent="${3:-claude}" name="${4:-}" acct="${5:-}" cmd act actsid pane launch tok
+  local W="$1" cwd="$2" agent="${3:-claude}" name="${4:-}" acct="${5:-}" permissions="${6:-auto}" cmd act actsid pane launch tok
   local -a eargs=()
   # An account is resolved BEFORE the pane exists: the token reaches the child through tmux's `-e` at exec,
   # so there is no stamping it on afterwards. A binding that does not resolve refuses the spawn outright
@@ -83,11 +84,7 @@ spawn_new() {
       || { say "  account '$acct': $(cockpit_account_token "$acct" 2>&1 >/dev/null)"; return 1; }
     eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
   fi
-  case "$agent" in
-    codex) launch="exec codex$(cockpit_codex_launch_args "$cwd")";;
-    shell) launch="exec bash -l";;
-    *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;   # RC on: steerable from the app
-  esac
+  launch=$(cockpit_new_launch "$agent" "$cwd" "$name" "$permissions") || return 1
   cmd="cd $(printf %q "$cwd") && $launch"
   act=$($TMUX display -p -t "$W" '#{pane_id}' 2>/dev/null)
   actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
@@ -129,7 +126,15 @@ spawn_new() {
 
 # new-session mode runs before the dormant-session gather (it needs cwds, not sessions)
 if [[ "$MODE" == new ]]; then
-  W=$(cockpit_cur_window)
+  origin="${2:-}"
+  if [[ -n "$origin" ]]; then
+    W=$($TMUX display -p -t "$origin" '#{window_id}' 2>/dev/null)
+  else
+    W=$(cockpit_cur_window)
+    origin="$W"
+  fi
+  current_dir=$($TMUX display -p -t "$origin" '#{pane_current_path}' 2>/dev/null)
+  [[ -d "$current_dir" ]] || current_dir="$HOME"
   # Three picker steps that only COLLECT. Nothing below touches tmux until the commit block at
   # the end, so cancelling — or an interrupted popup — leaves no half-made workspace or pane.
   wname=$($TMUX display -p -t "$W" '#{window_name}' 2>/dev/null)
@@ -150,34 +155,25 @@ if [[ "$MODE" == new ]]; then
 
   fargs=(); [[ -n "$broken" ]] && fargs=(--footer "$broken")
   sel=$(printf '%s\n' "$agentrows" | ck_select "New session · what?" \
-          --hide 1,2 --match 3,4 "${fargs[@]}") || exit 0
+          --hide 1,2 --match 3,4 --toggle "Bypass permissions — this start only (Codex: standalone)" "${fargs[@]}") || exit 0
+  permissions=auto
+  [[ "${sel%%$'\t'*}" == on ]] && permissions=bypass
+  sel="${sel#*$'\t'}"
   agent="${sel%%$'\t'*}"; rest="${sel#*$'\t'}"; acct="${rest%%$'\t'*}"
   what=$([[ "$agent" == shell ]] && echo "bash shell" || echo "$agent session")
   [[ -n "$acct" ]] && what="$what on account '$acct'"
+  [[ "$agent" == shell ]] && permissions=auto
+  [[ "$permissions" == bypass ]] && what="$what · BYPASS this start"
 
   # --- step 2: directory -----------------------------------------------------
   # 200, not 15. Filtering makes a long list navigable, and the old 15-row window covered ~9% of
   # the directories santa has indexed — so the ordinary case was typing a full path blind, where
   # one typo closed the popup and discarded the agent choice.
-  dirrows=""
-  while IFS= read -r d; do dirrows+="$d"$'\t'"${d/#$HOME/\~}"$'\n'; done \
-    < <(cockpit_recent_cwds 200)
-  dirrows+="+type"$'\t'"type a path…"
-  sel=$(printf '%s\n' "$dirrows" | ck_select "New $what · directory" --hide 1 --match 2) || exit 0
+  sel=$(cockpit_new_directories "$current_dir" | ck_select "New $what · directory" \
+    --hide 1 --match 2 --new-row +type --new-label "new path") || exit 0
   target="${sel%%$'\t'*}"
   if [[ "$target" == "+type" ]]; then
-    target=""
-    # Re-prompt rather than exit: throwing away the agent choice over a mistyped path was the
-    # sharpest edge in the old flow.
-    for _ in 1 2 3; do
-      printf '  path (~ ok · empty cancels): ' >/dev/tty
-      read -r line </dev/tty || line=""
-      [[ -n "${line// }" ]] || exit 0
-      cand="${line/#\~/$HOME}"
-      [[ -d "$cand" ]] && { target="$cand"; break; }
-      say "  not a directory: $cand"
-    done
-    [[ -n "$target" ]] || { say "  no directory chosen."; sleep 0.6; exit 0; }
+    target=$(cockpit_read_directory "$current_dir") || exit 0
   fi
 
   # --- step 3: placement -----------------------------------------------------
@@ -190,8 +186,13 @@ if [[ "$MODE" == new ]]; then
     wsrows+="$wid"$'\t'"$wn"$'\t'"$wp pane$( ((wp==1)) || echo s)"$'\n'
   done < <($TMUX list-windows -t "$COCKPIT_SESSION" -F '#{window_id}	#{window_name}	#{window_panes}')
   wsrows+="+new"$'\t'"+ new workspace…"$'\t'
-  sel=$(printf '%s\n' "$wsrows" | ck_select "New $what · where?" --hide 1 --match 2) || exit 0
+  sel=$(printf '%s\n' "$wsrows" | ck_select "New $what · where?" --hide 1 --match 2 --new-row +new --new-label "new workspace") || exit 0
   dstw="${sel%%$'\t'*}"
+
+  # The shared backend check happens before creating a workspace or replacing a pane.
+  if [[ "$agent" == codex && "$permissions" == auto ]]; then
+    cockpit_codex_backend_ready || { pause "(any key to close) "; exit 1; }
+  fi
 
   # --- commit ----------------------------------------------------------------
   placement="this workspace"
@@ -211,7 +212,7 @@ if [[ "$MODE" == new ]]; then
       placement=$($TMUX display -p -t "$W" '#{window_name}' 2>/dev/null)
       ;;
   esac
-  spawn_new "$W" "$target" "$agent" "" "$acct" \
+  spawn_new "$W" "$target" "$agent" "" "$acct" "$permissions" \
     && $TMUX display-message "new $what in ${target/#$HOME/\~} · $placement"
   exit 0
 fi

@@ -110,6 +110,8 @@ const (
 	keyEsc
 	keyBackspace
 	keyCtrlC
+	keyCtrlB
+	keyCtrlN
 	keyIgnore
 )
 
@@ -152,6 +154,10 @@ func readKeys(t *term) <-chan keyEvent {
 
 func decode(b byte, raw <-chan byte) keyEvent {
 	switch b {
+	case 0x02:
+		return keyEvent{kind: keyCtrlB}
+	case 0x0e:
+		return keyEvent{kind: keyCtrlN}
 	case 0x03:
 		return keyEvent{kind: keyCtrlC}
 	case '\r', '\n':

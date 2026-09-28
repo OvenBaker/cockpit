@@ -45,6 +45,9 @@ func main() {
 		matchSpec = flag.String("match", "", "comma-separated 1-based TSV fields the filter searches (default: every displayed field)")
 		themeArg  = flag.String("theme", "slate-amber", "slate-amber | tokyo | mono-teal")
 		empty     = flag.String("empty", "nothing to choose from", "message shown when there are no rows")
+		toggle    = flag.String("toggle", "", "optional Ctrl-B checkbox; prefixes output with on/off and a tab; off on every invocation")
+		newRow    = flag.String("new-row", "", "Ctrl-N selects the row with this first TSV field, even when filtered out")
+		newLabel  = flag.String("new-label", "new", "Ctrl-N key legend when --new-row is supplied")
 		footer    = flag.String("footer", "", "extra hint appended to the key legend")
 	)
 	flag.Parse()
@@ -77,12 +80,19 @@ func main() {
 	}
 	defer t.restore()
 
-	m := &model{rows: rows, th: th, title: *title, empty: *empty, footer: *footer}
+	m := &model{rows: rows, th: th, title: *title, empty: *empty, footer: *footer, toggleLabel: *toggle, newRow: *newRow, newLabel: *newLabel}
 	chosen := m.run(t)
 	t.restore()
 
 	if chosen == nil {
 		os.Exit(exitCancelled)
+	}
+	if *toggle != "" {
+		state := "off"
+		if m.toggled {
+			state = "on"
+		}
+		fmt.Printf("%s\t", state)
 	}
 	fmt.Println(chosen.raw)
 }

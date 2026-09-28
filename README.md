@@ -41,7 +41,18 @@ discovery dispatch per provider:
 | resume | `claude --resume <id>` | `codex --remote ws://127.0.0.1:43129 resume <id>` |
 
 The picker, candidates, and restore merge both by recency (tagged `cl`/`cx`);
-`Alt-N` asks which agent to start. Cross-agent search/`related` in santa is a
+`Alt-N` (the new-agent picker, mapped to Ctrl-Shift-N in the Windows Terminal setup) asks which agent to start.
+On its agent step, **Ctrl-B** toggles **Bypass permissions for this start only**; the checkbox starts off
+every time. Claude normal starts explicitly use auto permissions. Codex bypass starts are standalone
+because the shared remote TUI cannot accept per-start permission overrides; ordinary Codex starts
+continue to use the shared backend. This choice is not saved as a pane or workspace default.
+
+The directory list starts with the originating pane's current Git repository (or its current directory
+outside Git), then its current subdirectory and recent paths without duplicates. **Ctrl-N** opens the
+new-path prompt; **Tab** completes filesystem paths, including spaces, and **Ctrl-U** clears the line.
+Invalid directories can be corrected without losing the agent choice. `/` still filters recent paths.
+On the workspace step, **Ctrl-N** jumps straight to naming a new workspace. Both shortcuts work while
+filtering, even when the action row is hidden. Cancelling leaves panes and workspaces untouched. Cross-agent search/`related` in santa is a
 follow-on (it indexes Claude transcripts today).
 
 Bulk starts queue Codex panes three seconds apart so they do not all initialize
