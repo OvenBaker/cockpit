@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Account-scoped Claude state. Registry: Cockpit accounts/<name>.configdir.
+The env action is a private launcher interface; capture it, never log its output.
+"""
+import argparse, json, os, pathlib, re, subprocess, sys
+
+HOME = pathlib.Path.home()
+ACCOUNTS = pathlib.Path(os.environ.get('COCKPIT_ACCOUNTS_DIR', HOME / '.config/cockpit/accounts'))
+PRIMARY = HOME / '.claude'
+
+def profiles():
+    result = {'default': PRIMARY}
+    for p in sorted(ACCOUNTS.glob('*.configdir')):
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}', p.stem):
+            continue
+        root = pathlib.Path(p.read_text().strip()).expanduser()
+        if not root.is_absolute() or root == PRIMARY:
+            raise ValueError(f'Invalid isolated config directory in {p}')
+        result[p.stem] = root
+    return result
+
+def environment(account, session=''):
+    roots = profiles()
+    root = roots.get(account, PRIMARY)
+    # Historical sessions stay in the mixed directory and retain legacy auth.
+    matches = [(name, r) for name, r in roots.items()
+               if session and any((r / 'projects').glob(f'*/{session}.jsonl'))]
+    if len(matches) > 1:
+        raise ValueError('Session exists in multiple account roots; resolve duplicate before resuming')
+    if matches:
+        source_name, source_root = matches[0]
+        if source_name != 'default' and account != source_name:
+            raise ValueError(f'Session belongs to {source_name}; choose that account to resume')
+        root = source_root
+    env = {'CLAUDE_CONFIG_DIR': str(root) if root != PRIMARY else None, 'CLAUDE_CODE_OAUTH_TOKEN': None,
+           'ANTHROPIC_API_KEY': None, 'ANTHROPIC_AUTH_TOKEN': None}
+    if account != 'default' and root == PRIMARY:
+        token_path = ACCOUNTS / f'{account}.token'
+        if token_path.is_symlink() or not token_path.is_file() or token_path.stat().st_mode & 0o077:
+            raise ValueError(f'Legacy account token must be a private regular file: {token_path}')
+        token = token_path.read_text().strip()
+        if not token or any(c.isspace() for c in token):
+            raise ValueError('Legacy account token is empty or malformed')
+        env['CLAUDE_CODE_OAUTH_TOKEN'] = token
+    elif account != 'default':
+        credentials = root / '.credentials.json'
+        if not credentials.is_file():
+            raise ValueError(f'{account} needs login: CLAUDE_CONFIG_DIR={root} claude auth login')
+        oauth = json.loads(credentials.read_text()).get('claudeAiOauth', {})
+        if not oauth.get('accessToken'):
+            raise ValueError(f'{account} has no stored Claude login')
+    return env
+
+def sync(root):
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for name in ['skills', 'agents', 'commands', 'hooks', 'rules']:
+        source, dest = PRIMARY/name, root/name
+        if source.exists() and not dest.exists(): dest.symlink_to(source, target_is_directory=True)
+    settings = json.loads((PRIMARY/'settings.json').read_text())
+    # Credentials and provider routing are account-specific, never copied from common settings.
+    for key in ['CLAUDE_CODE_OAUTH_TOKEN','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','CLAUDE_CONFIG_DIR']:
+        settings.get('env', {}).pop(key, None)
+    (root/'settings.json').write_text(json.dumps(settings, indent=2)+'\n')
+    # Each account owns mutable plugin records; installed contents are synced on demand.
+    if (PRIMARY/'plugins').exists():
+        subprocess.run(['rsync', '-a', str(PRIMARY/'plugins')+'/', str(root/'plugins')+'/'], check=True)
+        def relocate(value):
+            if isinstance(value, str) and value.startswith(str(PRIMARY/'plugins')+'/'):
+                return str(root/'plugins') + value[len(str(PRIMARY/'plugins')):]
+            if isinstance(value, dict): return {k: relocate(v) for k,v in value.items()}
+            if isinstance(value, list): return [relocate(v) for v in value]
+            return value
+        for name in ['installed_plugins.json', 'known_marketplaces.json']:
+            record = root/'plugins'/name
+            if record.is_file(): record.write_text(json.dumps(relocate(json.loads(record.read_text())), indent=2)+'\n')
+    for name in ['CLAUDE.md']:
+        if (PRIMARY/name).exists() and not (root/name).exists(): (root/name).symlink_to(PRIMARY/name)
+    # Share learned project memory only; transcript directories remain distinct.
+    for source in (PRIMARY/'projects').glob('*/memory'):
+        dest = root/'projects'/source.parent.name/'memory'
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not dest.exists(): dest.symlink_to(source, target_is_directory=True)
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('action', choices=['roots','check','env','sync','activate','exec'])
+    p.add_argument('--account', default='default')
+    p.add_argument('--session', default='')
+    p.add_argument('args', nargs=argparse.REMAINDER)
+    a=p.parse_args()
+    # REMAINDER is for exec; options must precede action.
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,31}', a.account): raise ValueError('Invalid account name')
+    if a.session and not re.fullmatch(r'[A-Za-z0-9_-]+',a.session): raise ValueError('Invalid session ID')
+    if a.action=='roots':
+        for name,root in profiles().items(): print(f'{name}\t{root}')
+    elif a.action in ('sync', 'activate'):
+        pending=ACCOUNTS / f'{a.account}.configdir.pending'
+        root=profiles().get(a.account)
+        if root is None and pending.is_file(): root=pathlib.Path(pending.read_text().strip())
+        if root is None or not root.is_absolute() or root==PRIMARY:
+            raise ValueError('Register a separate account configdir (or configdir.pending) first')
+        if a.action=='sync':
+            sync(root)
+        else:
+            child=os.environ.copy()
+            for key in ['CLAUDE_CODE_OAUTH_TOKEN','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN']:
+                child.pop(key,None)
+            child['CLAUDE_CONFIG_DIR']=str(root)
+            result=subprocess.run(['claude','auth','status','--json'],env=child,capture_output=True,text=True,timeout=20)
+            status=json.loads(result.stdout)
+            if result.returncode or not status.get('loggedIn') or status.get('authMethod')!='claude.ai':
+                raise ValueError('Complete the isolated claude.ai login before activating')
+            account=json.loads((root/'.claude.json').read_text()).get('oauthAccount',{}).get('accountUuid')
+            primary=json.loads((HOME/'.claude.json').read_text()).get('oauthAccount',{}).get('accountUuid')
+            if not account or account==primary:
+                raise ValueError('Isolated login must identify a different account from the primary login')
+            oauth=json.loads((root/'.credentials.json').read_text()).get('claudeAiOauth',{})
+            if 'user:sessions:claude_code' not in oauth.get('scopes',[]):
+                raise ValueError('Remote Control needs a full-scope login; run claude auth login in this directory')
+            if pending.is_file(): pending.replace(ACCOUNTS / f'{a.account}.configdir')
+            print(f'{a.account} activated for new sessions; existing sessions keep their original roots')
+    else:
+        session=a.session
+        if a.action=='exec':
+            for i,arg in enumerate(a.args[:-1]):
+                if arg in ('--resume','-r'): session=a.args[i+1]
+        if session and not re.fullmatch(r'[A-Za-z0-9_-]+',session): raise ValueError('Resume requires an exact session ID')
+        env=environment(a.account,session)
+        if a.action=='env':
+            for key,value in env.items(): print(key if value is None else key+'='+value)
+        elif a.action=='exec':
+            args=a.args[1:] if a.args[:1]==['--'] else a.args
+            # Infer explicit resume only. --continue cannot safely select mixed legacy history.
+            child=os.environ.copy();child.update(env)
+            for key in ['CLAUDE_CONFIG_DIR','CLAUDE_CODE_OAUTH_TOKEN','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN']:
+                if not child.get(key):child.pop(key,None)
+            child.pop('CLAUDE_CODE_CHILD_SESSION',None)
+            os.execvpe('claude',['claude',*args],child)
+if __name__=='__main__':
+    try:main()
+    except (ValueError,OSError,subprocess.SubprocessError,json.JSONDecodeError) as e:print(f'claude-profile: {e}',file=sys.stderr);sys.exit(2)

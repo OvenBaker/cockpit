@@ -263,3 +263,41 @@ Claude + Codex history) and **[agent-fusion](https://github.com/OvenBaker/agent-
 ## License
 
 [The Unlicense](LICENSE) — released into the public domain. Do whatever you want.
+
+
+### Isolated Claude accounts
+
+`claude-profile` resolves account state for Cockpit and `bclaude`. Register an absolute
+config directory in `~/.config/cockpit/accounts/<name>.configdir`. Keep the existing
+`<name>.mark` for display. The default Claude directory remains mixed legacy history;
+it does not prove the historical billing account.
+
+For Beta (`work2`), prepare `~/.claude-beta`, then run:
+
+```sh
+claude-profile --account work2 sync
+env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN CLAUDE_CONFIG_DIR="$HOME/.claude-beta" claude auth login
+```
+
+`sync` uses rsync to copy plugin contents safely, including read-only Git objects. It copies common settings and plugin contents/installation records, links shared
+skills, agents, commands, hooks and rules, and links existing project memory directories.
+It never copies credentials, app state or transcripts. Run it deliberately after common
+settings/plugin changes; Beta-local settings edits are replaced. New project memory
+links are added on the next sync. Avoid running sync during plugin install/update.
+
+Stage the registry as `<name>.configdir.pending` until login is complete; rename to
+`.configdir` to switch new launches. Prefer `claude-profile --account work2 activate`: it verifies a full-scope login on a different account before promoting the pending registry. Until activated, legacy token launching continues.
+A registered directory without a login refuses new launches.
+
+Existing sessions in `~/.claude/projects` resume there using the legacy account token.
+Do not move live transcripts. Resume an isolated session on its owning account; crossing
+accounts is refused until a deliberate migration transfers its associated state. Cockpit
+and Santa discover both roots, while Stele labels only the isolated root by its account.
+`bclaude --resume <session>` follows this same rule; new native children inherit the root.
+
+Remote Control requires a full login; inference-only legacy tokens disable Remote Control.
+The legacy token files remain needed for old sessions and any quota reader using them.
+No running agent needs restarting just to deploy the readers.
+
+Checks: `python3 tests/claude-profiles.py`, `bash tests/profile-launch.sh`, and the existing
+account, seeded-spawn, new-session and restore-cwd tests (all use isolated fixtures).

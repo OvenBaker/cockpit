@@ -115,12 +115,17 @@ case "$agent" in claude|codex|shell) ;; *) echo "cockpit-spawn: --agent must be 
 if [[ -n "$account" ]]; then
   [[ "$agent" == claude ]] \
     || { echo "cockpit-spawn: --account is Claude-only (--agent $agent has no CLAUDE_CODE_OAUTH_TOKEN equivalent)" >&2; exit 2; }
-  if ! account_token=$(cockpit_account_token "$account" 2>/dev/null); then
+  if ! cockpit_profile_env "$account"; then
     echo "cockpit-spawn: --account '$account': $(cockpit_account_reason "$account")" >&2
     echo "cockpit-spawn: refusing to spawn — an unset CLAUDE_CODE_OAUTH_TOKEN is read as 'use the primary account'" >&2
     exit 2
   fi
-  account_env=(-e "CLAUDE_CODE_OAUTH_TOKEN=$account_token")
+  account_env=("${PROFILE_ENV[@]}")
+fi
+
+if [[ "$agent" == claude && -z "$account" ]]; then
+  cockpit_profile_env "" || exit 2
+  account_env=("${PROFILE_ENV[@]}")
 fi
 
 # ── seeded-mode validation: ALL before any reservation or tmux side effect ──────────────────────────────────
@@ -309,9 +314,9 @@ actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
 # of the `bash -lc` string, out of the pane's start command, out of #{pane_start_command}, out of the layout
 # DB and out of cockpit-state — everything that persists or is readable back carries only the account NAME.
 if [[ -z "$actsid" && -n "$act" ]]; then
-  pane="$act"; $TMUX respawn-pane -k -t "$pane" "${account_env[@]}" "bash -lc $(printf %q "$cmd")"
+  pane="$act"; $TMUX respawn-pane -k -t "$pane" "${account_env[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")"
 else
-  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${account_env[@]}" "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${account_env[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")" 2>/dev/null) \
     || { echo "cockpit-spawn: no room for another pane in this workspace" >&2; exit 1; }
 fi
 

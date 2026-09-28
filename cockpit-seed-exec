@@ -129,7 +129,7 @@ fi
 args=()
 # Seeded spawns are always remote-controlled (cockpit-spawn forces RC on); same 48-char app-title bound as
 # cockpit_rc_args, but built as a real argv array — no shell hop exists between here and the provider.
-[[ "${COCKPIT_REMOTE_CONTROL:-1}" == 1 ]] && args+=(--remote-control "${name:0:48}")
+[[ "${COCKPIT_REMOTE_CONTROL:-1}" == 1 && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && args+=(--remote-control "${name:0:48}")
 # Agent profile ONLY: per-invocation argv/env delta (see header). `human` adds nothing — byte-identical to
 # the pre-profile launch.
 if [[ "$profile" == agent ]]; then

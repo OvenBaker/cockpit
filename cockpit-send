@@ -164,7 +164,7 @@ if [[ -n "$account" ]]; then
       echo "cockpit-send: --account is Claude-only ($id resolves to $agent, which has no CLAUDE_CODE_OAUTH_TOKEN equivalent)" >&2
       log "ABORT: --account with agent=$agent"; exit 2
     fi
-  elif ! account_token=$(cockpit_account_token "$account" 2>/dev/null); then
+  elif ! cockpit_profile_env "$account" "$id"; then
     if [[ "$account_source" == lookup ]]; then
       echo "cockpit-send: $id previously ran on account '$account', which no longer resolves: $(cockpit_account_reason "$account")" >&2
     else
@@ -173,7 +173,12 @@ if [[ -n "$account" ]]; then
     echo "cockpit-send: refusing to resume — an unset CLAUDE_CODE_OAUTH_TOKEN is read as 'use the primary account'" >&2
     log "ABORT: account '$account' ($account_source) did not resolve"; exit 2
   fi
-  [[ -n "$account_token" ]] && account_env=(-e "CLAUDE_CODE_OAUTH_TOKEN=$account_token")
+  [[ "$agent" == claude ]] && account_env=("${PROFILE_ENV[@]}")
+fi
+
+if [[ "$agent" == claude && -z "$account" ]]; then
+  cockpit_profile_env "" "$id" || exit 2
+  account_env=("${PROFILE_ENV[@]}")
 fi
 
 if ! $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; then
@@ -207,9 +212,9 @@ actsid=$($TMUX show -p -t "$act" @session_id 2>/dev/null | awk '{print $2}')
 # The token crosses as tmux `-e` START-ENVIRONMENT only — never inside $cmd, so it is absent from the pane's
 # start command, the layout DB, cockpit-state and this script's log. Only the NAME is stamped below.
 if [[ -z "$actsid" && -n "$act" ]]; then
-  pane="$act"; $TMUX respawn-pane -k -t "$pane" "${account_env[@]}" "bash -lc $(printf %q "$cmd")"
+  pane="$act"; $TMUX respawn-pane -k -t "$pane" "${account_env[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")"
 else
-  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${account_env[@]}" "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+  pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${account_env[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")" 2>/dev/null) \
     || { $TMUX display-message "cockpit: no room for another pane at this width"; exit 0; }
 fi
 cockpit_stamp_known_agent "$pane" "$id" "$cwd" "$title" "$agent"

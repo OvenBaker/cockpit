@@ -46,12 +46,14 @@ target=""; token=""
 if [[ "$name" != default ]]; then
   cockpit_account_name_ok "$name" \
     || { echo "cockpit-account: '$name' is not a valid account name ([A-Za-z0-9][A-Za-z0-9_-]{0,31})" >&2; exit 2; }
-  if ! token=$(cockpit_account_token "$name" 2>/dev/null); then
+  if ! cockpit_profile_env "$name" "$sid"; then
     echo "cockpit-account: account '$name' — $(cockpit_account_reason "$name")" >&2
     exit 2
   fi
   target="$name"
 fi
+
+cockpit_profile_env "$target" "$sid" || exit 2
 
 cur=$($TMUX show -pqv -t "$pane" @account 2>/dev/null)
 if [[ "$target" == "$cur" ]]; then

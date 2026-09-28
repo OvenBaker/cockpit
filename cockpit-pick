@@ -55,16 +55,16 @@ retarget_pane() {
   # `show -pv`, not `show -p | awk '{print $2}'`: an option cleared to "" prints as `@account ''`, so the awk
   # form yields the literal two-quote string and a CLEARED binding would read as a bound one.
   acct=$($TMUX show -pv -t "$pane" @account 2>/dev/null)
-  if [[ -n "$acct" ]]; then
-    if tok=$(cockpit_account_token "$acct" 2>/dev/null); then
-      eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
+  if [[ "$agent" == claude ]]; then
+    if cockpit_profile_env "$acct" "$id"; then
+      eargs=("${PROFILE_ENV[@]}")
     else
       say "cockpit: pane is bound to Claude account '$acct', which no longer resolves — not retargeting"
       sleep 2; return 1
     fi
   fi
   local cmd; cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
-  $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$cmd")"
+  $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")"
   cockpit_stamp_known_agent "$pane" "$id" "$cwd" "$title" "$agent"
 }
 
@@ -78,11 +78,11 @@ spawn_new() {
   # so there is no stamping it on afterwards. A binding that does not resolve refuses the spawn outright
   # rather than quietly starting on the default account (an unset CLAUDE_CODE_OAUTH_TOKEN reads as "use the
   # primary"), which is the whole hazard this feature exists to avoid.
-  if [[ -n "$acct" ]]; then
-    [[ "$agent" == claude ]] || { say "  accounts are Claude-only — $agent has no CLAUDE_CODE_OAUTH_TOKEN equivalent."; return 1; }
-    tok=$(cockpit_account_token "$acct" 2>/dev/null) \
-      || { say "  account '$acct': $(cockpit_account_token "$acct" 2>&1 >/dev/null)"; return 1; }
-    eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
+  [[ -z "$acct" || "$agent" == claude ]] || { say "  accounts are Claude-only."; return 1; }
+  if [[ "$agent" == claude ]]; then
+    cockpit_profile_env "$acct" \
+      || { say "  account '$acct': $(cockpit_account_check "${acct:-default}" 2>&1 >/dev/null)"; return 1; }
+    eargs=("${PROFILE_ENV[@]}")
   fi
   launch=$(cockpit_new_launch "$agent" "$cwd" "$name" "$permissions") || return 1
   cmd="cd $(printf %q "$cwd") && $launch"
@@ -97,9 +97,9 @@ spawn_new() {
     # silently returns to the primary. Fail towards the recoverable one.
     $TMUX set -p -t "$pane" @account "$acct"
     $TMUX set -p -t "$pane" @account_mark "$(cockpit_pane_account_mark "$acct" "$agent")"
-    $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$cmd")"
+    $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")"
   else
-    pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$cmd")" 2>/dev/null) \
+    pane=$($TMUX split-window -t "$W" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")" 2>/dev/null) \
       || { say "  no room for another pane at this width."; return 1; }
   fi
   # Stamp the NAME (never the token) so restore can rebuild this binding — and CLEAR it when there is no

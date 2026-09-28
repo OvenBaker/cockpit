@@ -2,6 +2,8 @@
 # Three concerns: (1) pick sessions from santa's DB, (2) map a session
 # to its live JSONL transcript, (3) classify that transcript's current state.
 
+PROFILE_ENV=(); PROFILE_UNSET=(); PROFILE_LEGACY_AUTH=0
+COCKPIT_PROFILE_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/claude-profile"
 SANTA_DB="${SANTA_DB:-$HOME/.local/share/santa/index.db}"
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/.claude/projects}"
 CODEX_SESSIONS="${CODEX_SESSIONS:-$HOME/.codex/sessions}"   # Codex rollout store
@@ -60,7 +62,7 @@ ck_select() {
 # wrapper every launcher builds around the resume/spawn command (one unquote by
 # that inner bash restores the literal name — same proven path as `cd %q`).
 cockpit_rc_args() {
-  [[ "${COCKPIT_REMOTE_CONTROL:-1}" == 1 ]] || return 0
+  [[ "${COCKPIT_REMOTE_CONTROL:-1}" == 1 && "${PROFILE_LEGACY_AUTH:-0}" == 0 ]] || return 0
   local name="${1:-}" cwd="${2:-}"
   [[ -n "$name" ]] || name=$(basename "${cwd:-$HOME}")
   printf ' --remote-control %q' "${name:0:48}"
@@ -105,21 +107,11 @@ cockpit_codex_launch_args() {
   while IFS= read -r arg; do printf ' %q' "$arg"; done < <(cockpit_codex_launch_argv "$@")
 }
 
-# ── per-pane Claude account (a SECOND Claude Max subscription) ──────────────────────────────────────────────
-# The operator runs some panes under a second Claude subscription, whose long-lived token comes from
-# `claude setup-token` and is delivered to the child process as CLAUDE_CODE_OAUTH_TOKEN.
-#
-# Two facts about the installed Claude Code (2.1.246), both verified against it, drive every rule below:
-#   1. CLAUDE_CODE_OAUTH_TOKEN takes PRECEDENCE over ~/.claude/.credentials.json, per process — an invalid
-#      value fails loudly with `401 OAuth access token is invalid`. That is what makes per-pane accounts work.
-#   2. CLAUDE_CODE_OAUTH_TOKEN="" (empty) is treated as UNSET — the run silently succeeds on the PRIMARY
-#      account. That is the dangerous failure: it burns the exact quota the binding exists to protect, with
-#      nothing on screen to say so.
-# So everything here fails VISIBLY. An account that does not fully resolve is REFUSED; an empty or absent
-# token is never passed through, because passing it through is indistinguishable from having no binding.
-#
-# Deliberately NOT CLAUDE_CONFIG_DIR: that would relocate ~/.claude/projects and break santa's index, the
-# poller's transcript-based state classification, and the hooks. This is auth-only, which is the whole point.
+# ── per-pane Claude account ────────────────────────────────────────────────
+# Named accounts can register an isolated login via accounts/<name>.configdir.
+# Legacy mixed-root sessions retain private <name>.token authentication until
+# deliberately migrated. New sessions use the isolated root. Missing login or
+# invalid credentials refuse launch; never fall back to the primary account.
 COCKPIT_ACCOUNTS_DIR="${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"
 
 # The account NAME becomes a tmux option value, a filename component and a JSON field, so it is deliberately
@@ -225,9 +217,57 @@ cockpit_account_token() {
   printf '%s' "$token"
 }
 
+# Resolve account authentication and transcript root together before touching a pane.
+# PROFILE_ENV is a tmux -e argv array; no credentials enter persistent pane metadata.
+cockpit_profile_env() {
+  local account="${1:-default}" sid="${2:-}" output line
+  [[ -n "$account" ]] || account=default
+  if [[ "$account" != default ]]; then
+    cockpit_account_name_ok "$account" || { echo "account name '$account' is not [A-Za-z0-9][A-Za-z0-9_-]{0,31}" >&2; return 1; }
+    if [[ ! -f "$COCKPIT_ACCOUNTS_DIR/$account.configdir" ]]; then
+      cockpit_account_token "$account" >/dev/null || return 1
+    fi
+  fi
+  output=$("$COCKPIT_PROFILE_TOOL" --account "$account" --session "$sid" env) || return 1
+  PROFILE_ENV=(); PROFILE_UNSET=(); PROFILE_LEGACY_AUTH=0
+  while IFS= read -r line; do
+    if [[ "$line" == *=* ]]; then PROFILE_ENV+=(-e "$line"); else PROFILE_UNSET+=("$line"); fi
+    [[ "$line" == CLAUDE_CODE_OAUTH_TOKEN=* ]] && PROFILE_LEGACY_AUTH=1
+  done <<< "$output"
+  return 0
+}
+# tmux -e NAME does not clear a value inherited from the session environment.
+# Clear absent profile variables inside the login shell, immediately before exec.
+cockpit_profile_command() {
+  local command="$1" agent="${2:-claude}" name
+  if [[ "$agent" == claude && ${#PROFILE_UNSET[@]} -gt 0 ]]; then
+    printf 'unset'
+    for name in "${PROFILE_UNSET[@]}"; do printf ' %q' "$name"; done
+    printf '; '
+  fi
+  printf '%s' "$command"
+}
+
+cockpit_account_check() {
+  if [[ "${1:-default}" != default && ! -f "$COCKPIT_ACCOUNTS_DIR/$1.configdir" ]]; then
+    cockpit_account_token "$1" >/dev/null
+  else
+    "$COCKPIT_PROFILE_TOOL" --account "${1:-default}" check
+  fi
+}
+cockpit_project_roots() {
+  printf '%s\n' "$PROJECTS_DIR"
+  # Explicit PROJECTS_DIR overrides remain isolated (including scratch-server tests).
+  [[ "$PROJECTS_DIR" == "$HOME/.claude/projects" ]] || return 0
+  local name root
+  while IFS=$'\t' read -r name root; do
+    [[ "$name" != default ]] && printf '%s/projects\n' "$root"
+  done < <("$COCKPIT_PROFILE_TOOL" roots)
+}
+
 # The refusal reason alone, as a VALUE, for callers that must prefix it or show it inside a pane rather than
 # let it land on their own stderr. Prints nothing and returns 1 when the account actually resolves.
-cockpit_account_reason() { cockpit_account_token "$1" >/dev/null 2>&1 && return 1; cockpit_account_token "$1" 2>&1 >/dev/null; }
+cockpit_account_reason() { cockpit_account_check "$1" >/dev/null 2>&1 && return 1; cockpit_account_check "$1" 2>&1 >/dev/null; }
 
 # Every account that currently RESOLVES, one name per line, sorted. Only valid ones are listed: an entry the
 # operator cannot actually launch on is worse than no entry, because the chooser would offer a key that then
@@ -235,20 +275,20 @@ cockpit_account_reason() { cockpit_account_token "$1" >/dev/null 2>&1 && return 
 # rather than mysteriously absent.
 cockpit_accounts_list() {
   local f name
-  for f in "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"/*.token; do
+  for f in "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"/*.{token,configdir}; do
     [[ -e "$f" ]] || continue
-    name=$(basename "$f" .token)
-    cockpit_account_token "$name" >/dev/null 2>&1 && printf '%s\n' "$name"
-  done | sort
+    name=${f##*/}; name=${name%.*}
+    cockpit_account_check "$name" >/dev/null 2>&1 && printf '%s\n' "$name"
+  done | sort -u
 }
 
 cockpit_accounts_broken() {
   local f name
-  for f in "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"/*.token; do
+  for f in "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}"/*.{token,configdir}; do
     [[ -e "$f" ]] || continue
-    name=$(basename "$f" .token)
-    cockpit_account_token "$name" >/dev/null 2>&1 || printf '%s\t%s\n' "$name" "$(cockpit_account_token "$name" 2>&1 >/dev/null)"
-  done | sort
+    name=${f##*/}; name=${name%.*}
+    cockpit_account_check "$name" >/dev/null 2>&1 || printf '%s\t%s\n' "$name" "$(cockpit_account_check "$name" 2>&1 >/dev/null)"
+  done | sort -u
 }
 
 # An inner pane command that REFUSES visibly instead of starting on the default account. Restore uses this
@@ -587,6 +627,14 @@ cockpit_layout_peak() {
 # value blindly) is treated the same as empty rather than propagated.
 cockpit_session_last_account() {
   local sid="${1:-}" sess="${COCKPIT_SESSION}" result
+  local name root
+  if [[ "$sid" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    while IFS=$'\t' read -r name root; do
+      if [[ "$name" != default ]] && find "$root/projects" -maxdepth 2 -name "$sid.jsonl" -print -quit 2>/dev/null | grep -q .; then
+        printf '%s' "$name"; return 0
+      fi
+    done < <("$COCKPIT_PROFILE_TOOL" roots)
+  fi
   [[ -n "$sid" && -f "$COCKPIT_LAYOUT_DB" ]] || { printf ''; return 0; }
   result=$(sqlite3 "$COCKPIT_LAYOUT_DB" \
     "SELECT p.account FROM panes p JOIN snapshots s ON s.id = p.snapshot_id
@@ -793,11 +841,14 @@ encode_project_dir() { echo "$1" | sed 's#[/.]#-#g'; }
 # Path to a session's JSONL transcript, given id + cwd.
 session_jsonl() {
   local id="$1" cwd="$2"
-  local enc; enc="$PROJECTS_DIR/$(encode_project_dir "$cwd")/$id.jsonl"
-  [[ -f "$enc" ]] && { echo "$enc"; return; }
-  # fallback: search by id across all project dirs
-  local hit; hit=$(find "$PROJECTS_DIR" -maxdepth 2 -name "$id.jsonl" 2>/dev/null | head -1)
-  echo "$hit"
+  local root enc hit
+  while IFS= read -r root; do
+    enc="$root/$(encode_project_dir "$cwd")/$id.jsonl"
+    [[ -f "$enc" ]] && { printf '%s' "$enc"; return; }
+    hit=$(find "$root" -maxdepth 2 -name "$id.jsonl" 2>/dev/null | head -1)
+    [[ -n "$hit" ]] && { printf '%s' "$hit"; return; }
+  done < <(cockpit_project_roots)
+
 }
 
 # A session is "live" (running somewhere) if its transcript was written very
@@ -875,7 +926,7 @@ _claude_rows() {
     [[ -z "$title" ]] && title="(untitled)"
     printf '%s\tclaude\t%s\t%s\t%s\n' "${mt%.*}" "$id" "$cwd" "$title"
     n=$((n+1)); (( n >= limit )) && break
-  done < <(find "$PROJECTS_DIR" -maxdepth 2 -name '*.jsonl' -printf '%T@\t%p\n' 2>/dev/null | sort -rn)
+  done < <(while IFS= read -r root; do find "$root" -maxdepth 2 -name '*.jsonl' -printf '%T@\t%p\n' 2>/dev/null; done < <(cockpit_project_roots) | sort -rn)
 }
 
 # Candidate dormant Codex sessions, newest-first, as: mtime<TAB>codex<TAB>id<TAB>cwd<TAB>title
@@ -941,8 +992,12 @@ cockpit_recent_cwds() {
 # modified after <born-epoch>. Used by the poller to bind a freshly-spawned
 # `claude` (no --resume, so no id up front) to its pane once Claude writes.
 cockpit_adopt() {
-  local cwd="$1" born="$2" dir f
+  local cwd="$1" born="$2" account="${3:-}" dir f config
   dir="$PROJECTS_DIR/$(encode_project_dir "$cwd")"
+  if [[ -n "$account" && -f "$COCKPIT_ACCOUNTS_DIR/$account.configdir" ]]; then
+    read -r config < "$COCKPIT_ACCOUNTS_DIR/$account.configdir"
+    dir="$config/projects/$(encode_project_dir "$cwd")"
+  fi
   [[ -d "$dir" ]] || return 0
   f=$(find "$dir" -maxdepth 1 -name '*.jsonl' -newermt "@$born" -printf '%T@\t%p\n' 2>/dev/null \
       | sort -rn | head -1 | cut -f2)
@@ -1046,8 +1101,8 @@ agent_classify() { case "$1" in codex) classify_codex "$2";; *) classify_state "
 # lives in, so a malformed transcript can never redirect us somewhere arbitrary.
 claude_launch_cwd() {   # id cwd → a cwd that can resume this session
   local id="$1" cwd="$2" jsonl first
-  [[ -f "$PROJECTS_DIR/$(encode_project_dir "$cwd")/$id.jsonl" ]] && { printf '%s' "$cwd"; return; }
   jsonl=$(session_jsonl "$id" "$cwd")
+  [[ -n "$jsonl" && "$(basename "$(dirname "$jsonl")")" == "$(encode_project_dir "$cwd")" ]] && { printf '%s' "$cwd"; return; }
   [[ -n "$jsonl" && -f "$jsonl" ]] || { printf '%s' "$cwd"; return; }
   first=$(grep -m1 -o '"cwd":"[^"]*"' "$jsonl" 2>/dev/null | head -1 | cut -d'"' -f4)
   if [[ -n "$first" && -d "$first" \
@@ -1124,8 +1179,8 @@ cockpit_respawn_resume() {
     cockpit_codex_backend_ready "$orb" || return 1
   fi
 
-  if [[ "$agent" == claude && -n "$account" ]]; then
-    if ! tok=$(cockpit_account_token "$account" 2>/dev/null); then
+  if [[ "$agent" == claude ]]; then
+    if ! cockpit_profile_env "$account" "$sid"; then
       echo "cockpit_respawn_resume: account '$account' — $(cockpit_account_reason "$account")" >&2
       return 1
     fi
@@ -1133,10 +1188,10 @@ cockpit_respawn_resume() {
 
   local cmd; cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label" "$orb")")
   if [[ "$agent" == claude ]]; then
-    $tmux respawn-pane -k -t "$pane" -e "CLAUDE_CODE_OAUTH_TOKEN=$tok" "bash -lc $(printf %q "$cmd")" 2>/dev/null \
+    $tmux respawn-pane -k -t "$pane" "${PROFILE_ENV[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")" 2>/dev/null \
       || { echo "cockpit_respawn_resume: respawn failed" >&2; return 1; }
   else
-    $tmux respawn-pane -k -t "$pane" "bash -lc $(printf %q "$cmd")" 2>/dev/null \
+    $tmux respawn-pane -k -t "$pane" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")" 2>/dev/null \
       || { echo "cockpit_respawn_resume: respawn failed" >&2; return 1; }
   fi
 
@@ -1214,5 +1269,5 @@ cockpit_adopt_agent() {
     done < <(find "$CODEX_SESSIONS" -type f -name 'rollout-*.jsonl' -newermt "@$born" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | cut -f2-)
     return 0
   fi
-  cockpit_adopt "$cwd" "$born"
+  cockpit_adopt "$cwd" "$born" "${4:-}"
 }

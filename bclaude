@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Beta account launcher. Existing mixed-root sessions keep their legacy Beta auth;
+# new sessions use the registered isolated login once work2.configdir is activated.
+set -euo pipefail
+if [[ -n "${BCLAUDE_TOKEN_FILE:-}" ]]; then
+  echo 'bclaude: BCLAUDE_TOKEN_FILE conflicts with account profiles; unset it and use the registered work2 account' >&2
+  exit 2
+fi
+export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-5}"
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+exec "$HERE/claude-profile" --account work2 exec -- "$@"

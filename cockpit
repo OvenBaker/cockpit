@@ -386,14 +386,15 @@ build_from_cand() {
     IFS=$'\t' read -r id cwd title agent acct <<< "$row"; [[ -n "$agent" ]] || agent=claude
     acct_ok=1; acct_reason=""; tok=""; eargs=()
     cockpit_account_name_ok "${acct:-}" || acct=""
+    [[ "$agent" == claude && -z "$acct" ]] && acct=$(cockpit_session_last_account "$id")
     key="$agent:$id"
     [[ -n "${SEEN_SESSION[$key]:-}" ]] && continue
     SEEN_SESSION[$key]=1
     # Same rule as restore: the token rides `-e` at pane creation, and an account that no longer resolves
     # refuses visibly rather than falling back to the primary subscription (see cockpit_account_token).
-    if [[ -n "$acct" ]]; then
-      if tok=$(cockpit_account_token "$acct" 2>/dev/null); then eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
-      else acct_ok=0; acct_reason=$(cockpit_account_token "$acct" 2>&1 >/dev/null) || true; fi
+    if [[ "$agent" == claude ]]; then
+      if cockpit_profile_env "$acct" "$id"; then eargs=("${PROFILE_ENV[@]}")
+      else acct_ok=0; acct_reason=$(cockpit_account_check "${acct:-default}" 2>&1 >/dev/null) || true; fi
     fi
     cmd=$(agent_resume_inner "$agent" "$id" "$cwd" "$title")
     [[ "$agent" == codex ]] && cmd="exec sleep infinity"
@@ -403,13 +404,13 @@ build_from_cand() {
       # later pane), so an account-bound first pane is created on a holder and respawned with the token.
       if (( ${#eargs[@]} )); then
         pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "exec sleep infinity")
-        $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$cmd")"
+        $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")"
       else
-        pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
+        pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n work -x 320 -y 80 "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")")
       fi
       apply_chrome; first=0
     else
-      pane=$($TMUX split-window -t "$COCKPIT_SESSION:work" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$cmd")")
+      pane=$($TMUX split-window -t "$COCKPIT_SESSION:work" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")")
       $TMUX select-layout -t "$COCKPIT_SESSION:work" "$COCKPIT_LAYOUT"
     fi
     stamp_pane "$pane" "$id" "$cwd" "$title" "$agent"
@@ -504,11 +505,11 @@ restore_grid() {
     # NOT fall through to a normal launch: CLAUDE_CODE_OAUTH_TOKEN empty/absent means "use the primary
     # account", so a silent fallback bills the exact subscription this binding exists to protect, with
     # nothing on screen. Refuse visibly instead, in a pane that stays alive to be read.
-    if [[ -n "$acct" ]]; then
-      if tok=$(cockpit_account_token "$acct" 2>/dev/null); then
-        eargs=(-e "CLAUDE_CODE_OAUTH_TOKEN=$tok")
+    if [[ "$agent" == claude ]]; then
+      if cockpit_profile_env "$acct" "$sid"; then
+        eargs=("${PROFILE_ENV[@]}")
       else
-        acct_ok=0; acct_reason=$(cockpit_account_token "$acct" 2>&1 >/dev/null) || true
+        acct_ok=0; acct_reason=$(cockpit_account_check "${acct:-default}" 2>&1 >/dev/null) || true
       fi
     fi
     [[ ( "$agent" == claude || "$agent" == codex ) && -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
@@ -535,20 +536,20 @@ restore_grid() {
           # and unbound panes would silently run on the second account. So the first pane is created on a
           # holder and respawned with the token instead — respawn-pane -e is process-scoped (verified).
           pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "exec sleep infinity")
-          $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$cmd")"
+          $TMUX respawn-pane -k -t "$pane" "${eargs[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")"
         else
-          pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "bash -lc $(printf %q "$cmd")")
+          pane=$($TMUX new-session -d -P -F '#{pane_id}' -s "$COCKPIT_SESSION" -n "$wname" -x 320 -y 80 "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")")
         fi
         apply_chrome; first=0
       else
-        pane=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{pane_id}' -n "$wname" "${eargs[@]}" "bash -lc $(printf %q "$cmd")")
+        pane=$($TMUX new-window -t "$COCKPIT_SESSION" -P -F '#{pane_id}' -n "$wname" "${eargs[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")")
       fi
       curwin=$($TMUX display -p -t "$pane" '#{window_id}'); SEENW[$curwin]=1; NAMEWIN[$wname]="$curwin"
       [[ "$wname" == "$active" ]] && awin="$curwin"
       (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent" "$role"
     else                                          # workspace already open → add this pane to its window
       curwin="${NAMEWIN[$wname]}"
-      pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$cmd")")
+      pane=$($TMUX split-window -t "$curwin" -P -F '#{pane_id}' "${eargs[@]}" "bash -lc $(printf %q "$(cockpit_profile_command "$cmd" "$agent")")")
       (( issess )) && stamp_pane "$pane" "$sid" "$cwd" "$label" "$agent" "$role"
     fi
     # Carry the orb binding forward, or the fix survives exactly one reboot. Braced with `|| true` because this
