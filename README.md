@@ -281,7 +281,7 @@ env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN CLAU
 
 `sync` uses rsync to copy plugin contents safely, including read-only Git objects. It copies common settings and plugin contents/installation records, links shared
 skills, agents, commands, hooks and rules, and links existing project memory directories.
-It never copies credentials, app state or transcripts. Run it deliberately after common
+It copies personal MCP server definitions and onboarding preferences selectively from app state, while preserving Beta identity and trust. It never copies credentials or transcripts; MCP OAuth logins stay account-local. Run it deliberately after common
 settings/plugin changes; Beta-local settings edits are replaced. New project memory
 links are added on the next sync. Avoid running sync during plugin install/update.
 

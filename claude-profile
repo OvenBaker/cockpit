@@ -2,7 +2,7 @@
 """Account-scoped Claude state. Registry: Cockpit accounts/<name>.configdir.
 The env action is a private launcher interface; capture it, never log its output.
 """
-import argparse, json, os, pathlib, re, subprocess, sys
+import argparse, json, os, pathlib, re, subprocess, sys, tempfile
 
 HOME = pathlib.Path.home()
 ACCOUNTS = pathlib.Path(os.environ.get('COCKPIT_ACCOUNTS_DIR', HOME / '.config/cockpit/accounts'))
@@ -61,6 +61,19 @@ def sync(root):
     for key in ['CLAUDE_CODE_OAUTH_TOKEN','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','CLAUDE_CONFIG_DIR']:
         settings.get('env', {}).pop(key, None)
     (root/'settings.json').write_text(json.dumps(settings, indent=2)+'\n')
+    # Share explicit server definitions and onboarding preferences, never the whole
+    # app-state file: it also contains account identity and per-project trust.
+    source_state = HOME / '.claude.json'
+    if source_state.is_file():
+        common = json.loads(source_state.read_text())
+        destination = root / '.claude.json'
+        state = json.loads(destination.read_text()) if destination.exists() else {}
+        for key in ['mcpServers', 'hasCompletedOnboarding', 'lastOnboardingVersion', 'theme']:
+            if key in common: state[key] = common[key]
+        with tempfile.NamedTemporaryFile(mode='w', dir=root, delete=False) as temporary:
+            json.dump(state, temporary, indent=2)
+            temporary.write('\n')
+        os.replace(temporary.name, destination)
     # Each account owns mutable plugin records; installed contents are synced on demand.
     if (PRIMARY/'plugins').exists():
         subprocess.run(['rsync', '-a', str(PRIMARY/'plugins')+'/', str(root/'plugins')+'/'], check=True)
