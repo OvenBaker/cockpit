@@ -6,6 +6,6 @@ if [[ -n "${BCLAUDE_TOKEN_FILE:-}" ]]; then
   echo 'bclaude: BCLAUDE_TOKEN_FILE conflicts with account profiles; unset it and use the registered work2 account' >&2
   exit 2
 fi
-export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-5}"
+export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-5-5}"
 HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 exec "$HERE/claude-profile" --account work2 exec -- "$@"
