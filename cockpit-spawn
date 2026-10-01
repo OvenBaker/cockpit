@@ -4,6 +4,7 @@
 # web/remote surface can open a session without driving the interactive picker.
 #
 #   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME] [--account NAME] [--role ROLE]
+#                 [--model ID] [--effort low|medium|high|xhigh]
 #                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N
 #                  [--interaction-profile human|agent|brief-studio|execution]]  # codex: human, brief-studio, execution
 #                 [--interaction-profile brief-studio|execution --orb-server-file ABS]
@@ -72,6 +73,12 @@
 # no launch behaviour. Omitted → the pane carries no role. See also: cockpit-role, for stamping/clearing/
 # reading a role on a pane after the fact.
 #
+# MODEL / EFFORT: --model ID and --effort LEVEL pin the provider's model and reasoning effort for THIS launch
+# only (never a global config write). codex gets `-m ID` / `-c model_reasoning_effort="LEVEL"`; claude gets
+# `--model ID` / `--effort LEVEL`. Both are optional — absent adds nothing and the launch is unchanged. Refused
+# for a shell pane (no provider to configure) and on a bad value, before any reservation or tmux side effect.
+# Seeded launches record them (model/effort) beside the provider; a replay under a different value conflicts.
+#
 # Exit codes: 0 ok (pane id on stdout) · 1 no grid/workspace · 2 validation refused ·
 #             4 seed terminally failed (bounded code on stderr) · 5 seed request conflict (changed material).
 set -uo pipefail
@@ -85,7 +92,7 @@ export COCKPIT_REMOTE_CONTROL=1
 cwd=""; ws=""; agent="claude"; name=""
 req_id=""; prompt_file=""; prompt_sha=""; prompt_bytes=""; profile=""; profile_given=0
 orb_file=""; orb_spec=""; account=""; account_token=""; declare -a account_env=()
-role=""
+role=""; model=""; effort=""
 while [[ $# -gt 0 ]]; do case "$1" in
   --account)   account="${2:-}"; shift;;
   --orb-server-file)       orb_file="${2:-}"; shift;;
@@ -94,6 +101,8 @@ while [[ $# -gt 0 ]]; do case "$1" in
   --agent)     agent="${2:-claude}"; shift;;
   --name)      name="${2:-}"; shift;;
   --role)      role="${2:-}"; shift;;
+  --model)     model="${2:-}"; shift;;
+  --effort)    effort="${2:-}"; shift;;
   --request-id)            req_id="${2:-}"; shift;;
   --initial-prompt-file)   prompt_file="${2:-}"; shift;;
   --initial-prompt-sha256) prompt_sha="${2:-}"; shift;;
@@ -106,6 +115,10 @@ cwd="${cwd/#\~/$HOME}"
 [[ -n "$cwd" && -d "$cwd" ]] || { echo "cockpit-spawn: --cwd must be an existing directory (got '${cwd:-<empty>}')" >&2; exit 2; }
 case "$agent" in claude|codex|shell) ;; *) echo "cockpit-spawn: --agent must be claude|codex|shell" >&2; exit 2;; esac
 [[ -z "$role" ]] || cockpit_role_ok "$role" || { echo "cockpit-spawn: --role must match ^[a-z0-9_-]+$ (got '$role')" >&2; exit 2; }
+
+[[ -z "$model" ]]  || cockpit_model_ok "$model"  || { echo "cockpit-spawn: --model must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ (got '$model')" >&2; exit 2; }
+[[ -z "$effort" ]] || cockpit_effort_ok "$effort" || { echo "cockpit-spawn: --effort must be low|medium|high|xhigh (got '$effort')" >&2; exit 2; }
+[[ -z "$model$effort" || "$agent" != shell ]] || { echo "cockpit-spawn: --model/--effort need --agent claude or codex (a shell pane has no provider)" >&2; exit 2; }
 
 # ── --account: bind this pane to a second Claude subscription ───────────────────────────────────────────────
 # Resolved HERE, before any reservation or tmux side effect, because the token has to be handed to the child
@@ -229,12 +242,13 @@ if (( seeded )); then
   if [[ -f "$record" ]]; then
     prior=$(cat "$record")
     # Material binding: identical material replays/reconciles; ANY drift (prompt digest/bytes, provider, cwd,
-    # workspace, name, interaction profile) under a reused request id conflicts loudly BEFORE any side effect.
+    # workspace, name, interaction profile, model, effort) under a reused request id conflicts loudly BEFORE any side
+    # effect. A record from before --model/--effort existed carries neither key and is not compared on them.
     # A pre-profile record carries no .profile field and is read as the profile it was launched with: human.
     # Every record ever written carries .provider, so it is compared directly — a request replayed under the
     # other provider is drift, never a silent switch of which agent picks the work up.
-    if ! jq -e --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" --arg ag "$agent" \
-        '.request_id==$r and .sha256==$s and .bytes==($b|tonumber) and .provider==$ag and .cwd==$c and .workspace==$w and .name==$n and ((.profile // "human")==$ip)' \
+    if ! jq -e --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" --arg ag "$agent" --arg m "$model" --arg e "$effort" \
+        '.request_id==$r and .sha256==$s and .bytes==($b|tonumber) and .provider==$ag and .cwd==$c and .workspace==$w and .name==$n and ((.profile // "human")==$ip) and ((has("model") | not) or (.model==$m and .effort==$e))' \
         <<<"$prior" >/dev/null; then
       echo "cockpit-spawn: seed request '$req_id' was already reserved with different material" >&2; exit 5
     fi
@@ -270,9 +284,9 @@ if (( seeded )); then
   else
     # Durable reservation FIRST (prompt-free), then the producer-owned protected staging copy of the prompt.
     cockpit_seed_write "$record" "$(jq -cn --arg r "$req_id" --arg s "$prompt_sha" --arg b "$prompt_bytes" \
-      --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" --arg ag "$agent" --arg t "$(date +%s)" \
+      --arg c "$real_cwd" --arg w "$ws" --arg n "$name" --arg ip "$profile" --arg ag "$agent" --arg m "$model" --arg e "$effort" --arg t "$(date +%s)" \
       '{contract:1,request_id:$r,sha256:$s,bytes:($b|tonumber),provider:$ag,cwd:$c,workspace:$w,name:$n,
-        profile:$ip,status:"pending",pane_id:"",session_id:"",accepted_at:"",error_code:"",created_at:$t}')" \
+        profile:$ip,model:$m,effort:$e,status:"pending",pane_id:"",session_id:"",accepted_at:"",error_code:"",created_at:$t}')" \
       || { echo "cockpit-spawn: could not reserve seed request" >&2; exit 1; }
     stage_prompt "$staging" \
       || { cockpit_seed_update "$record" '.status="failed" | .error_code="prompt-material-unavailable"' >/dev/null
@@ -292,17 +306,17 @@ if (( seeded )); then
   # The provider's own binary rides in the existing bin slot, and the provider NAME follows the orb file so the
   # positional contract only ever grows. Only trusted, %q-quoted values cross this one shell hop.
   if [[ "$agent" == codex ]]; then seed_bin="${COCKPIT_CODEX_BIN:-codex}"; else seed_bin="${COCKPIT_CLAUDE_BIN:-claude}"; fi
-  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "$seed_bin") $(printf %q "$profile") $(printf %q "$orb_file") $(printf %q "$agent")"
+  launch="exec $(printf %q "$HERE/cockpit-seed-exec") $(printf %q "$record") $(printf %q "$staging") $(printf %q "$name") $(printf %q "$cwd") $(printf %q "$seed_bin") $(printf %q "$profile") $(printf %q "$orb_file") $(printf %q "$agent") $(printf %q "$model") $(printf %q "$effort")"
 else case "$agent" in
   # A brief-studio Codex pane carries its trust assertion and its orb server as per-invocation `-c` overrides.
   # Handle folder trust at launch so an unattended workshop does not stall on a terminal dialog.
   codex) if [[ "$profile" == brief-studio ]]; then
            extra=$(cockpit_codex_brief_studio_args "$cwd" "$orb_spec") \
              || { echo "cockpit-spawn: cannot assert Codex folder trust for --cwd '$cwd' (unquotable path); refusing rather than spawning into a stall" >&2; exit 2; }
-           launch="exec codex$(cockpit_codex_launch_args "$cwd" "$orb_file")$extra"
-         else launch="exec codex$(cockpit_codex_launch_args "$cwd")"; fi;;
+           launch="exec codex$(cockpit_codex_launch_args "$cwd" "$orb_file")$extra$(cockpit_model_args codex "$model" "$effort")"
+         else launch="exec codex$(cockpit_codex_launch_args "$cwd")$(cockpit_model_args codex "$model" "$effort")"; fi;;
   shell) launch="exec bash -l";;
-  *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")";;
+  *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")$(cockpit_model_args claude "$model" "$effort")";;
 esac; fi
 cmd="cd $(printf %q "$cwd") && $launch"
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cockpit-seed-exec — the in-pane launcher for a SEEDED spawn (cockpit-spawn --request-id …).
 #
-#   cockpit-seed-exec <record.json> <staging-prompt-file> <name> <cwd> [provider-bin] [human|agent] [orb-file] [claude|codex]
+#   cockpit-seed-exec <record.json> <staging-prompt-file> <name> <cwd> [provider-bin] [human|agent] [orb-file] [claude|codex] [model] [effort]
 #
 # Runs INSIDE the freshly-created tmux pane. It binds this pane to the durable seed request (closing the
 # crash window between split-window and the spawner's own record update — $TMUX_PANE is authoritative here),
@@ -16,6 +16,10 @@
 # Cockpit's per-invocation full-access/auto-review posture governs the session without writing
 # ~/.codex/config.toml. Codex has no app-side remote control, so no --remote-control is
 # passed, and no hook, so its seed has no acceptance event — the record honestly stays `pending`.
+#
+# MODEL / EFFORT ($9, $10; both optional, empty = unset): per-invocation provider flags appended to the argv
+# just before `--` (codex `-m ID` / `-c model_reasoning_effort="L"`, claude `--model ID` / `--effort L`). They are
+# re-validated here and cross-checked against the durable record; absent adds nothing (argv unchanged).
 #
 # The prompt is DATA only: it is never interpolated into a shell command, never passed through tmux
 # send-keys/paste buffers, and never written to the durable record, pane options, stdout/stderr, or logs.
@@ -48,7 +52,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 AGENT_SYSTEM_TEXT='Your counterpart is another AI agent, not a human. Treat the supplied brief as complete and as a scope ceiling. Do not use option menus, enter plan mode, or ask non-blocking clarifying questions. State reasonable assumptions and proceed. When a material decision prevents safe progress, respond `BLOCKED: <reason>` with one recommended resolution and reasoning. Return concise milestone and final evidence; omit pleasantries and routine progress narration.'
 
 record="${1:-}"; staging="${2:-}"; name="${3:-}"; cwd="${4:-}"; provider_bin="${5:-claude}"; profile="${6:-human}"; orb_file="${7:-}"
-provider="${8:-claude}"
+provider="${8:-claude}"; model="${9:-}"; effort="${10:-}"
 
 die() { echo "cockpit-seed-exec: $1" >&2; exit 3; }
 # Mark the request failed (only while still pending) with a bounded code, then die. Prompt-free by design.
@@ -62,6 +66,8 @@ fail() {
 [[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [provider-bin] [human|agent|brief-studio|execution] [orb-server-file] [claude|codex]"
 case "$profile" in human|agent|brief-studio|execution) ;; *) die "interaction profile must be 'human', 'agent', 'brief-studio' or 'execution'";; esac
 case "$provider" in claude|codex) ;; *) die "provider must be 'claude' or 'codex'";; esac
+[[ -z "$model" ]]  || cockpit_model_ok "$model"   || die "model is not a valid model id"
+[[ -z "$effort" ]] || cockpit_effort_ok "$effort" || die "effort must be low|medium|high|xhigh"
 # The generic `agent` profile is Claude-only. `brief-studio` and `execution` have explicit Codex configuration
 # paths below.
 [[ "$provider" == claude || "$profile" == human || "$profile" == brief-studio || "$profile" == execution ]] \
@@ -81,6 +87,8 @@ expect_sha=$(jq -r .sha256 <<<"$json"); expect_bytes=$(jq -r .bytes <<<"$json");
 [[ "$(jq -r '.profile // "human"' <<<"$json")" == "$profile" ]] || fail "interaction-profile-drift"
 # Same rule for the provider: the pane must start the agent the request was reserved for, never the other one.
 [[ "$(jq -r '.provider // "claude"' <<<"$json")" == "$provider" ]] || fail "provider-drift"
+# …and for model/effort: a record that carries them must match exactly (one from before they existed carries neither).
+jq -e --arg m "$model" --arg e "$effort" '(has("model") | not) or (.model==$m and .effort==$e)' <<<"$json" >/dev/null || fail "model-drift"
 
 # Pending seed metadata is on the pane BEFORE the provider starts, so the very first hook event can already
 # see which request this pane serves. Acceptance is NEVER granted here — only the UserPromptSubmit hook may
@@ -124,7 +132,8 @@ if [[ "$provider" == codex ]]; then
     trust=$(cockpit_codex_trust_value "$cwd") || fail "codex-trust-unassertable"
     codex_args+=(-c "$trust")
   fi
-  exec "$provider_bin" "${codex_args[@]}" -- "$prompt"
+  mapfile -t model_args < <(cockpit_model_argv codex "$model" "$effort")
+  exec "$provider_bin" "${codex_args[@]}" "${model_args[@]}" -- "$prompt"
 fi
 args=()
 # Seeded spawns are always remote-controlled (cockpit-spawn forces RC on); same 48-char app-title bound as
@@ -162,4 +171,5 @@ if [[ "$profile" == execution ]]; then
   orb_spec=$(cockpit_orb_read_spec "$orb_file") || fail "orb-server-unavailable"
   args+=(--mcp-config "$(jq -cn --argjson s "$orb_spec" '{mcpServers:{orb:$s}}')")
 fi
-exec "$provider_bin" "${args[@]}" -- "$prompt"
+mapfile -t model_args < <(cockpit_model_argv claude "$model" "$effort")
+exec "$provider_bin" "${args[@]}" "${model_args[@]}" -- "$prompt"

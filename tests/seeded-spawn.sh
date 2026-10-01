@@ -570,4 +570,67 @@ prompt = open(sys.argv[2],'rb').read()
 assert argv == [b'--remote-control', b'seed-demo', b'--', prompt], argv
 PY
 echo "ok 16 seeded-codex-launch"
+
+# ── 17: --model / --effort — per-launch provider pins, optional, validated, bound into request identity ────────
+# (a) seeded Codex: `-m ID` and `-c model_reasoning_effort="LEVEL"` land as real argv values BEFORE `--`, after the
+#     existing trust override; the record carries them; identical replay returns the same pane with no new start.
+: > "$root/out/codex-starts"
+panem=$(seed_codex req-model-cx --model gpt-6.1-sol --effort high)
+[[ "$panem" == %* ]]
+wait_for '[[ $(codex_starts) -eq 1 ]]'
+CWD_REAL="$root/cwd" python3 - "$root/out/codex-argv" "$PROMPT_FILE" <<'PY'
+import os, sys
+argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
+prompt = open(sys.argv[2],'rb').read()
+trust = ('projects."%s".trust_level="trusted"' % os.environ['CWD_REAL']).encode()
+assert argv == [
+    b'--remote', b'ws://127.0.0.1:43129',
+    b'--cd', os.environ['CWD_REAL'].encode(),
+    b'-c', trust,
+    b'-m', b'gpt-6.1-sol',
+    b'-c', b'model_reasoning_effort="high"',
+    b'--', prompt,
+], argv
+PY
+[[ "$(field req-model-cx model)" == gpt-6.1-sol && "$(field req-model-cx effort)" == high ]]
+[[ "$(seed_codex req-model-cx --model gpt-6.1-sol --effort high)" == "$panem" ]]
+[[ $(codex_starts) -eq 1 ]]
+# (b) the model/effort are request identity: a replay under a different model, a different effort, or none conflicts
+n=$(pane_count)
+for flags in "--model gpt-other --effort high" "--model gpt-6.1-sol --effort low" "--model gpt-6.1-sol" ""; do
+  set +e; seed_codex req-model-cx $flags >/dev/null 2>&1; rc=$?; set -e
+  [[ $rc -eq 5 ]] || { echo "model drift '$flags' expected 5, got $rc" >&2; exit 1; }
+done
+[[ $(pane_count) -eq $n && $(codex_starts) -eq 1 ]]
+# (c) seeded Claude: `--model ID --effort LEVEL` follow the remote-control flag, before `--`
+echo hold > "$root/out/mode"; : > "$root/out/starts"
+spawn req-model-cl "$PROMPT_FILE" "$SHA" "$BYTES" --model claude-opus-5-5 --effort xhigh >/dev/null
+wait_for '[[ $(starts) -eq 1 ]]'
+python3 - "$root/out/argv" "$PROMPT_FILE" <<'PY'
+import sys
+argv = open(sys.argv[1],'rb').read().split(b'\0')[:-1]
+prompt = open(sys.argv[2],'rb').read()
+assert argv == [b'--remote-control', b'seed-demo', b'--model', b'claude-opus-5-5', b'--effort', b'xhigh', b'--', prompt], argv
+PY
+# (d) absent flags change nothing (the argv regressions in 16(a)/16(g) pin that); the record then carries empty values
+[[ -z "$(field req-codex-1 model)" && -z "$(field req-codex-1 effort)" ]]
+# …and a record written before this feature existed (no model/effort keys) replays without a model conflict
+jq 'del(.model,.effort)' "$(record_of req-codex-1)" > "$root/old-record.json" && cp "$root/old-record.json" "$(record_of req-codex-1)"
+[[ "$(seed_codex req-codex-1)" == "$panecx" ]]
+# (e) validation fails closed, before any reservation or pane
+n=$(pane_count)
+refused --cwd "$root/cwd" --workspace seedcodexws --agent codex --model 'bad model'
+refused --cwd "$root/cwd" --workspace seedcodexws --agent codex --model '-m'
+refused --cwd "$root/cwd" --workspace seedcodexws --agent codex --effort max
+refused --cwd "$root/cwd" --workspace seedcodexws --agent codex --effort bogus
+refused --cwd "$root/cwd" --workspace seedcodexws --agent shell --model gpt-6.1-sol
+refused --cwd "$root/cwd" --workspace seedcodexws --agent shell --effort high
+[[ $(pane_count) -eq $n ]]
+# (f) plain (non-seeded) Codex and Claude spawns carry the flags too
+mplane=$("$REPO/cockpit-spawn" --cwd "$root/cwd" --workspace modelws --agent codex --model gpt-6.1-sol --effort high)
+mcmd=$(tmux -L "$socket" display -p -t "$mplane" '#{pane_start_command}')
+[[ "$mcmd" == *"-m"*"gpt-6.1-sol"* && "$mcmd" == *"model_reasoning_effort="*"high"* ]]
+# …and absent flags leave the plain launch free of them (tmux escapes spaces, so match on the tokens)
+[[ "$plaincmd" != *"model_reasoning_effort"* && "$plaincmd" != *gpt-6.1-sol* ]]
+echo "ok 17 model-effort"
 echo "ALL SEEDED-SPAWN CHECKS PASSED"

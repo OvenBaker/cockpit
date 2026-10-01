@@ -122,6 +122,29 @@ cockpit_account_name_ok() { [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$ ]]; 
 # only (it also lands in the pane-border-format, where case noise is a distraction, not information).
 cockpit_role_ok() { [[ "${1:-}" =~ ^[a-z0-9_-]+$ ]]; }
 
+# ── per-launch model / reasoning effort (cockpit-spawn --model/--effort) ───────────────────────────────────
+# Both are OPTIONAL and both are validated narrowly because they land in a provider argv (and, for the
+# seeded path, a durable record). Absent → nothing is appended and the launch is byte-identical to before.
+cockpit_model_ok()  { [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; }
+cockpit_effort_ok() { [[ "${1:-}" =~ ^(low|medium|high|xhigh)$ ]]; }
+# One argv element per line, in the shape each provider takes: codex `-m ID` / `-c model_reasoning_effort="L"`,
+# claude `--model ID` / `--effort L`. Empty model / effort contribute nothing. $1 provider, $2 model, $3 effort.
+cockpit_model_argv() {
+  local provider="${1:-}" model="${2:-}" effort="${3:-}"
+  if [[ "$provider" == codex ]]; then
+    [[ -z "$model" ]]  || printf '%s\n' -m "$model"
+    [[ -z "$effort" ]] || printf '%s\n' -c "model_reasoning_effort=\"$effort\""
+  else
+    [[ -z "$model" ]]  || printf '%s\n' --model "$model"
+    [[ -z "$effort" ]] || printf '%s\n' --effort "$effort"
+  fi
+}
+# The same argv as ` %q`-quoted words for the shell-string launch paths (cockpit-spawn's non-seeded launch).
+cockpit_model_args() {
+  local arg
+  while IFS= read -r arg; do printf ' %q' "$arg"; done < <(cockpit_model_argv "$@")
+}
+
 cockpit_account_token_path() { printf '%s/%s.token' "${COCKPIT_ACCOUNTS_DIR:-$HOME/.config/cockpit/accounts}" "$1"; }
 
 # The header mark for a bound account (a single Greek letter, typically) — purely cosmetic, so it is
