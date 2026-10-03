@@ -143,6 +143,9 @@ apply_chrome() {
   # not whatever ephemeral SSH_AUTH_SOCK this long-lived server happened to freeze.
   # ssh's IdentityAgent also covers this, but env-based agent clients (ssh-add) need it.
   [ -e "$HOME/.ssh/agent.sock" ] && $TMUX set-environment -g SSH_AUTH_SOCK "$HOME/.ssh/agent.sock"
+  # Agent title spinners redraw the session status bar even in hidden windows.
+  # Cockpit owns pane labels and activity badges through @label and @badge.
+  $TMUX set -g allow-set-title off
   $TMUX set -g pane-border-status top
   $TMUX set -g pane-border-lines heavy
   # State colour lives in the per-pane TOP line (@sc tints label + badge), not in
