@@ -20,6 +20,12 @@ cockpit --attach     just attach to an existing cockpit
 cockpit --kill       tear down the cockpit server
 ```
 
+## Retired: cockpit-core
+
+The Go `cockpit-core` control daemon (control socket, durable pane projection, MCP controller, coord
+tables, `cockpit-health` probe) was retired on 2026-10-05: it had been stuck since 2026-08-29 and nothing
+in daily use missed it. History and design docs are at commit `311957e` (`git show 311957e:docs/control-core/README.md`).
+
 ## Persistence
 
 The poller continuously saves the layout (workspaces, panes, and which session
