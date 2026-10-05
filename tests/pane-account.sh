@@ -189,16 +189,16 @@ rm -f "$T"/layout.db*            # the -wal/-shm siblings too, or the fresh DB o
 # `<nil>` placeholders, NOT empty fields: tab is an IFS whitespace character, so `read` collapses a run of
 # them into one delimiter and every later column shifts left. That is exactly why the real snapshot format
 # carries explicit placeholders — a fixture with bare tabs would silently test a different row shape.
-row() { printf '0\tmain\t%s\t%s\t%s\tclaude\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>\t%s\n' "$1" "$T/work" "$2" "$3"; }
+row() { printf '0\tmain\t%s\t%s\t%s\tclaude\t<nil>\t%s\n' "$1" "$T/work" "$2" "$3"; }
 SNAP=$'@active\tmain\n'"$(row "$A" bound-good good)"$'\n'"$(row "$B" bound-gone gone)"$'\n'"$(row "$C" unbound '<nil>')"
 "${ENVV[@]}" bash -c "source '$CK/lib.sh'; cockpit_layout_save $(printf %q "$SNAP")" \
   || { echo "FAIL  layout save"; fail=1; }
 
 back=$("${ENVV[@]}" bash -c "source '$CK/lib.sh'; cockpit_layout_load 0")
 chk "round-trip: the saved snapshot reads back with @account in field 13" \
-    "[[ \"\$(awk -F'\t' '\$5==\"bound-good\"{print \$13}' <<<\"\$back\")\" == good ]]"
+    "[[ \"\$(awk -F'\t' '\$5==\"bound-good\"{print \$8}' <<<\"\$back\")\" == good ]]"
 chk "round-trip: an unbound pane reads back as <nil>, not as some other pane's account" \
-    "[[ \"\$(awk -F'\t' '\$5==\"unbound\"{print \$13}' <<<\"\$back\")\" == '<nil>' ]]"
+    "[[ \"\$(awk -F'\t' '\$5==\"unbound\"{print \$8}' <<<\"\$back\")\" == '<nil>' ]]"
 
 $TMUX kill-server 2>/dev/null
 : > "$T/out/starts"; : > "$T/out/tokens"

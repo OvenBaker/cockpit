@@ -303,39 +303,6 @@ stamp_pane() {  # pane-id  session-id  cwd  label  [agent]  [role]
   cockpit_stamp_known_agent "$1" "$2" "$3" "$4" "${5:-claude}" "${6:-}"
 }
 
-# Restore controller-owned identity from the snapshot. Legacy snapshots carry no
-# tuple at all and are deliberately left unstamped for the controller to adopt.
-#
-# A pane the controller has NOT adopted yet is the same shape as legacy at the
-# pane level but still reports a workspaceRef, because @cockpit_workspace_ref is
-# a WINDOW option and tmux resolves user options pane → window: every pane in an
-# adopted workspace inherits it, adopted or not. Reading that as corruption is
-# what made a fresh WSL boot unrestorable on 2026-08-18 — five never-adopted
-# panes aborted the rebuild at pane 14 of 53 and the grid fell back to a fresh
-# pick. Un-adopted is a legal state; the controller mints the paneRef on its
-# next pass. Only the pane-level tuple itself has to be whole.
-stamp_controller_identity() { # pane-id window-id workspace-ref pane-ref generation version badge
-  local pane="$1" win="$2" wref="$3" pref="$4" gen="$5" ver="$6" badge="$7"
-  [[ -n "$wref" ]] && $TMUX set-option -w -t "$win" @cockpit_workspace_ref "$wref"
-  [[ -n "$badge" ]] && $TMUX set-option -p -t "$pane" @cockpit_badge "$badge"
-  # no pane-level identity saved → hand the pane to the controller unstamped
-  [[ -z "$pref$gen$ver" ]] && return 0
-  # A half-written pane tuple is the one thing we will not project: an identity
-  # the controller would trust but cannot verify. Skip THIS pane (the controller
-  # re-adopts it) rather than abandoning the rebuild — a bad row costs one pane's
-  # identity, never the other 52 panes.
-  if [[ -z "$wref" || -z "$pref" || ! "$gen" =~ ^[1-9][0-9]*$ || ! "$ver" =~ ^[1-9][0-9]*$ ]]; then
-    echo "cockpit: dropping a partial controller identity for pane $pane — leaving it for the controller to adopt" >&2
-    $TMUX set-option -pu -t "$pane" @cockpit_pane_ref 2>/dev/null
-    $TMUX set-option -pu -t "$pane" @cockpit_pane_generation 2>/dev/null
-    $TMUX set-option -pu -t "$pane" @cockpit_pane_version 2>/dev/null
-    return 0
-  fi
-  $TMUX set-option -p -t "$pane" @cockpit_pane_ref "$pref" \
-    \; set-option -p -t "$pane" @cockpit_pane_generation "$gen" \
-    \; set-option -p -t "$pane" @cockpit_pane_version "$ver"
-}
-
 # Bulk Codex launches are queued while the layout is built.  After every pane
 # exists, respawn the saved active workspace first and the remaining workspaces
 # second.  This changes initialization priority without changing tab/pane order.
@@ -449,8 +416,8 @@ restore_grid() {
   fi
   [[ -n "$snap" ]] || return 1
   local active="" first=1 curwin="" awin="" i n resumable=0 duplicates=0 key duplicate_noun
-  declare -a W S C L A WR PR PG PV B O AC RL; local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14; do
+  declare -a W S C L A O AC RL; local f1 f2 f3 f4 f5 f6 f7 f8 f9
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     # Guard against a malformed layout file: a pane row's f1 is a window index
     # and f2 a workspace name. Skip anything else (blank lines, or continuation
@@ -459,19 +426,15 @@ restore_grid() {
     [[ "$f1" =~ ^[0-9]+$ && -n "$f2" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""; [[ "$f5" == "$NIL" ]] && f5=""
     [[ "$f6" == "$NIL" ]] && f6=""
-    [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
-    [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
-    [[ "$f11" == "$NIL" ]] && f11=""; [[ "$f12" == "$NIL" ]] && f12=""
-    [[ "$f13" == "$NIL" ]] && f13=""
-    [[ "$f14" == "$NIL" ]] && f14=""
+    [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""; [[ "$f9" == "$NIL" ]] && f9=""
     [[ "$f6" == claude || "$f6" == codex ]] || f6=""
-    # f13 is a Claude account NAME (never a token). A row that does not parse as one is dropped rather than
+    # f8 is a Claude account NAME (never a token). A row that does not parse as one is dropped rather than
     # carried: the launch below treats "has an account" as "must resolve", so a junk value must not reach it.
-    cockpit_account_name_ok "$f13" || f13=""
-    # f14 is the pane's @role tag; a row that does not parse as one is dropped the same way.
-    cockpit_role_ok "$f14" || f14=""
+    cockpit_account_name_ok "$f8" || f8=""
+    # f9 is the pane's @role tag; a row that does not parse as one is dropped the same way.
+    cockpit_role_ok "$f9" || f9=""
     W+=("$f2"); S+=("$f3"); C+=("$f4"); L+=("$f5"); A+=("$f6")
-    WR+=("$f7"); PR+=("$f8"); PG+=("$f9"); PV+=("$f10"); B+=("$f11"); O+=("$f12"); AC+=("$f13"); RL+=("$f14")
+    O+=("$f7"); AC+=("$f8"); RL+=("$f9")
   done <<<"$snap"
   n=${#W[@]}; (( n > 0 )) || return 1
   declare -A SEEN_RESUMABLE=()
@@ -499,7 +462,7 @@ restore_grid() {
   codex_queue_reset
   for ((i=0;i<n;i++)); do
     local wname="${W[$i]}" sid="${S[$i]}" cwd="${C[$i]}" label="${L[$i]}" agent="${A[$i]}" issess=0 cmd pane
-    local wref="${WR[$i]}" pref="${PR[$i]}" gen="${PG[$i]}" ver="${PV[$i]}" badge="${B[$i]}" orb="${O[$i]:-}"
+    local orb="${O[$i]:-}"
     local acct="${AC[$i]:-}" acct_ok=1 acct_reason="" tok=""; local -a eargs=()
     local role="${RL[$i]:-}" mark
     # ── the per-pane Claude account, resolved BEFORE the pane is created ──────────────────────────────────
@@ -570,7 +533,6 @@ restore_grid() {
     # Re-stamp @role the same way — it's a property of the pane the operator dedicated, not of whether this
     # pane happens to hold a resumable session (stamp_pane above only fires when issess is true).
     { [[ -n "$role" ]] && $TMUX set -p -t "$pane" @role "$role"; } || true
-    stamp_controller_identity "$pane" "$curwin" "$wref" "$pref" "$gen" "$ver" "$badge" || true
     # A refusing pane is never queued for a real provider start — that is the whole point of refusing.
     if (( issess && acct_ok )) && [[ "$agent" == codex ]]; then
       cmd=$(cockpit_keep_pane_on_failure "$(agent_resume_inner "$agent" "$sid" "$cwd" "$label" "$orb")")

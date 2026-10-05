@@ -452,7 +452,7 @@ cockpit_snapshot() {
   local tmux=${COCKPIT_TMUX:-"tmux -L cockpit"} TAB=$'\t' NIL='<nil>'
   printf '@active%s%s\n' "$TAB" "$($tmux display -p -t "$COCKPIT_SESSION" '#{window_name}' 2>/dev/null)"
   $tmux list-panes -s -t "$COCKPIT_SESSION" -f '#{==:#{@orderly},}' \
-    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@cockpit_workspace_ref,#{@cockpit_workspace_ref},$NIL}${TAB}#{?@cockpit_pane_ref,#{@cockpit_pane_ref},$NIL}${TAB}#{?@cockpit_pane_generation,#{@cockpit_pane_generation},$NIL}${TAB}#{?@cockpit_pane_version,#{@cockpit_pane_version},$NIL}${TAB}#{?@cockpit_badge,#{@cockpit_badge},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}${TAB}#{?@account,#{@account},$NIL}${TAB}#{?@role,#{@role},$NIL}" 2>/dev/null |
+    -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}${TAB}#{?@account,#{@account},$NIL}${TAB}#{?@role,#{@role},$NIL}" 2>/dev/null |
     awk -F "$TAB" -v nil="$NIL" '
       $3 != nil && ($6 == "claude" || $6 == "codex") {
         key=$6 SUBSEP $3; if (seen[key]++) next
@@ -498,11 +498,6 @@ CREATE TABLE IF NOT EXISTS panes(
   cwd         TEXT    NOT NULL DEFAULT '',
   label       TEXT    NOT NULL DEFAULT '',
   agent       TEXT    NOT NULL DEFAULT '',
-  workspace_ref  TEXT NOT NULL DEFAULT '',
-  pane_ref       TEXT NOT NULL DEFAULT '',
-  pane_generation TEXT NOT NULL DEFAULT '',
-  pane_version    TEXT NOT NULL DEFAULT '',
-  badge           TEXT NOT NULL DEFAULT '',
   role            TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(snapshot_id, seq));
 CREATE INDEX IF NOT EXISTS idx_snapshots_session_at ON snapshots(session, at DESC);
@@ -517,11 +512,6 @@ SQL
       || [[ "$(sqlite3 "$COCKPIT_LAYOUT_DB" "SELECT count(*) FROM pragma_table_info('panes') WHERE name='$name';" 2>/dev/null)" == 1 ]] \
       || return 1
   done <<'COLUMNS'
-workspace_ref|TEXT NOT NULL DEFAULT ''
-pane_ref|TEXT NOT NULL DEFAULT ''
-pane_generation|TEXT NOT NULL DEFAULT ''
-pane_version|TEXT NOT NULL DEFAULT ''
-badge|TEXT NOT NULL DEFAULT ''
 orb_server_file|TEXT NOT NULL DEFAULT ''
 account|TEXT NOT NULL DEFAULT ''
 role|TEXT NOT NULL DEFAULT ''
@@ -533,28 +523,25 @@ COLUMNS
 # bounded without a separate sweep.
 cockpit_layout_save() {
   local snap="$1" sess="${COCKPIT_SESSION}" NIL='<nil>' sql active="" seq=0
-  local f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14
+  local f1 f2 f3 f4 f5 f6 f7 f8 f9
   [[ -n "$snap" ]] || return 1
   cockpit_layout_init
   sql="BEGIN IMMEDIATE;"
-  # f13 is the Claude account NAME only — never its token. The token is delivered to the pane's child process
+  # f8 is the Claude account NAME only — never its token. The token is delivered to the pane's child process
   # through tmux's `-e` at creation and is deliberately absent from this row, so the layout DB can be read,
-  # copied or diffed without carrying a credential. f14 is the pane's @role tag.
-  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14; do
+  # copied or diffed without carrying a credential. f9 is the pane's @role tag.
+  while IFS=$'\t' read -r f1 f2 f3 f4 f5 f6 f7 f8 f9; do
     [[ "$f1" == "@active" ]] && { active="$f2"; continue; }
     [[ -n "$f1" ]] || continue
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""
     [[ "$f5" == "$NIL" ]] && f5=""; [[ "$f6" == "$NIL" ]] && f6=""
-    [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""
-    [[ "$f9" == "$NIL" ]] && f9=""; [[ "$f10" == "$NIL" ]] && f10=""
-    [[ "$f11" == "$NIL" ]] && f11=""; [[ "$f12" == "$NIL" ]] && f12=""
-    [[ "$f13" == "$NIL" ]] && f13=""; [[ "$f14" == "$NIL" ]] && f14=""
-    cockpit_account_name_ok "$f13" || f13=""   # a row that is not a valid account name is not one
-    cockpit_role_ok "$f14" || f14=""           # a row that is not a valid role is not one
-    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,workspace_ref,pane_ref,pane_generation,pane_version,badge,orb_server_file,account,role) VALUES("
+    [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""; [[ "$f9" == "$NIL" ]] && f9=""
+    cockpit_account_name_ok "$f8" || f8=""   # a row that is not a valid account name is not one
+    cockpit_role_ok "$f9" || f9=""           # a row that is not a valid role is not one
+    sql+="INSERT INTO panes(snapshot_id,seq,win,workspace,session_id,cwd,label,agent,orb_server_file,account,role) VALUES("
     sql+="(SELECT MAX(id) FROM snapshots),$seq,$(ck_sqesc "$f1"),$(ck_sqesc "$f2"),"
     sql+="$(ck_sqesc "$f3"),$(ck_sqesc "$f4"),$(ck_sqesc "$f5"),$(ck_sqesc "$f6"),"
-    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"),$(ck_sqesc "$f10"),$(ck_sqesc "$f11"),$(ck_sqesc "$f12"),$(ck_sqesc "$f13"),$(ck_sqesc "$f14"));"
+    sql+="$(ck_sqesc "$f7"),$(ck_sqesc "$f8"),$(ck_sqesc "$f9"));"
     seq=$((seq+1))
   done <<<"$snap"
   (( seq > 0 )) || return 1        # never persist an empty grid over a good one
@@ -603,11 +590,6 @@ cockpit_layout_emit() {
             CASE WHEN cwd='' THEN '$NIL' ELSE cwd END,
             CASE WHEN label='' THEN '$NIL' ELSE label END,
             CASE WHEN agent='' THEN '$NIL' ELSE agent END,
-            CASE WHEN workspace_ref='' THEN '$NIL' ELSE workspace_ref END,
-            CASE WHEN pane_ref='' THEN '$NIL' ELSE pane_ref END,
-            CASE WHEN pane_generation='' THEN '$NIL' ELSE pane_generation END,
-            CASE WHEN pane_version='' THEN '$NIL' ELSE pane_version END,
-            CASE WHEN badge='' THEN '$NIL' ELSE badge END,
             CASE WHEN orb_server_file='' THEN '$NIL' ELSE orb_server_file END,
             CASE WHEN account='' THEN '$NIL' ELSE account END,
             CASE WHEN role='' THEN '$NIL' ELSE role END

@@ -91,7 +91,7 @@ S2=bbbbbbbb-0000-0000-0000-000000000002
 S3=cccccccc-0000-0000-0000-000000000003
 mk "$S1"; mk "$S2"; mk "$S3"
 
-row(){ printf '%s\t%s\t%s\t%s\t%s\tclaude\t<nil>\t<nil>\t<nil>\t<nil>\t<nil>' "$1" "$2" "$3" "$T/work" "$2"; }
+row(){ printf '%s\t%s\t%s\t%s\t%s\tclaude' "$1" "$2" "$3" "$T/work" "$2"; }
 RICH=$'@active\tone\n'"$(row 0 one "$S1")"$'\n'"$(row 1 two "$S2")"$'\n'"$(row 2 three "$S3")"
 POOR=$'@active\tthree\n'"$(row 0 three "$S3")"
 cockpit_layout_save "$RICH" || { echo "seed failed"; exit 1; }
