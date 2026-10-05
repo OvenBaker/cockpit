@@ -15,7 +15,7 @@ deploy moves it (the earlier `cockpit-<sha>` directories were abandoned for exac
   sets hooks or binds is tested on a scratch server first (`tmux -L <name>` with `COCKPIT_TMUX` and
   `COCKPIT_SESSION` exported, as `cockpit-ws fit` was).
 - **Keep it scrubbed.** No build outputs or generated files here (`git clean -ndx` stays empty).
-- `cockpit-core` and `cockpit-select` are separately compiled binaries in `~/.local/bin` and are not part
+- `cockpit-select` is a separately compiled binary in `~/.local/bin` and is not part
   of a cockpit deploy.
 
 ## Delivery workflow

@@ -1,4 +1,0 @@
-{
-  "compilerOptions": {"strict": true, "noEmit": true, "target": "ES2022"},
-  "include": ["protocol/v1.generated.ts"]
-}

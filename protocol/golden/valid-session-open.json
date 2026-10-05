@@ -1,1 +1,0 @@
-{"jsonrpc":"2.0","id":"open","method":"session.open","params":{"protocol":"1.0","clientId":"it-local","claimedProfile":"local-operator","credential":"test-local"}}

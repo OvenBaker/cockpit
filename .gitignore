@@ -4,5 +4,4 @@
 .DS_Store
 
 # build outputs (`go build ./cmd/...` writes into cwd)
-/cockpit-core
 /cockpit-select

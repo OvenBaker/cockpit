@@ -242,11 +242,10 @@ The label hugs the left; status + time hug the right.
 [santa](https://github.com/OvenBaker/santa) for session metadata and the
 `--santa` picker. Designed for WSL + Windows Terminal.
 
-The Go binaries build from this repo with the standard toolchain and no third-party
+The one Go binary builds from this repo with the standard toolchain and no third-party
 dependencies beyond `golang.org/x/sys`:
 
 ```
-go build -o ~/.local/bin/cockpit-core   ./cmd/cockpit-core
 go build -o ~/.local/bin/cockpit-select ./cmd/cockpit-select
 ```
 

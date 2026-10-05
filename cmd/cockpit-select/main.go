@@ -7,11 +7,8 @@
 // pane id, and cannot tell a workspace from a directory — the caller formats rows, the caller
 // makes the single mutation.
 //
-// That split is deliberate rather than minimal. ADR-001 makes cockpit-core the one process that
-// drives `tmux -L cockpit`, and names "each caller still needs tmux credentials, expanding the
-// mutation boundary" as the cost to avoid. A picker that only chooses never joins that boundary,
-// so when pane.move / pane.spawn land on the control socket the calling script swaps one tmux
-// call for one ctl call and this binary is untouched.
+// That split is deliberate: the caller formats rows and makes the single mutation, so the
+// binary stays a pure chooser.
 //
 // Keys mirror `santa tui` (Santa.Cli/Tui/TuiApp.cs) so the two tools share one set of reflexes:
 // ↑/↓ move, PgUp/PgDn ±10, Home/End, "/" enters filter mode, Enter commits, Esc cancels.
