@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Cockpit's pane menu, with Explorer actions for the filesystem link clicked."""
+import argparse
+import base64
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import unicodedata
+from urllib.parse import unquote, urlsplit
+
+HERE = Path(__file__).resolve().parent
+
+
+def hovered_word(line, column):
+    # tmux's mouse_word splits on slashes by default. Read the whitespace-delimited
+    # token at the clicked cell instead, accounting for wide/combining characters.
+    cell = 0
+    for index, char in enumerate(line):
+        width = 0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1
+        if cell <= column < cell + width:
+            for match in re.finditer(r'\S+', line):
+                if match.start() <= index < match.end():
+                    return match.group()
+            return ''
+        cell += width
+    return ''
+
+
+def filesystem_path(text, cwd):
+    """Resolve OSC 8 targets or printed paths; ordinary web links are not files."""
+    if not text:
+        return None
+    if text.lower().startswith('file:'):
+        url = urlsplit(text)
+        text = unquote(url.path)
+        if url.netloc.lower() in ('wsl.localhost', 'wsl$'):
+            distro, _, text = text.lstrip('/').partition('/')
+            if distro.lower() != os.environ.get('WSL_DISTRO_NAME', '').lower():
+                return None
+            text = '/' + text
+        elif url.netloc and url.netloc.lower() != 'localhost':
+            return None
+        if re.match(r'^/[a-zA-Z]:/', text):
+            text = text[1:]
+    elif re.match(r'^[a-zA-Z][\w+.-]*:', text) and not re.match(r'^[a-zA-Z]:[\\/]', text):
+        return None
+    else:
+        text = text.lstrip('"\'`([').rstrip('"\'`')
+        if not (text.startswith(('/', '~/', './', '../', '\\\\')) or re.match(r'^[a-zA-Z]:[\\/]', text)):
+            return None
+    if re.match(r'^[a-zA-Z]:[\\/]', text) or text.startswith('\\\\'):
+        text = subprocess.check_output(['wslpath', '-u', text], text=True).rstrip('\r\n')
+    path = Path(os.path.expanduser(text))
+    if not path.is_absolute():
+        path = Path(cwd) / path
+    # Prefer the literal filename; only then remove a compiler-style line/column suffix.
+    if not path.exists():
+        path = Path(re.sub(r':\d+(?::\d+)?$', '', str(path).rstrip('.,;)')))
+    return path.absolute() if path.exists() else None
+
+
+def open_explorer(path):
+    windows = subprocess.check_output(['wslpath', '-w', str(path)], text=True).rstrip('\r\n')
+    explorer = shutil.which('explorer.exe') or '/mnt/c/Windows/explorer.exe'
+    args = [explorer, windows] if path.is_dir() else [explorer, '/select,', windows]
+    # Explorer may return 1 after handing the request to its already-running process.
+    subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def pane_items():
+    # Keep these commands in tmux's format language so pane/window state is current.
+    return [
+        '#{?window_zoomed_flag,Unzoom,Zoom}', 'z', 'resize-pane -Z',
+        '#{?#{==:#{window-size},manual},Full width,Half width}', 'w', f'run-shell "{HERE}/cockpit-ws toggle #{{window_id}}"',
+        'Kill (undoable)', 'k', f'confirm-before -p "kill pane #{{pane_index}}? (y/n)" "run-shell \\"{HERE}/cockpit-pane remove\\""',
+        'Restart', 'r', f'confirm-before -p "restart pane #{{pane_index}}? (y/n)" "run-shell \\"{HERE}/cockpit-restart \'#{{pane_id}}\'\\""',
+        'Move to next ws', 'm', f'run-shell "{HERE}/cockpit-move next"',
+        'Swap up', 'u', 'swap-pane -U',
+        'Swap down', 'd', 'swap-pane -D',
+    ]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--socket', required=True)
+    parser.add_argument('--client', required=True)
+    parser.add_argument('--pane')
+    parser.add_argument('--link', default='')
+    parser.add_argument('--word', default='')
+    parser.add_argument('--line', default='')
+    parser.add_argument('--left', type=int, default=0)
+    parser.add_argument('--cwd', default=os.getcwd())
+    parser.add_argument('--x', default='C')
+    parser.add_argument('--y', default='C')
+    parser.add_argument('--open', dest='encoded_path')
+    args = parser.parse_args()
+    tmux = ['tmux', '-S', args.socket]
+    try:
+        if args.encoded_path:
+            path = Path(os.fsdecode(base64.urlsafe_b64decode(args.encoded_path)))
+            if not path.exists():
+                raise ValueError('The file or directory no longer exists')
+            open_explorer(path)
+            return
+        # An explicit hyperlink wins even when its label resembles a local path.
+        word = hovered_word(args.line, int(args.x) - args.left) if args.line else args.word
+        path = filesystem_path(args.link or word, args.cwd)
+        items = []
+        if path is not None:
+            # A token avoids shell and tmux-format interpretation of the actual filename.
+            token = base64.urlsafe_b64encode(os.fsencode(path)).decode()
+            command = shlex.join([str(HERE / 'cockpit-pane-menu'), '--socket', args.socket,
+                                  '--client', args.client, '--open', token])
+            items += ['Open in Explorer', 'e', 'run-shell ' + shlex.quote(command), '']
+        subprocess.run(tmux + ['display-menu', '-O', '-M', '-c', args.client, '-t', args.pane,
+                              '-T', '#[align=centre] pane #{pane_index} ', '-x', args.x, '-y', args.y]
+                       + items + pane_items(), check=True)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        subprocess.run(tmux + ['display-message', '-c', args.client,
+                              'cockpit: Explorer/menu: ' + str(error)], check=False)
+
+
+if __name__ == '__main__':
+    main()

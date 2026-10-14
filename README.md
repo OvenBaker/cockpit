@@ -221,6 +221,7 @@ The label hugs the left; status + time hug the right.
 | `Alt-1`…`9` | jump to pane N |
 | `Alt-Tab` | next attention-worthy pane (needs-input > just-finished > working) |
 | `Alt-z` | zoom / unzoom the active pane |
+| right-click a filesystem link → *Open in Explorer* | open a directory, or select a file in its containing folder (WSL / Windows) |
 | right-click → *Half width / Full width* | flip the solo fit for a one-pane workspace (`COCKPIT_SOLO_WIDTH`, default 50; 0 disables) |
 | `Alt-i` | collapse idle panes / restore |
 | `Alt-r` | retarget pane → pick a dormant session |

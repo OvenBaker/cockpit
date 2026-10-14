@@ -241,14 +241,10 @@ apply_chrome() {
   # to pick up a freshly released provider binary; #{pane_id} in a display-menu bound via -t = resolves to
   # the pane under the mouse, not the one that happened to be focused). Zoom/Move/Swap are non-destructive
   # and stay unconfirmed.
-  $TMUX bind -n MouseDown3Pane select-pane -t = '\;' display-menu -T "#[align=centre] pane #{pane_index} " -x M -y M \
-    "#{?window_zoomed_flag,Unzoom,Zoom}" z "resize-pane -Z" \
-    "#{?#{==:#{window-size},manual},Full width,Half width}" w "run-shell \"$HERE/cockpit-ws toggle #{window_id}\"" \
-    "Kill (undoable)" k "confirm-before -p \"kill pane #{pane_index}? (y/n)\" \"run-shell \\\"$HERE/cockpit-pane remove\\\"\"" \
-    "Restart"         r "confirm-before -p \"restart pane #{pane_index}? (y/n)\" \"run-shell \\\"$HERE/cockpit-restart '#{pane_id}'\\\"\"" \
-    "Move to next ws" m "run-shell \"$HERE/cockpit-move next\"" \
-    "Swap up"         u "swap-pane -U" \
-    "Swap down"       d "swap-pane -D"
+  # Capture mouse formats before opening the menu. q: quotes terminal-supplied text
+  # for this one shell invocation; the helper passes menu arguments directly to tmux.
+  $TMUX bind -n MouseDown3Pane select-pane -t = '\;' run-shell \
+    "\"$HERE/cockpit-pane-menu\" --socket=#{q:socket_path} --client=#{q:client_name} --pane=#{q:pane_id} --link=#{q:mouse_hyperlink} --word=#{q:mouse_word} --line=#{q:mouse_line} --left=#{pane_left} --cwd=#{q:pane_current_path} --x=#{mouse_x} --y=#{mouse_y}"
   # Workspace menu on right-clicking a tab. Same shape of guard as the pane menu: the one destructive
   # entry (Close) is behind `confirm-before` AND routes through cockpit-ws's 10s soft-close, so it is
   # doubly recoverable — y/n first, then Alt-u for the ten seconds after. Everything else here (switch,
