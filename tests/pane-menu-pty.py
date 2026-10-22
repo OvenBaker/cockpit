@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import struct
@@ -27,7 +28,8 @@ with tempfile.TemporaryDirectory() as tmp:
     converter = tmp / 'wslpath'
     converter.write_text('#!/usr/bin/env python3\nimport sys\nprint("C:/test" + sys.argv[-1])\n')
     converter.chmod(0o755)
-    env = dict(os.environ, PATH=str(tmp) + ':' + os.environ['PATH'], TERM='xterm-256color', TMUX='')
+    env = dict(os.environ, PATH=str(tmp) + ':' + os.environ['PATH'], TERM='xterm-256color', TMUX='',
+               COCKPIT_TMUX='tmux -S ' + socket, COCKPIT_SESSION='cockpit', COCKPIT_SOLO_WIDTH='0')
     def tm(*args):
         return subprocess.check_output(['tmux', '-S', socket, *args], env=env, text=True).strip()
     pid = None
@@ -101,7 +103,43 @@ with tempfile.TemporaryDirectory() as tmp:
         os.write(fd, b'z')
         time.sleep(.7)
         assert tm('display-message', '-p', '#{pane_id} #{window_zoomed_flag}') == '%0 1'
-        print('PASS: actual mouse binding resolves OSC 8 target intact, launches Explorer selection, hides action for web links, recognises printed directory paths, preserves kill/restart confirmations, and zooms the clicked pane')
+        tm('resize-pane', '-Z', '-t', '%0')
+        tm('respawn-pane', '-k', '-t', '%1', str(writer))
+        time.sleep(.7)
+        left = int(tm('display-message', '-p', '-t', '%1', '#{pane_left}'))
+        # A printed path in the RIGHT pane must be recognised and the menu must
+        # appear beside that click, rather than at the same column in the left pane.
+        x = left + 4  # SGR coordinates are one-based.
+        os.write(fd, f'\033[<2;{x};3M\033[<2;{x};3m'.encode())
+        screen = read_until(b'Swap down')
+        positions = re.findall(rb'\x1b\[(\d+);(\d+)H(?=\xe2\x94\x8c)', screen)
+        assert positions and int(positions[-1][1]) == x, (left, positions)
+        assert b'Open in Explorer' in screen, screen
+        os.write(fd, b'\033')
+        time.sleep(.7)
+        # Exercise nonzero row AND column origins with Cockpit's normal status
+        # line and pane title borders, including a labelled file hyperlink.
+        tm('set', '-g', 'status', 'on')
+        tm('set', '-g', 'pane-border-status', 'top')
+        tm('split-window', '-v', '-t', '%1', str(writer))
+        time.sleep(.7)
+        left, top = map(int, tm('display-message', '-p', '-t', '%2', '#{pane_left} #{pane_top}').split())
+        assert left > 0 and top > 0
+        for row, expected in ((1, ['/select,', windows]), (3, ['C:/test' + str(tmp)])):
+            x, y = left + 4, top + row
+            os.write(fd, f'\033[<2;{x};{y}M\033[<2;{x};{y}m'.encode())
+            screen = read_until(b'Swap down')
+            positions = re.findall(rb'\x1b\[(\d+);(\d+)H(?=\xe2\x94\x8c)', screen)
+            assert positions and int(positions[-1][1]) == x and int(positions[-1][0]) > 1, positions
+            assert b'Open in Explorer' in screen, screen
+            logfile.unlink()
+            os.write(fd, b'e')
+            deadline = time.monotonic() + 5
+            while not logfile.exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            assert json.loads(logfile.read_text()) == expected
+            time.sleep(.7)
+        print('PASS: filesystem actions and menu placement in left, right and lower-right panes; labelled links, printed paths, confirmations and clicked-pane actions')
     finally:
         subprocess.run(['tmux', '-S', socket, 'kill-server'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if fd is not None:

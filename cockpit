@@ -244,7 +244,7 @@ apply_chrome() {
   # Capture mouse formats before opening the menu. q: quotes terminal-supplied text
   # for this one shell invocation; the helper passes menu arguments directly to tmux.
   $TMUX bind -n MouseDown3Pane select-pane -t = '\;' run-shell \
-    "\"$HERE/cockpit-pane-menu\" --socket=#{q:socket_path} --client=#{q:client_name} --pane=#{q:pane_id} --link=#{q:mouse_hyperlink} --word=#{q:mouse_word} --line=#{q:mouse_line} --left=#{pane_left} --cwd=#{q:pane_current_path} --x=#{mouse_x} --y=#{mouse_y}"
+    "\"$HERE/cockpit-pane-menu\" --socket=#{q:socket_path} --client=#{q:client_name} --pane=#{q:pane_id} --link=#{q:mouse_hyperlink} --word=#{q:mouse_word} --line=#{q:mouse_line} --left=#{pane_left} --top=#{pane_top} --cwd=#{q:pane_current_path} --x=#{mouse_x} --y=#{mouse_y}"
   # Workspace menu on right-clicking a tab. Same shape of guard as the pane menu: the one destructive
   # entry (Close) is behind `confirm-before` AND routes through cockpit-ws's 10s soft-close, so it is
   # doubly recoverable — y/n first, then Alt-u for the ten seconds after. Everything else here (switch,

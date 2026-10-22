@@ -46,10 +46,13 @@ with tempfile.TemporaryDirectory() as tmp:
             want = ['explorer.exe'] + ([] if path.is_dir() else ['/select,']) + ['C:\\Documents\\report.txt']
             assert launch.call_args.args[0] == want
     args = ['cockpit-pane-menu', '--socket', '/tmp/test', '--client', '/dev/pts/test',
-            '--pane', '%1', '--link', file.as_uri(), '--cwd', tmp, '--x', '10', '--y', '4']
+            '--pane', '%1', '--link', file.as_uri(), '--cwd', tmp, '--x', '10', '--y', '4',
+            '--left', '51', '--top', '16']
     with patch('sys.argv', args), patch.object(subprocess, 'run') as run:
         menu.main()
         call = run.call_args.args[0]
+        assert call[call.index('-x') + 1] == '61'
+        assert call[call.index('-y') + 1] == '20'
         assert 'Open in Explorer' in call
         command = call[call.index('Open in Explorer') + 2]
         shell = shlex.split(command)[1]

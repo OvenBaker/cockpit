@@ -92,9 +92,10 @@ def main():
     parser.add_argument('--word', default='')
     parser.add_argument('--line', default='')
     parser.add_argument('--left', type=int, default=0)
+    parser.add_argument('--top', type=int, default=0)
     parser.add_argument('--cwd', default=os.getcwd())
-    parser.add_argument('--x', default='C')
-    parser.add_argument('--y', default='C')
+    parser.add_argument('--x', type=int, default=0)
+    parser.add_argument('--y', type=int, default=0)
     parser.add_argument('--open', dest='encoded_path')
     args = parser.parse_args()
     tmux = ['tmux', '-S', args.socket]
@@ -105,8 +106,10 @@ def main():
                 raise ValueError('The file or directory no longer exists')
             open_explorer(path)
             return
+        # mouse_x/y are relative to the pane. Use that column for its text,
+        # and add the pane's origin only when placing the menu on the screen.
+        word = hovered_word(args.line, args.x) if args.line else args.word
         # An explicit hyperlink wins even when its label resembles a local path.
-        word = hovered_word(args.line, int(args.x) - args.left) if args.line else args.word
         path = filesystem_path(args.link or word, args.cwd)
         items = []
         if path is not None:
@@ -116,7 +119,8 @@ def main():
                                   '--client', args.client, '--open', token])
             items += ['Open in Explorer', 'e', 'run-shell ' + shlex.quote(command), '']
         subprocess.run(tmux + ['display-menu', '-O', '-M', '-c', args.client, '-t', args.pane,
-                              '-T', '#[align=centre] pane #{pane_index} ', '-x', args.x, '-y', args.y]
+                              '-T', '#[align=centre] pane #{pane_index} ',
+                              '-x', str(args.left + args.x), '-y', str(args.top + args.y)]
                        + items + pane_items(), check=True)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         subprocess.run(tmux + ['display-message', '-c', args.client,
