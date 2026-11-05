@@ -278,7 +278,12 @@ cockpit_account_check() {
     "$COCKPIT_PROFILE_TOOL" --account "${1:-default}" check
   fi
 }
+# The poller resolves every pane's transcript, and each lookup asked claude-profile (a ~60 ms Python start) for
+# the account roots: with ~60 Claude panes that was most of a CPU core on a two-second cycle. A long-running
+# caller sets _CK_ROOTS from one call and refreshes it on its own slow timer; everyone else runs it live.
+_CK_ROOTS=""
 cockpit_project_roots() {
+  [[ -n "$_CK_ROOTS" ]] && { printf '%s\n' "$_CK_ROOTS"; return 0; }
   printf '%s\n' "$PROJECTS_DIR"
   # Explicit PROJECTS_DIR overrides remain isolated (including scratch-server tests).
   [[ "$PROJECTS_DIR" == "$HOME/.claude/projects" ]] || return 0
@@ -841,14 +846,16 @@ cockpit_seed_update() {       # $1 = path, $2 = jq filter, rest = jq args
 # --- session selection ------------------------------------------------------
 
 # Encode a cwd to its ~/.claude/projects directory name (Claude replaces / and . with -)
-encode_project_dir() { echo "$1" | sed 's#[/.]#-#g'; }
+# (pure bash: the poller runs this for every pane every cycle, and echo|sed cost two processes each time)
+encode_project_dir() { local s="${1//\//-}"; printf '%s\n' "${s//./-}"; }
 
 # Path to a session's JSONL transcript, given id + cwd.
 session_jsonl() {
   local id="$1" cwd="$2"
-  local root enc hit
+  local root enc hit dir="${2//\//-}"
+  dir="${dir//./-}"                   # encode_project_dir, without a subshell per root
   while IFS= read -r root; do
-    enc="$root/$(encode_project_dir "$cwd")/$id.jsonl"
+    enc="$root/$dir/$id.jsonl"
     [[ -f "$enc" ]] && { printf '%s' "$enc"; return; }
     hit=$(find "$root" -maxdepth 2 -name "$id.jsonl" 2>/dev/null | head -1)
     [[ -n "$hit" ]] && { printf '%s' "$hit"; return; }
@@ -1024,28 +1031,56 @@ cockpit_adopt() {
 classify_state() {
   local jsonl="$1"
   [[ -f "$jsonl" ]] || { echo dead; return; }
-  local now mtime age last stop wants_tool has_result
+  local now mtime
   now=$(date +%s); mtime=$(stat -c %Y "$jsonl" 2>/dev/null || echo 0)
-  age=$(( now - mtime ))
-  last=$(tail -1 "$jsonl" 2>/dev/null)
-  stop=$(jq -r '.message.stop_reason // ""' <<<"$last" 2>/dev/null)
-  wants_tool=$(jq -r '[.message.content[]? | select(.type=="tool_use")] | length>0' <<<"$last" 2>/dev/null)
-  has_result=$(jq -r 'if .type=="user" then ([.message.content[]? | select(.type=="tool_result")] | length>0) else false end' <<<"$last" 2>/dev/null)
+  agent_state claude "$(agent_facts claude "$jsonl")" $(( now - mtime ))
+  echo "$CK_STATE"
+}
 
-  # finished turn — assistant is done, waiting on the human → idle (even if the
-  # mtime is fresh from a resume rewrite).
-  if [[ "$stop" == "end_turn" || "$stop" == "stop_sequence" ]]; then echo idle; return; fi
-  # tool/permission requested, no result yet: a turn IS in progress. Stay
-  # 'working' through normal tool runs and thinking pauses; only flag
-  # needs-input once it's been quiet long enough to look genuinely blocked.
-  if [[ "$stop" == "tool_use" || "$wants_tool" == "true" ]] && [[ "$has_result" != "true" ]]; then
-    (( age >= ${COCKPIT_NEEDS_SECS:-25} )) && echo needs-input || echo working
-    return
+# Classification is split in two so the poller can skip re-reading a transcript that has not changed:
+# agent_facts reads what the state depends on, and agent_state decides from those facts plus the transcript's
+# age, which keeps moving while the file stands still (needs-input after COCKPIT_NEEDS_SECS, settled after
+# COCKPIT_WORKING_SECS).
+#   claude: "stop_reason|wants_tool|has_result" from the last line, in one jq instead of three. The separator is
+#           not whitespace, so an empty stop reason cannot shift the later fields when read back.
+#   codex:  the most recent turn boundary (see classify_codex).
+agent_facts() {  # agent jsonl
+  case "$1" in
+    codex) { tac "$2" 2>/dev/null | grep -m1 -oE '"(task_started|task_complete|turn_aborted)"' | tr -d '"'; } || true;;
+    *) tail -1 "$2" 2>/dev/null | jq -r '[(.message.stop_reason // ""),
+         ([.message.content[]? | select(.type=="tool_use")] | length>0),
+         (if .type=="user" then ([.message.content[]? | select(.type=="tool_result")] | length>0) else false end)
+       ] | map(tostring) | join("|")' 2>/dev/null;;
+  esac
+}
+
+# The state for those facts at a given age, in CK_STATE: a variable rather than output, so the poller decides
+# for every pane on every cycle without a subshell.
+agent_state() {  # agent facts age
+  local stop wants_tool has_result age="$3"
+  if [[ "$1" == codex ]]; then
+    case "$2" in
+      task_started)               CK_STATE=working; return;;
+      task_complete|turn_aborted) CK_STATE=idle; return;;
+    esac
+  else
+    IFS='|' read -r stop wants_tool has_result <<<"$2"
+    # finished turn — assistant is done, waiting on the human → idle (even if the
+    # mtime is fresh from a resume rewrite).
+    if [[ "$stop" == "end_turn" || "$stop" == "stop_sequence" ]]; then CK_STATE=idle; return; fi
+    # tool/permission requested, no result yet: a turn IS in progress. Stay
+    # 'working' through normal tool runs and thinking pauses; only flag
+    # needs-input once it's been quiet long enough to look genuinely blocked.
+    if [[ "$stop" == "tool_use" || "$wants_tool" == "true" ]] && [[ "$has_result" != "true" ]]; then
+      (( age >= ${COCKPIT_NEEDS_SECS:-25} )) && CK_STATE=needs-input || CK_STATE=working
+      return
+    fi
   fi
-  # mid-turn (partial message / tool result just landed): 'working' while
-  # recently written, else settled. The window is wide (COCKPIT_WORKING_SECS)
-  # so streaming/thinking gaps don't flip green↔blue on an active pane.
-  (( age < ${COCKPIT_WORKING_SECS:-12} )) && echo working || echo idle
+  # mid-turn (partial message / tool result just landed), or a Codex rollout with
+  # no turn boundary yet: 'working' while recently written, else settled. The
+  # window is wide (COCKPIT_WORKING_SECS) so streaming/thinking gaps don't flip
+  # green↔blue on an active pane.
+  (( age < ${COCKPIT_WORKING_SECS:-12} )) && CK_STATE=working || CK_STATE=idle
 }
 
 # Seconds since last transcript activity (for "idle 6m" labels)
@@ -1078,15 +1113,11 @@ agent_transcript() {
 # "awaiting approval" event, so there's no reliable needs-input signal and we
 # never flag it — a long pending function_call is a running tool, not a block.
 classify_codex() {
-  local j="$1" now mtime age lt
+  local j="$1" now mtime
   [[ -f "$j" ]] || { echo dead; return; }
-  now=$(date +%s); mtime=$(stat -c %Y "$j" 2>/dev/null || echo 0); age=$(( now - mtime ))
-  lt=$(tac "$j" 2>/dev/null | grep -m1 -oE '"(task_started|task_complete|turn_aborted)"' | tr -d '"') || true
-  case "$lt" in
-    task_started)               echo working; return;;
-    task_complete|turn_aborted) echo idle; return;;
-  esac
-  (( age < ${COCKPIT_WORKING_SECS:-12} )) && echo working || echo idle   # no turn boundary yet
+  now=$(date +%s); mtime=$(stat -c %Y "$j" 2>/dev/null || echo 0)
+  agent_state codex "$(agent_facts codex "$j")" $(( now - mtime ))
+  echo "$CK_STATE"
 }
 
 agent_classify() { case "$1" in codex) classify_codex "$2";; *) classify_state "$2";; esac; }

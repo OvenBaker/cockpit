@@ -39,7 +39,21 @@ declare -A PREV_WCOUNT # window_id -> last pane count (re-tile that window on ch
 declare -A LASTWS     # window_id -> last @ws_badge written (workspace tab colour)
 declare -A ADOPTED    # session id -> already claimed by a pane (Alt-N new sessions)
 declare -A LASTACT    # pane_id -> last @activity_at written (skip redundant writes)
+declare -A TPATH      # agent|session|cwd|account -> resolved transcript path
+declare -A STAT       # transcript path -> "mtime size", from one stat call per cycle
+declare -A FACTKEY    # pane_id -> "path mtime size" the cached FACTS were read at
+declare -A FACTS      # pane_id -> agent_facts of its transcript (re-read only when the file changes)
+declare -A TITLE      # session id -> santa's title this refresh
+declare -A CLEAN      # raw santa title -> ck_clean_label of it
 prev_counts=""        # last @active/@finished/@idle trio written (skip no-op status writes)
+# CPU budget: with ~75 panes the poller used to cost most of a core, because every pane on every cycle
+# re-resolved its transcript (a Python start for the account roots, a `find` over every Codex rollout),
+# re-parsed its last line with three jq runs, and forked a dozen subshells. Now transcript paths are cached
+# per (agent, session, cwd, account), so an account switch or a cwd restamp resolves afresh; a path is dropped
+# when its file vanishes, and all of them when the account roots change (re-checked on this timer, so a new
+# account shows within a minute). One stat per cycle covers every transcript, a transcript is re-read only
+# when its mtime or size moves, and the helpers below set variables instead of echoing into $(…).
+RESOLVE_EVERY="${COCKPIT_RESOLVE_SECS:-60}"; next_resolve=0
 # Labels are stamped once at pane creation, often from a fallback (first prompt)
 # before santa has summarised the session. Re-query the DB occasionally
 # and upgrade the @label when a better title lands — throttled, not every cycle.
@@ -51,7 +65,7 @@ next_titles=0
 # can't pass through -F. Fix: tab-separate but emit a <nil> token for any blank
 # field so nothing is ever empty (→ no collapse), then restore "" after reading.
 TAB=$'\t'; NIL='<nil>'
-PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@born,#{@born},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@hook_state,#{@hook_state},$NIL}${TAB}#{?@hook_at,#{@hook_at},$NIL}${TAB}#{?@state,#{@state},$NIL}"
+PANE_FMT="#{window_id}${TAB}#{pane_id}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@born,#{@born},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@hook_state,#{@hook_state},$NIL}${TAB}#{?@hook_at,#{@hook_at},$NIL}${TAB}#{?@state,#{@state},$NIL}${TAB}#{?@account,#{@account},$NIL}"
 # How long an event-driven hook state (set by cockpit-hook) is trusted before we
 # fall back to tail-parsing the transcript. Active sessions refresh @hook_at on
 # every event, so this only bounds how long a stale state lingers after a missed
@@ -69,54 +83,86 @@ cockpit_layout_init
 # per-pane border-style on a shared edge is ambiguous and flips on every redraw
 # (the "all borders cycling" bug). The top status line is per-pane, so colouring
 # it is unambiguous. Box borders stay a uniform neutral grey (set in apply_chrome).
-color() { case "$1" in
-  working)      echo '#[fg=colour41]';;      # green
-  just-finished)echo '#[fg=colour39,bold]';; # blue
-  needs-input)  echo '#[fg=colour196,bold]';;# red
-  idle)         echo '#[fg=colour245]';;     # dim
-  *)            echo '#[fg=colour245]';; esac; }
+# Each helper below sets the variable named in its comment rather than echoing:
+# they run per pane per cycle, and every $(…) around them was a forked subshell.
+color() { case "$1" in                       # → _COLOR
+  working)      _COLOR='#[fg=colour41]';;      # green
+  just-finished)_COLOR='#[fg=colour39,bold]';; # blue
+  needs-input)  _COLOR='#[fg=colour196,bold]';;# red
+  idle)         _COLOR='#[fg=colour245]';;     # dim
+  *)            _COLOR='#[fg=colour245]';; esac; }
 
 # compact duration so long idles roll over instead of reading "180m"/"2880m"
-dur() { local s=$1
-  (( s < 60 ))    && { echo "${s}s"; return; }
-  (( s < 3600 ))  && { echo "$((s/60))m"; return; }
-  (( s < 86400 )) && { echo "$((s/3600))h"; return; }
-  echo "$((s/86400))d"; }
+dur() { local s=$1                           # → _DUR
+  if   (( s < 60 ));    then _DUR="${s}s"
+  elif (( s < 3600 ));  then _DUR="$((s/60))m"
+  elif (( s < 86400 )); then _DUR="$((s/3600))h"
+  else                       _DUR="$((s/86400))d"; fi; }
 
-badge() { local s="$1" t; t=$(dur "$2")
-  case "$s" in
-    working)      echo "⠿ working";;
-    just-finished)echo "✓ done $t";;
-    needs-input)  echo "◉ NEEDS INPUT";;
-    idle)         echo "○ idle $t";;
-    *)            echo "…";; esac; }
+badge() { dur "$2"                           # → _BADGE
+  case "$1" in
+    working)      _BADGE="⠿ working";;
+    just-finished)_BADGE="✓ done $_DUR";;
+    needs-input)  _BADGE="◉ NEEDS INPUT";;
+    idle)         _BADGE="○ idle $_DUR";;
+    *)            _BADGE="…";; esac; }
 
 # attention priority for a workspace tab: needs-input > just-finished > working > idle
-rank() { case "$1" in needs-input) echo 3;; just-finished) echo 2;; working) echo 1;; *) echo 0;; esac; }
-worst() { (( $(rank "$1") >= $(rank "$2") )) && echo "$1" || echo "$2"; }
+rank() { case "$1" in needs-input) _RANK=3;; just-finished) _RANK=2;; working) _RANK=1;; *) _RANK=0;; esac; }
+worst() { local a; rank "$1"; a=$_RANK; rank "$2"   # → _WORST
+  (( a >= _RANK )) && _WORST="$1" || _WORST="$2"; }
 # colour the workspace NAME by its worst pane state (a #[fg=…] directive)
-ws_color() { case "$1" in
-  needs-input)  echo '#[fg=colour196,bold]';;
-  just-finished)echo '#[fg=colour39,bold]';;
-  working)      echo '#[fg=colour41]';;
-  *)            echo '#[fg=colour245]';; esac; }
+ws_color() { case "$1" in                    # → _WSCOLOR
+  needs-input)  _WSCOLOR='#[fg=colour196,bold]';;
+  just-finished)_WSCOLOR='#[fg=colour39,bold]';;
+  working)      _WSCOLOR='#[fg=colour41]';;
+  *)            _WSCOLOR='#[fg=colour245]';; esac; }
 
 while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
   # the pane/window the user is actually looking at
-  active_pane=$($TMUX display -p -t "$COCKPIT_SESSION" '#{pane_id}' 2>/dev/null)
-  active_win=$($TMUX display -p -t "$COCKPIT_SESSION" '#{window_id}' 2>/dev/null)
+  ids=$($TMUX display -p -t "$COCKPIT_SESSION" '#{pane_id} #{window_id}' 2>/dev/null)
+  active_pane="${ids% *}"; active_win="${ids#* }"
   # decide once per cycle whether titles are due for a refresh
-  now=$(date +%s); do_titles=0
+  printf -v now '%(%s)T' -1; do_titles=0
   if (( now >= next_titles )); then do_titles=1; next_titles=$((now + TITLE_REFRESH)); fi
+  if (( now >= next_resolve )); then
+    next_resolve=$((now + RESOLVE_EVERY)); CLEAN=()
+    roots=$(_CK_ROOTS=""; cockpit_project_roots)   # one claude-profile run per refresh, not one per pane
+    [[ "$roots" == "$_CK_ROOTS" ]] || { _CK_ROOTS="$roots"; TPATH=(); }
+  fi
+  mapfile -t ROWS < <($TMUX list-panes -s -t "$COCKPIT_SESSION" -F "$PANE_FMT" 2>/dev/null)
+
+  # One stat for every transcript already resolved. A path missing from STAT has
+  # vanished (or is new) and is resolved and stat'ed on its own in the loop.
+  STAT=()
+  if (( ${#TPATH[@]} )); then
+    while read -r m s p; do [[ -n "$p" ]] && STAT[$p]="$m $s"; done \
+      < <(stat -c '%Y %s %n' -- "${TPATH[@]}" 2>/dev/null)
+  fi
+  # Titles for every pane's session in one sqlite3 run (newlines and tabs flattened
+  # in SQL so each row stays one line; ck_clean_label still normalises the rest).
+  if (( do_titles )); then
+    TITLE=(); idlist=""
+    for row in "${ROWS[@]}"; do
+      IFS="$TAB" read -r _ _ sid _ <<<"$row"
+      [[ -n "$sid" && "$sid" != "$NIL" ]] && idlist+="${idlist:+,}'${sid//\'/\'\'}'"
+    done
+    if [[ -n "$idlist" ]]; then
+      while IFS="$TAB" read -r id t; do [[ -n "$id" ]] && TITLE[$id]="$t"; done < <(sqlite3 -separator "$TAB" "$SANTA_DB" \
+        "SELECT id, replace(replace(replace(coalesce(nullif(summary_title,''), substr(first_user_text,1,80), ''), \
+           char(9), ' '), char(10), ' '), char(13), ' ') FROM sessions WHERE id IN ($idlist);" 2>/dev/null)
+    fi
+  fi
 
   # per-cycle, per-window tallies (workspaces = windows)
   declare -A WCOUNT=() WSTATE=()
   nA=0; nF=0; nI=0
-  while IFS="$TAB" read -r win pid sid cwd curlabel born agent hookstate hookat stateopt; do
+  for row in "${ROWS[@]}"; do
+    IFS="$TAB" read -r win pid sid cwd curlabel born agent hookstate hookat stateopt account <<<"$row"
     [[ -n "$win" ]] || continue
     [[ "$sid" == "$NIL" ]] && sid=""; [[ "$cwd" == "$NIL" ]] && cwd=""
     [[ "$curlabel" == "$NIL" ]] && curlabel=""; [[ "$born" == "$NIL" ]] && born=""
-    [[ "$agent" == "$NIL" ]] && agent=""; [[ "$hookstate" == "$NIL" ]] && hookstate=""; [[ "$hookat" == "$NIL" ]] && hookat=""; [[ "$stateopt" == "$NIL" ]] && stateopt=""
+    [[ "$agent" == "$NIL" ]] && agent=""; [[ "$hookstate" == "$NIL" ]] && hookstate=""; [[ "$hookat" == "$NIL" ]] && hookat=""; [[ "$stateopt" == "$NIL" ]] && stateopt=""; [[ "$account" == "$NIL" ]] && account=""
     WCOUNT[$win]=$(( ${WCOUNT[$win]:-0} + 1 ))
     [[ "$agent" == claude || "$agent" == codex ]] || continue
     if [[ -z "$sid" ]]; then
@@ -138,8 +184,15 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     # classify fallback: @activity_at (stamped below) makes "when did this pane
     # last actually produce anything" queryable, where before it survived only as
     # prose inside the badge string.
-    jsonl=$(agent_transcript "$agent" "$sid" "$cwd")
-    mtime=0; [[ -n "$jsonl" && -f "$jsonl" ]] && mtime=$(stat -c %Y "$jsonl" 2>/dev/null || echo 0)
+    tkey="$agent|$sid|$cwd|$account"; jsonl="${TPATH[$tkey]:-}"; st=""
+    [[ -n "$jsonl" ]] && st="${STAT[$jsonl]:-}"
+    if [[ -z "$st" ]]; then             # not resolved yet, or the cached file vanished
+      jsonl=$(agent_transcript "$agent" "$sid" "$cwd")
+      if [[ -n "$jsonl" && -f "$jsonl" ]]; then
+        TPATH[$tkey]="$jsonl"; st=$(stat -c '%Y %s' -- "$jsonl" 2>/dev/null) || st=""
+      fi
+    fi
+    mtime="${st% *}"; size="${st#* }"; [[ -n "$st" ]] || { mtime=0; size=0; }
     # Event-driven state (cockpit-hook) is authoritative when fresh; otherwise
     # fall back to tail-parsing the transcript (pre-hook sessions, and any missed
     # edge once the hook state goes stale). Codex is a separate contract: its only
@@ -153,8 +206,14 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
       raw=idle; age=$(( now - ${hookat:-now} ))
     elif [[ "$agent" != codex && -n "$hookstate" ]] && (( now - ${hookat:-0} <= HOOK_TTL )); then
       raw="$hookstate"; age=$(( now - ${hookat:-now} ))
+    elif [[ -z "$st" ]]; then
+      raw=dead; age=$(( now - mtime ))   # agent_classify's verdict on a missing transcript
     else
-      raw=$(agent_classify "$agent" "$jsonl"); age=$(( now - mtime ))
+      # agent_classify, minus the re-read when the transcript has not moved
+      if [[ "${FACTKEY[$pid]:-}" != "$jsonl $st" ]]; then
+        FACTS[$pid]=$(agent_facts "$agent" "$jsonl"); FACTKEY[$pid]="$jsonl $st"
+      fi
+      age=$(( now - mtime )); agent_state "$agent" "${FACTS[$pid]}" "$age"; raw="$CK_STATE"
     fi
     if [[ "${LASTACT[$pid]:-}" != "$mtime" ]]; then
       $TMUX set -p -t "$pid" @activity_at "$mtime"; LASTACT[$pid]="$mtime"
@@ -170,11 +229,11 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
 
     # Only write when the value actually changes (re-setting still forces a
     # redraw). @sc tints this pane's top line; box borders are left uniform.
-    nstyle="$(color "$state")"
+    color "$state"; nstyle="$_COLOR"
     if [[ "${LASTSTYLE[$pid]:-}" != "$nstyle" ]]; then
       $TMUX set -p -t "$pid" @sc "$nstyle"; LASTSTYLE[$pid]="$nstyle"
     fi
-    nbadge="$(badge "$state" "$age")"
+    badge "$state" "$age"; nbadge="$_BADGE"
     if [[ "${LASTBADGE[$pid]:-}" != "$nbadge" ]]; then
       $TMUX set -p -t "$pid" @badge "$nbadge"; LASTBADGE[$pid]="$nbadge"
     fi
@@ -187,10 +246,11 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
 
     # upgrade the title if santa has since produced a better one
     if (( do_titles )); then
-      t=$(sqlite3 "$SANTA_DB" \
-        "SELECT coalesce(nullif(summary_title,''), substr(first_user_text,1,80), '') \
-         FROM sessions WHERE id='$sid' LIMIT 1;" 2>/dev/null)
-      t=$(ck_clean_label "$t")    # first_user_text carries newlines/tabs — must be one line
+      t="${TITLE[$sid]:-}"
+      if [[ -n "$t" ]]; then        # first_user_text carries newlines/tabs — must be one line
+        [[ -n "${CLEAN[$t]+set}" ]] || CLEAN[$t]=$(ck_clean_label "$t")
+        t="${CLEAN[$t]}"
+      fi
       if [[ -n "$t" && "$t" != "${LASTLABEL[$pid]:-}" ]]; then   # store full; border truncates
         $TMUX set -p -t "$pid" @label "$t"; LASTLABEL[$pid]="$t"
       fi
@@ -199,12 +259,12 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     # the workspace tab takes its colour from its worst (most-attention) pane,
     # but NOT from the window you're currently looking at (you've seen it).
     if [[ "$win" != "$active_win" ]]; then
-      WSTATE[$win]=$(worst "${WSTATE[$win]:-idle}" "$state")
+      worst "${WSTATE[$win]:-idle}" "$state"; WSTATE[$win]="$_WORST"
     fi
     case "$state" in
       working|needs-input) nA=$((nA+1));; just-finished) nF=$((nF+1));; idle) nI=$((nI+1));;
     esac
-  done < <($TMUX list-panes -s -t "$COCKPIT_SESSION" -F "$PANE_FMT" 2>/dev/null)
+  done
 
   # re-tile any window whose pane count changed; colour each workspace tab
   for win in "${!WCOUNT[@]}"; do
@@ -212,7 +272,7 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
       $TMUX select-layout -t "$win" "${COCKPIT_LAYOUT:-even-horizontal}" 2>/dev/null
       PREV_WCOUNT[$win]="${WCOUNT[$win]}"
     fi
-    nws="$(ws_color "${WSTATE[$win]:-idle}")"
+    ws_color "${WSTATE[$win]:-idle}"; nws="$_WSCOLOR"
     if [[ "${LASTWS[$win]:-}" != "$nws" ]]; then
       $TMUX set -w -t "$win" @ws_badge "$nws"; LASTWS[$win]="$nws"
     fi

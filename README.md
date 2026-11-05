@@ -234,7 +234,10 @@ The label hugs the left; status + time hug the right.
 
 - `cockpit` — launcher (picker, grid build, keybinds/chrome).
 - `lib.sh` — session selection + JSONL state classification.
-- `cockpit-poller` — background daemon (singleton) painting live state onto borders.
+- `cockpit-poller` — background daemon (singleton) painting live state onto borders. It caches each
+  pane's transcript path and re-reads a transcript only when it changes, so a ~75-pane grid costs about
+  5% of a core rather than half of one; `COCKPIT_RESOLVE_SECS` (default 60) is how often it re-checks
+  the account roots for a new account. Test: `bash tests/poller-state.sh`.
 - `cockpit-pick` — numbered chooser (startup multi-select / retarget / add).
 - `cockpit-select` — shared list picker (Go) used by the popups: arrow keys, `/` to filter,
   Enter to commit, Esc to cancel. Reads TSV on stdin, prints the chosen row to stdout, and
