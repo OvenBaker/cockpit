@@ -34,10 +34,9 @@ SOCK="${COCKPIT_SOCKET_NAME:-cockpit}"
 # empty or agy may be stamped; and the Claude path below refuses agy panes, so neither provider can claim the
 # other's pane. There is no needs-input event, so an agy pane is only ever working or idle.
 agy_event() {
-  local ev="$1" input="" cid cwd owner cur T
+  local ev="$1" input="${2:-}" cid cwd owner cur T
   [[ -n "${TMUX_PANE:-}" && "${TMUX%%,*}" == */"$SOCK" ]] || return 0
   T=(tmux -L "$SOCK")
-  if [[ ! -t 0 ]]; then input=$(cat 2>/dev/null || true); fi
   owner=$("${T[@]}" display -p -t "$TMUX_PANE" '#{@agent}' 2>/dev/null || true)
   [[ -z "$owner" || "$owner" == agy ]] || return 0
   cid=""; cwd=""
@@ -60,10 +59,14 @@ agy_event() {
   return 0
 }
 case "${1:-}" in
-  agy-session-start|agy-working|agy-idle)
-    agy_event "$1" >/dev/null 2>&1 || true
+  agy-*)
+    # Always drain stdin, even outside cockpit: agy writes the payload (which carries the last prompt, so it
+    # can be large) into a pipe, and a hook that exits without reading it could fail agy's write.
+    agy_input=""; if [[ ! -t 0 ]]; then agy_input=$(cat 2>/dev/null || true); fi
+    case "$1" in
+      agy-session-start|agy-working|agy-idle) agy_event "$1" "$agy_input" >/dev/null 2>&1 || true;;
+    esac
     printf '{}\n'; exit 0;;
-  agy-*) printf '{}\n'; exit 0;;
 esac
 
 # Only act inside a cockpit pane. $TMUX = "<socket-path>,<pid>,<session>"; cockpit's
