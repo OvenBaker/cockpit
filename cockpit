@@ -30,7 +30,7 @@
 #   Alt-1..9  jump to pane        Alt-Tab  next attention-worthy pane
 #   Alt-z     zoom toggle         Alt-i    collapse/restore idle panes
 #   Alt-r     retarget pane → pick a dormant session (popup, list refreshed live)
-#   Alt-n     add a pane: resume a session         Alt-N  new claude/codex/bash in a cwd
+#   Alt-n     add a pane: resume a session         Alt-N  new claude/codex/agy/bash in a cwd
 #   Alt-m     move pane → workspace (Alt-S-←/→ shove)   Alt-x  remove the active pane
 #   Alt-s     browse santa's TUI; resume sends the session here (or jumps to it if already open)
 #   Alt-f     find sessions related to the focused pane → add one to this workspace
@@ -423,7 +423,7 @@ restore_grid() {
     [[ "$f3" == "$NIL" ]] && f3=""; [[ "$f4" == "$NIL" ]] && f4=""; [[ "$f5" == "$NIL" ]] && f5=""
     [[ "$f6" == "$NIL" ]] && f6=""
     [[ "$f7" == "$NIL" ]] && f7=""; [[ "$f8" == "$NIL" ]] && f8=""; [[ "$f9" == "$NIL" ]] && f9=""
-    [[ "$f6" == claude || "$f6" == codex ]] || f6=""
+    [[ "$f6" == claude || "$f6" == codex || "$f6" == agy ]] || f6=""
     # f8 is a Claude account NAME (never a token). A row that does not parse as one is dropped rather than
     # carried: the launch below treats "has an account" as "must resolve", so a junk value must not reach it.
     cockpit_account_name_ok "$f8" || f8=""
@@ -435,7 +435,7 @@ restore_grid() {
   n=${#W[@]}; (( n > 0 )) || return 1
   declare -A SEEN_RESUMABLE=()
   for ((i=0;i<n;i++)); do
-    if [[ ( "${A[$i]}" == claude || "${A[$i]}" == codex ) && -n "${S[$i]}" && -n "$(agent_transcript "${A[$i]}" "${S[$i]}" "${C[$i]}")" ]]; then
+    if [[ ( "${A[$i]}" == claude || "${A[$i]}" == codex || "${A[$i]}" == agy ) && -n "${S[$i]}" && -n "$(agent_transcript "${A[$i]}" "${S[$i]}" "${C[$i]}")" ]]; then
       key="${A[$i]}:${S[$i]}"
       if [[ -n "${SEEN_RESUMABLE[$key]:-}" ]]; then duplicates=$((duplicates+1))
       else SEEN_RESUMABLE[$key]=1; resumable=$((resumable+1))
@@ -474,7 +474,7 @@ restore_grid() {
         acct_ok=0; acct_reason=$(cockpit_account_check "${acct:-default}" 2>&1 >/dev/null) || true
       fi
     fi
-    [[ ( "$agent" == claude || "$agent" == codex ) && -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
+    [[ ( "$agent" == claude || "$agent" == codex || "$agent" == agy ) && -n "$sid" && -n "$(agent_transcript "$agent" "$sid" "$cwd")" ]] && issess=1
     if (( issess )); then
       key="$agent:$sid"
       [[ -n "${SEEN_LAUNCHED[$key]:-}" ]] && continue

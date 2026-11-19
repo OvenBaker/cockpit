@@ -34,7 +34,7 @@ only on change, so an ungraceful shutdown loses at most a few seconds. A plain
 `cockpit` then rebuilds that layout and resumes every session. `--kill` keeps
 the saved layout; `--fresh` ignores it.
 
-## Agents (Claude + Codex)
+## Agents (Claude + Codex + Antigravity)
 
 cockpit tracks both **Claude Code** and **Codex** sessions side by side. Each
 pane carries an `@agent` stamp; classification, the resume command, and session
@@ -46,12 +46,29 @@ discovery dispatch per provider:
 | done signal | `end_turn` | `event_msg/task_complete` |
 | resume | `claude --resume <id>` | `codex --remote ws://127.0.0.1:43129 resume <id>` |
 
-The picker, candidates, and restore merge both by recency (tagged `cl`/`cx`);
+The picker, candidates, and restore merge all agents by recency (tagged `cl`/`cx`/`ag`);
 `Alt-N` (the new-agent picker, mapped to Ctrl-Shift-N in the Windows Terminal setup) asks which agent to start.
 On its agent step, **Ctrl-B** toggles **Bypass permissions for this start only**; the checkbox starts off
 every time. Claude normal starts explicitly use auto permissions. Codex bypass starts are standalone
 because the shared remote TUI cannot accept per-start permission overrides; ordinary Codex starts
 continue to use the shared backend. This choice is not saved as a pane or workspace default.
+
+### Antigravity (`agy`)
+
+A third, lighter-weight kind for trialling Google's Antigravity CLI (display name "Antigravity", badge `ag`).
+It mirrors the Codex paths: `Alt-N` offers it, the poller tracks it, restore and `cockpit-send`/`cockpit-restart`
+resume it with `agy --conversation <id>`, and `cockpit-spawn --agent agy [--model ID] [--effort low|medium|high|xhigh|max]`
+starts one. Conversations live under `~/.gemini/antigravity-cli/` (`conversations/<id>.db`, `history.jsonl`;
+override the root with `AGY_HOME`). Its bypass toggle passes `--dangerously-skip-permissions`; otherwise no
+permission flag is passed, like a Claude spawn.
+
+State comes from agy's own hooks: `cockpit-agy-hooks install` writes a `cockpit` entry into
+`~/.gemini/config/hooks.json` (SessionStart → idle, PreInvocation → working, Stop → idle, via
+`cockpit-hook agy-…`), leaving other hooks alone; `uninstall` removes only that entry and `status` reports it.
+With a stale hook stamp the poller falls back to the conversation db's (or its `-wal`'s) modification time.
+agy has no needs-input event, so its panes are only ever working or idle. Seeded launches (`--request-id`,
+`cockpit-seed-exec`) are not supported for agy, and the phone UI shows agy panes read-only. `cockpit-search`
+does not index agy conversations.
 
 The directory list starts with the originating pane's current Git repository (or its current directory
 outside Git), then its current subdirectory and recent paths without duplicates. **Ctrl-N** opens the

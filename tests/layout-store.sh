@@ -5,7 +5,7 @@
 set -uo pipefail
 CK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 T=$(mktemp -d "${TMPDIR:-/tmp}/cklayout.XXXXXX")
-export PROJECTS_DIR="$T/projects" CODEX_SESSIONS="$T/codex"
+export PROJECTS_DIR="$T/projects" CODEX_SESSIONS="$T/codex" AGY_HOME="$T/agy"
 export COCKPIT_LAYOUT_DB="$T/layout.db"
 export COCKPIT_SESSION=cktest COCKPIT_TMUX="tmux -L cktest"
 export COCKPIT_REMOTE_CONTROL=0
@@ -58,6 +58,14 @@ ok "a vanished spec degrades to no orb, not a broken resume" \
    '[[ "$(agent_resume_inner claude "$SID" "$T/work" x "$T/gone.json")" == "$(agent_resume_inner claude "$SID" "$T/work" x)" ]]'
 ok "an invalid spec is refused, not passed through" \
    'printf "{\"command\":\"not-absolute\"}" > "$T/bad.json"; [[ "$(agent_resume_inner claude "$SID" "$T/work" x "$T/bad.json")" == "$(agent_resume_inner claude "$SID" "$T/work" x)" ]]'
+ok "agy resume uses --conversation from the recorded cwd" \
+   '[[ "$(agent_resume_inner agy 019f-abc "$T/work/sub" x)" == "cd $T/work/sub && exec agy --conversation 019f-abc" ]]'
+ok "agy resume survives the keep-pane wrapper without exec" \
+   'cockpit_keep_pane_on_failure "$(agent_resume_inner agy 019f-abc "$T/work" x)" | grep -q "&& agy --conversation 019f-abc; rc=\$?"'
+ok "agy model argv carries --model/--effort" \
+   '[[ "$(cockpit_model_argv agy m1 max | tr "\n" " ")" == "--model m1 --effort max " ]]'
+ok "max is an agy-only effort" \
+   'cockpit_effort_ok max agy && ! cockpit_effort_ok max claude && ! cockpit_effort_ok max codex && cockpit_effort_ok high'
 ok "codex resume re-attaches the orb server as -c values" \
    'agent_resume_inner codex 019f-abc "$T/work" x "$ORB" | grep -q "mcp_servers.orb.command"'
 

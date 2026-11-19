@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# cockpit-agy-hooks — install / remove / show cockpit's Antigravity (agy) lifecycle hooks.
+#
+#   cockpit-agy-hooks install     set the `cockpit` entry in ~/.gemini/config/hooks.json
+#   cockpit-agy-hooks uninstall   remove ONLY the `cockpit` entry
+#   cockpit-agy-hooks status      print whether it is installed (exit 0 = installed, 1 = not)
+#
+# Other hooks in the file are preserved byte-for-meaning (parsed and re-emitted by jq). The file is created if
+# absent and written atomically (temp file + rename). AGY_HOOKS_FILE overrides the path (tests use a temp HOME).
+# The commands point at ~/tools/cockpit/cockpit-hook, the stable live path (see AGENTS.md).
+set -euo pipefail
+
+file="${AGY_HOOKS_FILE:-$HOME/.gemini/config/hooks.json}"
+hook="${COCKPIT_HOOK_PATH:-~/tools/cockpit/cockpit-hook}"
+command -v jq >/dev/null 2>&1 || { echo "cockpit-agy-hooks: jq is required" >&2; exit 1; }
+
+entry=$(jq -n --arg h "$hook" '
+  def one($e): [{type:"command", command:($h + " " + $e), timeout:5}];
+  {SessionStart: one("agy-session-start"), PreInvocation: one("agy-working"), Stop: one("agy-idle")}')
+
+current() { if [[ -s "$file" ]]; then cat "$file"; else echo '{}'; fi; }
+write_atomic() {   # stdin → $file
+  local tmp; mkdir -p "$(dirname "$file")"
+  tmp=$(mktemp "$file.XXXXXX"); cat >"$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file"
+}
+valid() { current | jq -e 'type=="object"' >/dev/null 2>&1 || { echo "cockpit-agy-hooks: $file is not a JSON object; not touching it" >&2; exit 1; }; }
+
+case "${1:-}" in
+  install)
+    valid
+    current | jq --argjson e "$entry" '.cockpit = $e' | write_atomic
+    echo "installed: $file (cockpit)";;
+  uninstall)
+    [[ -s "$file" ]] || { echo "not installed ($file absent)"; exit 0; }
+    valid
+    current | jq 'del(.cockpit)' | write_atomic
+    echo "removed cockpit from $file";;
+  status)
+    if [[ -s "$file" ]] && jq -e --argjson e "$entry" '.cockpit == $e' "$file" >/dev/null 2>&1; then
+      echo "installed: $file"
+    elif [[ -s "$file" ]] && jq -e 'has("cockpit")' "$file" >/dev/null 2>&1; then
+      echo "present but differs from this version: $file (run install to refresh)"; exit 1
+    else
+      echo "not installed: $file"; exit 1
+    fi;;
+  *) echo "usage: cockpit-agy-hooks install|uninstall|status" >&2; exit 2;;
+esac

@@ -93,7 +93,7 @@ then the same Access app. No new local service.
 - **Folder trust:** a brand-new cwd makes `claude` pause on "trust this folder?".
   The recent-cwd list is already-trusted project dirs, so this only bites truly
   new paths — approve at the desk, or pre-trust the dir.
-- **Codex** panes have no Remote Control, so the UI shows them read-only.
+- **Codex** and **agy** (Antigravity) panes have no Remote Control, so the UI shows them read-only.
 - **Orderly** panes (brief/alpha/bravo) are the aide fleet — shown dimmed, never
   rebooted from here (that's `orderlies-up`'s job).
 - Reboot skips **working / needs-input** panes unless forced, so you never

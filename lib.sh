@@ -7,6 +7,7 @@ COCKPIT_PROFILE_TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/claude-profi
 SANTA_DB="${SANTA_DB:-$HOME/.local/share/santa/index.db}"
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/.claude/projects}"
 CODEX_SESSIONS="${CODEX_SESSIONS:-$HOME/.codex/sessions}"   # Codex rollout store
+AGY_HOME="${AGY_HOME:-$HOME/.gemini/antigravity-cli}"       # Antigravity (agy) state: history.jsonl, conversations/<id>.db
 COCKPIT_SESSION="${COCKPIT_SESSION:-cockpit}"
 # Pane arrangement. even-horizontal = tall side-by-side columns (best on wide
 # monitors); tiled = grid; even-vertical = stacked rows. Override via env.
@@ -126,7 +127,11 @@ cockpit_role_ok() { [[ "${1:-}" =~ ^[a-z0-9_-]+$ ]]; }
 # Both are OPTIONAL and both are validated narrowly because they land in a provider argv (and, for the
 # seeded path, a durable record). Absent → nothing is appended and the launch is byte-identical to before.
 cockpit_model_ok()  { [[ "${1:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; }
-cockpit_effort_ok() { [[ "${1:-}" =~ ^(low|medium|high|xhigh)$ ]]; }
+# $2 = provider; agy alone also accepts `max`, so Claude's and Codex's lists are not widened.
+cockpit_effort_ok() {
+  [[ "${1:-}" =~ ^(low|medium|high|xhigh)$ ]] && return 0
+  [[ "${2:-}" == agy && "${1:-}" == max ]]
+}
 # One argv element per line, in the shape each provider takes: codex `-m ID` / `-c model_reasoning_effort="L"`,
 # claude `--model ID` / `--effort L`. Empty model / effort contribute nothing. $1 provider, $2 model, $3 effort.
 cockpit_model_argv() {
@@ -134,7 +139,7 @@ cockpit_model_argv() {
   if [[ "$provider" == codex ]]; then
     [[ -z "$model" ]]  || printf '%s\n' -m "$model"
     [[ -z "$effort" ]] || printf '%s\n' -c "model_reasoning_effort=\"$effort\""
-  else
+  else   # claude and agy share --model / --effort
     [[ -z "$model" ]]  || printf '%s\n' --model "$model"
     [[ -z "$effort" ]] || printf '%s\n' --effort "$effort"
   fi
@@ -459,7 +464,7 @@ cockpit_snapshot() {
   $tmux list-panes -s -t "$COCKPIT_SESSION" -f '#{==:#{@orderly},}' \
     -F "#{window_index}${TAB}#{window_name}${TAB}#{?@session_id,#{@session_id},$NIL}${TAB}#{?@cwd,#{@cwd},$NIL}${TAB}#{?@label,#{@label},$NIL}${TAB}#{?@agent,#{@agent},$NIL}${TAB}#{?@orb_server_file,#{@orb_server_file},$NIL}${TAB}#{?@account,#{@account},$NIL}${TAB}#{?@role,#{@role},$NIL}" 2>/dev/null |
     awk -F "$TAB" -v nil="$NIL" '
-      $3 != nil && ($6 == "claude" || $6 == "codex") {
+      $3 != nil && ($6 == "claude" || $6 == "codex" || $6 == "agy") {
         key=$6 SUBSEP $3; if (seen[key]++) next
       }
       { print }
@@ -978,12 +983,38 @@ _codex_rows() {
   done < <(find "$CODEX_SESSIONS" -type f -name 'rollout-*.jsonl' -printf '%T@\t%p\n' 2>/dev/null | sort -rn)
 }
 
+# Candidate dormant Antigravity sessions from history.jsonl, newest-first, as: mtime<TAB>agy<TAB>id<TAB>cwd<TAB>title
+# One row per conversationId: its latest prompt timestamp (ms → s), its workspace, and the first
+# non-slash-command prompt as the title (else the id's first 8 characters).
+_agy_rows() {
+  local limit="${1:-16}" hist="$AGY_HOME/history.jsonl" now cutoff mt id cwd title n=0
+  [[ -f "$hist" ]] || return 0
+  now=$(date +%s); cutoff=$(( now - COCKPIT_MAX_AGE_DAYS*86400 ))
+  while IFS=$'\t' read -r mt id cwd title; do
+    [[ -n "$id" && "$cwd" == /* ]] || continue
+    (( mt < cutoff )) && break
+    [[ -f "$AGY_HOME/conversations/$id.db" ]] || continue
+    session_is_running_agent agy "$id" && continue
+    (( now - mt < COCKPIT_LIVE_SECS )) && continue
+    [[ -n "$title" ]] || title="(agy ${id:0:8})"
+    printf '%s\tagy\t%s\t%s\t%s\n' "$mt" "$id" "$cwd" "$title"
+    n=$((n+1)); (( n >= limit )) && break
+  done < <(jq -rs '
+      map(select(.conversationId != null and (.workspace // "") != ""))
+      | group_by(.conversationId)
+      | map({id: .[0].conversationId, cwd: (sort_by(.timestamp) | last | .workspace),
+             mt: ((map(.timestamp) | max) / 1000 | floor),
+             title: ([.[] | select((.type // "") != "slash_command" and ((.display // "") | startswith("/") | not)) | .display] | first // "")})
+      | sort_by(-.mt) | .[]
+      | [.mt, .id, .cwd, (.title | gsub("[\n\r\t]"; " ") | .[0:100])] | @tsv' "$hist" 2>/dev/null)
+}
+
 # Merged candidate sessions across agents, most-recent first.
 # Output TSV: id<TAB>cwd<TAB>title<TAB>agent   (limit via $1, default 6)
 cockpit_candidates() {
   local limit="${1:-6}"
   ck_ps_begin                          # one ps for the whole gather; see session_is_running
-  { _claude_rows $((limit + 12)); _codex_rows $((limit + 12)); } \
+  { _claude_rows $((limit + 12)); _codex_rows $((limit + 12)); _agy_rows $((limit + 12)); } \
     | sort -t$'\t' -k1,1 -rn | head -n "$limit" \
     | awk -F'\t' 'BEGIN{OFS="\t"}{print $3,$4,$5,$2}'   # mtime,agent,id,cwd,title → id,cwd,title,agent
   ck_ps_end
@@ -1047,6 +1078,7 @@ classify_state() {
 agent_facts() {  # agent jsonl
   case "$1" in
     codex) { tac "$2" 2>/dev/null | grep -m1 -oE '"(task_started|task_complete|turn_aborted)"' | tr -d '"'; } || true;;
+    agy) :;;   # a SQLite db has no readable last line; state comes from its age alone (see agent_state)
     *) tail -1 "$2" 2>/dev/null | jq -r '[(.message.stop_reason // ""),
          ([.message.content[]? | select(.type=="tool_use")] | length>0),
          (if .type=="user" then ([.message.content[]? | select(.type=="tool_result")] | length>0) else false end)
@@ -1058,7 +1090,9 @@ agent_facts() {  # agent jsonl
 # for every pane on every cycle without a subshell.
 agent_state() {  # agent facts age
   local stop wants_tool has_result age="$3"
-  if [[ "$1" == codex ]]; then
+  if [[ "$1" == agy ]]; then
+    :   # no transcript semantics: fall through to the age rule below
+  elif [[ "$1" == codex ]]; then
     case "$2" in
       task_started)               CK_STATE=working; return;;
       task_complete|turn_aborted) CK_STATE=idle; return;;
@@ -1087,7 +1121,9 @@ agent_state() {  # agent facts age
 idle_seconds() {
   local jsonl="$1" now mtime
   [[ -f "$jsonl" ]] || { echo 999999; return; }
-  now=$(date +%s); mtime=$(stat -c %Y "$jsonl" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  if [[ "$jsonl" == *.db ]]; then mtime=$(agy_stat "$jsonl"); mtime="${mtime% *}"; else mtime=$(stat -c %Y "$jsonl" 2>/dev/null || echo 0); fi
+  mtime="${mtime:-0}"
   echo $(( now - mtime ))
 }
 
@@ -1100,7 +1136,20 @@ codex_transcript() { find "$CODEX_SESSIONS" -type f -name "*-$1.jsonl" 2>/dev/nu
 
 # Transcript file for (agent, id, cwd).
 agent_transcript() {
-  case "$1" in codex) codex_transcript "$2";; *) session_jsonl "$2" "$3";; esac
+  case "$1" in
+    codex) codex_transcript "$2";;
+    agy) if [[ "$2" =~ ^[0-9a-fA-F-]{36}$ && -f "$AGY_HOME/conversations/$2.db" ]]; then printf '%s' "$AGY_HOME/conversations/$2.db"; fi;;
+    *) session_jsonl "$2" "$3";;
+  esac
+}
+
+# "mtime size" of an agy conversation db, taking the newer of the db and its -wal (SQLite WAL mode writes
+# the -wal while the db itself stays still). Prints nothing when the db is missing.
+agy_stat() {
+  local db="$1" a b
+  a=$(stat -c '%Y %s' -- "$db" 2>/dev/null) || return 0
+  b=$(stat -c '%Y %s' -- "$db-wal" 2>/dev/null) || { printf '%s' "$a"; return; }
+  (( ${b% *} > ${a% *} )) && printf '%s' "$b" || printf '%s' "$a"
 }
 
 # Classify a Codex rollout's live state. Last event_msg/task_complete = idle;
@@ -1120,7 +1169,17 @@ classify_codex() {
   echo "$CK_STATE"
 }
 
-agent_classify() { case "$1" in codex) classify_codex "$2";; *) classify_state "$2";; esac; }
+classify_agy() {
+  local j="$1" st
+  st=$(agy_stat "$j"); [[ -n "$st" ]] || { echo dead; return; }
+  agent_state agy "" $(( $(date +%s) - ${st% *} ))
+  echo "$CK_STATE"
+}
+
+# Two-letter picker badge for an agent kind.
+cockpit_agent_tag() { case "$1" in codex) echo cx;; agy) echo ag;; *) echo cl;; esac; }
+
+agent_classify() { case "$1" in codex) classify_codex "$2";; agy) classify_agy "$2";; *) classify_state "$2";; esac; }
 
 # The directory a claude session must be resumed FROM. `claude --resume <id>`
 # resolves the id inside the project dir derived from its CWD, so resuming from
@@ -1180,6 +1239,7 @@ cockpit_orb_resume_args() {   # agent  cwd  orb-server-file → argv fragment, %
 agent_resume_inner() {
   local agent="$1" id="$2" cwd="$3" name="${4:-}" orb="${5:-}"
   case "$agent" in
+    agy)   printf 'cd %q && exec agy --conversation %s' "$cwd" "$id";;
     codex) printf 'cd %q && exec codex%s%s resume %s' "$cwd" "$(cockpit_codex_launch_args "$cwd" "$orb")" "$(cockpit_orb_resume_args "$agent" "$cwd" "$orb")" "$id";;
     *)     cwd=$(claude_launch_cwd "$id" "$cwd")
            printf 'cd %q && exec claude --resume %s%s%s' "$cwd" "$id" "$(cockpit_rc_args "$name" "$cwd")" "$(cockpit_orb_resume_args "$agent" "$cwd" "$orb")";;
@@ -1206,7 +1266,7 @@ cockpit_respawn_resume() {
   [[ "$orb" == "$NIL" ]] && orb=""
 
   case "$agent" in
-    claude|codex) ;;
+    claude|codex|agy) ;;
     *) echo "cockpit_respawn_resume: pane $pane has no resumable agent ('${agent:-<untracked>}')" >&2; return 1;;
   esac
   [[ -n "$sid" ]] || { echo "cockpit_respawn_resume: pane $pane has no session id to resume" >&2; return 1; }
@@ -1245,7 +1305,7 @@ cockpit_respawn_resume() {
 # A clean exit still closes the pane exactly as before; only failure is caught.
 cockpit_keep_pane_on_failure() {
   local inner="$1"
-  inner="${inner/exec claude/claude}"; inner="${inner/exec codex/codex}"
+  inner="${inner/exec claude/claude}"; inner="${inner/exec codex/codex}"; inner="${inner/exec agy/agy}"
   printf '%s; rc=$?; [ "$rc" = 0 ] || { printf "\\n\\033[31mcockpit: launch failed (exit %%s)\\033[0m — keeping this pane so the workspace survives.\\n" "$rc"; exec bash -l; }' "$inner"
 }
 
@@ -1273,6 +1333,9 @@ session_is_running_agent() {
     codex)
       [[ -n "$_CK_PS" ]] && { [[ "$_CK_PS" == *"resume $2"* ]]; return; }
       pgrep -f "resume $2" >/dev/null 2>&1;;
+    agy)
+      [[ -n "$_CK_PS" ]] && { [[ "$_CK_PS" == *"--conversation $2"* ]]; return; }
+      pgrep -f -- "--conversation $2" >/dev/null 2>&1;;
     *)     session_is_running "$2";;
   esac
 }
@@ -1280,6 +1343,7 @@ session_is_running_agent() {
 # Which agent owns a given session id? (for cockpit-send / related handoff)
 agent_of_id() {
   [[ -n "$(codex_transcript "$1")" ]] && { echo codex; return; }
+  [[ "$1" =~ ^[0-9a-fA-F-]{36}$ && -f "$AGY_HOME/conversations/$1.db" ]] && { echo agy; return; }
   echo claude
 }
 
@@ -1288,6 +1352,15 @@ agent_of_id() {
 # codex:  newest rollout overall born after the pane whose session_meta cwd matches.
 cockpit_adopt_agent() {
   local agent="$1" cwd="$2" born="$3"
+  if [[ "$agent" == agy ]]; then
+    # Newest history.jsonl conversation for this workspace whose latest prompt is at/after the pane's birth.
+    # (The hook usually stamps the id first; this covers a hook-less start.)
+    [[ -f "$AGY_HOME/history.jsonl" ]] || return 0
+    jq -rs --arg cwd "$cwd" --argjson born "$born" '
+      map(select(.workspace == $cwd and .conversationId != null and ((.timestamp // 0) / 1000) >= $born))
+      | sort_by(.timestamp) | last | .conversationId // empty' "$AGY_HOME/history.jsonl" 2>/dev/null
+    return 0
+  fi
   if [[ "$agent" == codex ]]; then
     local f meta started started_epoch
     while IFS= read -r f; do

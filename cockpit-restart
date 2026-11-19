@@ -38,9 +38,9 @@ $TMUX list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qx -- "$pane" || refuse 
 # return the literal quotes, misreporting "cleared" as a bound value.
 agent=$($TMUX show -pqv -t "$pane" @agent 2>/dev/null)
 case "$agent" in
-  claude|codex) ;;
+  claude|codex|agy) ;;
   shell) refuse "pane $pane is a shell pane — nothing to resume, re-exec it directly instead";;
-  *) refuse "pane $pane is not a tracked claude/codex pane (agent='${agent:-<none>}')";;
+  *) refuse "pane $pane is not a tracked claude/codex/agy pane (agent='${agent:-<none>}')";;
 esac
 
 # The pane's CURRENT account binding, unchanged — cockpit_respawn_resume re-resolves its token (claude only;

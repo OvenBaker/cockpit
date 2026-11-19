@@ -12,6 +12,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 export PROJECTS_DIR="$root/projects" CODEX_SESSIONS="$root/codex" SANTA_DB="$root/santa.db"
 export COCKPIT_LAYOUT_DB="$root/layout.db"
+export AGY_HOME="$root/agy"
+mkdir -p "$AGY_HOME/conversations"
 mkdir -p "$PROJECTS_DIR/-work" "$CODEX_SESSIONS/2026/11/05"
 now=$(date +%s)
 # write <file> <age-seconds> <lines...>
@@ -49,6 +51,30 @@ expect codex  idle        0  '{"type":"event_msg","payload":{"type":"task_starte
 expect codex  idle        0  '{"type":"event_msg","payload":{"type":"turn_aborted"}}'
 expect codex  working     5  '{"type":"session_meta"}'
 expect codex  idle       20  '{"type":"session_meta"}'
+# agy: no transcript semantics, only the age of the db (or its -wal, whichever is newer)
+AGYID=aaaaaaaa-1111-2222-3333-444444444444
+agydb="$AGY_HOME/conversations/$AGYID.db"
+agy_expect() {  # want db-age wal-age(or -)
+  local want="$1" dbage="$2" walage="$3" got
+  rm -f "$agydb" "$agydb-wal"
+  write "$agydb" "$dbage" "x"
+  [[ "$walage" == - ]] || write "$agydb-wal" "$walage" "x"
+  got=$(bash -c 'source "$1/lib.sh"; agent_classify agy "$2"' _ "$here" "$agydb")
+  [[ "$got" == "$want" ]] || fail "agy db age $dbage wal $walage: want $want, got $got"
+}
+agy_expect working 5 -
+agy_expect idle 20 -
+agy_expect working 600 2      # WAL is newer than the db: still being written
+agy_expect idle 600 600
+got=$(bash -c 'source "$1/lib.sh"; agent_classify agy "$2"' _ "$here" "$root/missing.db")
+[[ "$got" == dead ]] || fail "missing agy db: want dead, got $got"
+got=$(bash -c 'source "$1/lib.sh"; agent_transcript agy "$2" /x' _ "$here" "$AGYID")
+[[ "$got" == "$agydb" ]] || fail "agent_transcript agy: got '$got'"
+got=$(bash -c 'source "$1/lib.sh"; agent_transcript agy "../../etc/passwd" /x' _ "$here")
+[[ -z "$got" ]] || fail "agent_transcript agy accepted a non-uuid id"
+got=$(bash -c 'source "$1/lib.sh"; agent_of_id "$2"' _ "$here" "$AGYID")
+[[ "$got" == agy ]] || fail "agent_of_id agy: got $got"
+
 got=$(bash -c 'source "$1/lib.sh"; agent_classify claude "$2"' _ "$here" "$root/missing.jsonl")
 [[ "$got" == dead ]] || fail "missing transcript: want dead, got $got"
 
@@ -57,12 +83,21 @@ sqlite3 "$SANTA_DB" "CREATE TABLE sessions(id TEXT PRIMARY KEY, summary_title TE
   INSERT INTO sessions VALUES('sess-a', '', 'first	line' || char(10) || 'second'), ('rollout-b', 'Codex title', '');"
 write "$PROJECTS_DIR/-work/sess-a.jsonl" 600 "$prompt" "$end_turn"
 write "$CODEX_SESSIONS/2026/11/05/rollout-2026-11-05-rollout-b.jsonl" 600 '{"type":"event_msg","payload":{"type":"task_complete"}}'
+# two agy panes: one hook-driven (db old, fresh working stamp), one on the mtime fallback (no stamp, fresh db)
+AGYH=bbbbbbbb-1111-2222-3333-444444444444; AGYM=cccccccc-1111-2222-3333-444444444444
+write "$AGY_HOME/conversations/$AGYH.db" 600 x
+write "$AGY_HOME/conversations/$AGYM.db" 600 x
 T="tmux -L $socket"
 TMUX='' $T new-session -d -s cockpit -n work 'sleep 600'
 TMUX='' $T split-window -t cockpit:0 'sleep 600'
 a=$($T list-panes -t cockpit:0 -F '#{pane_id}' | sed -n 1p); b=$($T list-panes -t cockpit:0 -F '#{pane_id}' | sed -n 2p)
 $T set -p -t "$a" @agent claude; $T set -p -t "$a" @session_id sess-a; $T set -p -t "$a" @cwd /work
 $T set -p -t "$b" @agent codex;  $T set -p -t "$b" @session_id rollout-b; $T set -p -t "$b" @cwd /work
+TMUX='' $T split-window -t cockpit:0 'sleep 600'; TMUX='' $T split-window -t cockpit:0 'sleep 600'
+c=$($T list-panes -t cockpit:0 -F '#{pane_id}' | sed -n 3p); d=$($T list-panes -t cockpit:0 -F '#{pane_id}' | sed -n 4p)
+$T set -p -t "$c" @agent agy; $T set -p -t "$c" @session_id "$AGYH"; $T set -p -t "$c" @cwd /work
+$T set -p -t "$c" @hook_state working; $T set -p -t "$c" @hook_at "$(date +%s)"
+$T set -p -t "$d" @agent agy; $T set -p -t "$d" @session_id "$AGYM"; $T set -p -t "$d" @cwd /work
 TMUX='' $T new-window -t cockpit -n other 'sleep 600'   # look at another window, so no work pane is "visited"
 
 COCKPIT_TMUX="$T" COCKPIT_SESSION=cockpit COCKPIT_NO_SINGLETON=1 COCKPIT_INTERVAL=0.2 COCKPIT_TITLE_REFRESH=1 \
@@ -82,6 +117,13 @@ wait_for "$a" @badge "○ idle 10m"
 wait_for "$a" @label "first line second"        # santa's first prompt, flattened to one line
 wait_for "$b" @label "Codex title"
 wait_for "$a" @activity_at "$(( now - 600 ))"
+
+wait_for "$c" @state working                     # fresh hook stamp wins over an old db
+wait_for "$d" @state idle                        # no stamp, old db → idle
+touch "$AGY_HOME/conversations/$AGYM.db"         # db written now → working by the mtime fallback
+wait_for "$d" @state working
+$T set -p -t "$c" @hook_at "$(( $(date +%s) - 3600 ))"   # stale stamp → fallback to the (old) db
+wait_for "$c" @state just-finished   # working → idle edge latches
 
 # The cached facts must not hide a transcript change: a pending tool call becomes working, then needs-input
 # once it has been quiet for COCKPIT_NEEDS_SECS, its result is working again, and the finished turn

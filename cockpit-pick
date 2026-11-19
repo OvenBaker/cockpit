@@ -118,7 +118,7 @@ spawn_new() {
     $TMUX set -p -t "$pane" @born ""               # no @born → poller won't try to adopt a transcript
     $TMUX set -p -t "$pane" @label "$(basename "$cwd") · bash"
     $TMUX set -p -t "$pane" @badge "shell"
-  else                                             # claude/codex — poller adopts via @born
+  else                                             # claude/codex/agy — poller adopts via @born
     cockpit_stamp_pending_agent "$pane" "$cwd" "new · $(basename "$cwd")" "$agent"
   fi
   $TMUX select-layout -t "$W" "$COCKPIT_LAYOUT" 2>/dev/null
@@ -151,6 +151,7 @@ if [[ "$MODE" == new ]]; then
     [[ -n "$a" ]] && agentrows+="claude"$'\t'"$a"$'\t'"Claude"$'\t'"account $a"$'\n'
   done < <(cockpit_accounts_list)
   agentrows+=$'codex\t\tCodex\tfresh codex session\n'
+  agentrows+=$'agy\t\tAntigravity\tfresh agy session\n'
   agentrows+=$'shell\t\tBash shell\tplain terminal, not tracked'
 
   fargs=(); [[ -n "$broken" ]] && fargs=(--footer "$broken")
@@ -234,7 +235,7 @@ pick_rows() {
     IFS=$'\t' read -r id cwd title agent <<< "$row"; [[ -n "$agent" ]] || agent=claude
     jsonl=$(agent_transcript "$agent" "$id" "$cwd")
     age=$(fmt_age "$(idle_seconds "$jsonl")")
-    tag=$([[ "$agent" == codex ]] && echo cx || echo cl)
+    tag=$(cockpit_agent_tag "$agent")
     acct=$(cockpit_session_last_account "$id")
     mark=$(cockpit_pane_account_display "$acct" "$agent")
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -247,7 +248,7 @@ PICK_ARGS=(--hide 1,2,3,4 --match 2,3)
 # the numbered render is startup-only now (see the case below)
 if [[ "$MODE" == startup ]]; then
   say ""
-  say "  cockpit · dormant sessions  (cl=claude  cx=codex  ·  account, if any resumed it last)"
+  say "  cockpit · dormant sessions  (cl=claude  cx=codex  ag=agy  ·  account, if any resumed it last)"
   say "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
   i=0
   for row in "${CAND[@]}"; do
@@ -255,7 +256,7 @@ if [[ "$MODE" == startup ]]; then
     i=$((i+1))
     jsonl=$(agent_transcript "$agent" "$id" "$cwd")
     age=$(fmt_age "$(idle_seconds "$jsonl")")
-    tag=$([[ "$agent" == codex ]] && echo cx || echo cl)
+    tag=$(cockpit_agent_tag "$agent")
     mark=$(cockpit_pane_account_display "$(cockpit_session_last_account "$id")" "$agent")
     printf '  %2d  %s %-8.8s %4s  %-22s  %s\n' "$i" "$tag" "$mark" "$age" "${cwd/#$HOME/\~}" "${title:0:44}" >/dev/tty
   done

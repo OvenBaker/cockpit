@@ -3,8 +3,8 @@
 # (or new) workspace. The scriptable sibling of cockpit-pick's Alt-N flow, so a
 # web/remote surface can open a session without driving the interactive picker.
 #
-#   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|shell] [--name NAME] [--account NAME] [--role ROLE]
-#                 [--model ID] [--effort low|medium|high|xhigh]
+#   cockpit-spawn --cwd PATH [--workspace NAME] [--agent claude|codex|agy|shell] [--name NAME] [--account NAME] [--role ROLE]
+#                 [--model ID] [--effort low|medium|high|xhigh]   # agy also takes max
 #                 [--request-id ID --initial-prompt-file ABS --initial-prompt-sha256 HEX64 --initial-prompt-bytes N
 #                  [--interaction-profile human|agent|brief-studio|execution]]  # codex: human, brief-studio, execution
 #                 [--interaction-profile brief-studio|execution --orb-server-file ABS]
@@ -113,12 +113,12 @@ esac; shift; done
 
 cwd="${cwd/#\~/$HOME}"
 [[ -n "$cwd" && -d "$cwd" ]] || { echo "cockpit-spawn: --cwd must be an existing directory (got '${cwd:-<empty>}')" >&2; exit 2; }
-case "$agent" in claude|codex|shell) ;; *) echo "cockpit-spawn: --agent must be claude|codex|shell" >&2; exit 2;; esac
+case "$agent" in claude|codex|agy|shell) ;; *) echo "cockpit-spawn: --agent must be claude|codex|agy|shell" >&2; exit 2;; esac
 [[ -z "$role" ]] || cockpit_role_ok "$role" || { echo "cockpit-spawn: --role must match ^[a-z0-9_-]+$ (got '$role')" >&2; exit 2; }
 
 [[ -z "$model" ]]  || cockpit_model_ok "$model"  || { echo "cockpit-spawn: --model must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ (got '$model')" >&2; exit 2; }
-[[ -z "$effort" ]] || cockpit_effort_ok "$effort" || { echo "cockpit-spawn: --effort must be low|medium|high|xhigh (got '$effort')" >&2; exit 2; }
-[[ -z "$model$effort" || "$agent" != shell ]] || { echo "cockpit-spawn: --model/--effort need --agent claude or codex (a shell pane has no provider)" >&2; exit 2; }
+[[ -z "$effort" ]] || cockpit_effort_ok "$effort" "$agent" || { echo "cockpit-spawn: --effort must be low|medium|high|xhigh (agy also max) (got '$effort')" >&2; exit 2; }
+[[ -z "$model$effort" || "$agent" != shell ]] || { echo "cockpit-spawn: --model/--effort need --agent claude, codex or agy (a shell pane has no provider)" >&2; exit 2; }
 
 # ── --account: bind this pane to a second Claude subscription ───────────────────────────────────────────────
 # Resolved HERE, before any reservation or tmux side effect, because the token has to be handed to the child
@@ -148,6 +148,7 @@ if [[ -n "$req_id$prompt_file$prompt_sha$prompt_bytes" ]]; then
   refuse() { echo "cockpit-spawn: $1" >&2; exit 2; }
   [[ -n "$req_id" && -n "$prompt_file" && -n "$prompt_sha" && -n "$prompt_bytes" ]] \
     || refuse "seeded launch flags are all-or-none (--request-id --initial-prompt-file --initial-prompt-sha256 --initial-prompt-bytes)"
+  [[ "$agent" != agy ]] || refuse "seeded launch is not supported for --agent agy (Antigravity has no first-prompt acceptance hook)"
   [[ "$agent" == claude || "$agent" == codex ]] || refuse "seeded launch supports --agent claude or codex (a shell pane has no prompt to seed)"
   [[ "$req_id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$ ]] || refuse "unsafe --request-id"
   [[ "$prompt_sha" =~ ^[0-9a-f]{64}$ ]] || refuse "--initial-prompt-sha256 must be 64 lowercase hex"
@@ -316,6 +317,8 @@ else case "$agent" in
            launch="exec codex$(cockpit_codex_launch_args "$cwd" "$orb_file")$extra$(cockpit_model_args codex "$model" "$effort")"
          else launch="exec codex$(cockpit_codex_launch_args "$cwd")$(cockpit_model_args codex "$model" "$effort")"; fi;;
   shell) launch="exec bash -l";;
+  # Same as a Claude spawn: no permission flag (only the picker's explicit bypass toggle adds one).
+  agy)   launch="exec agy$(cockpit_model_args agy "$model" "$effort")";;
   *)     launch="exec claude$(cockpit_rc_args "$name" "$cwd")$(cockpit_model_args claude "$model" "$effort")";;
 esac; fi
 cmd="cd $(printf %q "$cwd") && $launch"

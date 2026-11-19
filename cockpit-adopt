@@ -7,7 +7,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$HERE/lib.sh"
 TMUX=${COCKPIT_TMUX:-"tmux -L cockpit"}
 
 usage() {
-  echo "usage: cockpit-adopt --pane %N --agent claude|codex --session-id UUID --cwd ABSOLUTE_DIR [--repair-conflicting-binding]" >&2
+  echo "usage: cockpit-adopt --pane %N --agent claude|codex|agy --session-id UUID --cwd ABSOLUTE_DIR [--repair-conflicting-binding]" >&2
   exit 2
 }
 
@@ -22,7 +22,7 @@ while (($#)); do
     *) usage;;
   esac
 done
-[[ "$pane" =~ ^%[0-9]+$ && "$agent" =~ ^(claude|codex)$ && "$sid" =~ ^[0-9a-fA-F-]{36}$ && "$cwd" = /* && -d "$cwd" ]] || usage
+[[ "$pane" =~ ^%[0-9]+$ && "$agent" =~ ^(claude|codex|agy)$ && "$sid" =~ ^[0-9a-fA-F-]{36}$ && "$cwd" = /* && -d "$cwd" ]] || usage
 
 # Resolve the exact pane from the selected Cockpit grid and reject a conflicting
 # existing binding. An operator supplies the session identity; the transcript

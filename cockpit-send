@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cockpit-send — resume a Claude session as a cockpit pane.
 #
-#   cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME]
+#   cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex|agy] [--workspace NAME]
 #                [--account NAME|default] [--pick-account]
 #
 # If a cockpit grid is running: split a new pane onto the session, stamp it so
@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do case "$1" in
   *) id="$1";; esac; shift; done
 # The account NAME is logged; the TOKEN is never read into this script until the launch, and never logged.
 log "invoked: id='$id' cwd-arg='$cwd' agent='$agent' account='$account' account_given=$account_given pick_account=$pick_account COCKPIT_TMUX='${COCKPIT_TMUX:-<unset>}'"
-[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex] [--workspace NAME] [--account NAME|default] [--pick-account]" >&2; log "ABORT: no id"; exit 2; }
+[[ -n "$id" ]] || { echo "usage: cockpit-send <id|prefix> [--cwd PATH] [--agent claude|codex|agy] [--workspace NAME] [--account NAME|default] [--pick-account]" >&2; log "ABORT: no id"; exit 2; }
 if (( account_given && pick_account )); then
   echo "cockpit-send: --account and --pick-account are mutually exclusive" >&2; log "ABORT: both --account and --pick-account"; exit 2
 fi
@@ -65,7 +65,18 @@ fi
 # resolve agent + full id + cwd + title. Claude resolves via santa's DB (handles
 # prefixes); otherwise try a Codex rollout; default claude.
 title=""
-if [[ "$agent" != codex ]]; then
+# Antigravity first: its conversation ids are full UUIDs backed by a db under AGY_HOME (no prefix matching).
+if [[ -z "$agent" || "$agent" == agy ]] && [[ "$(agent_of_id "$id")" == agy ]]; then
+  agent=agy
+  if [[ -f "$AGY_HOME/history.jsonl" ]]; then
+    IFS=$'\t' read -r fcwd ftitle < <(jq -rs --arg id "$id" '
+      map(select(.conversationId == $id)) | sort_by(.timestamp) as $r
+      | [($r | last | .workspace // ""),
+         ([$r[] | select((.type // "") != "slash_command" and ((.display // "") | startswith("/") | not)) | .display] | first // "" | gsub("[\n\r\t]"; " ") | .[0:100])] | @tsv' "$AGY_HOME/history.jsonl" 2>/dev/null || true)
+    [[ -z "$cwd" ]] && cwd="${fcwd:-}"; title="${ftitle:-}"
+  fi
+fi
+if [[ "$agent" != codex && "$agent" != agy ]]; then
   row=$(sqlite3 -separator $'\t' "$SANTA_DB" \
     "SELECT id, coalesce(cwd,''), coalesce(nullif(summary_title,''), substr(first_user_text,1,80),'') \
      FROM sessions WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)

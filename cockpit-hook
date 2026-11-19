@@ -17,11 +17,54 @@
 #   cockpit-hook session-start    # SessionStart
 #   cockpit-hook session-end      # SessionEnd (clears hook state → poller reclassifies)
 #   cockpit-hook codex-notify [json]   # Codex `notify` program (~/.codex/config.toml; arg = JSON)
+#   cockpit-hook agy-session-start | agy-working | agy-idle
+#                                 # Antigravity (agy) SessionStart / PreInvocation / Stop, wired by
+#                                 # cockpit-agy-hooks into ~/.gemini/config/hooks.json. agy requires every
+#                                 # handler to print a JSON object and exit 0, so these ALWAYS print {} —
+#                                 # inside a cockpit pane or not, and whatever goes wrong.
 set -uo pipefail
 
 # Which tmux -L socket is cockpit's. Overridable so tests can run on a throwaway
 # server (e.g. COCKPIT_SOCKET_NAME=cockpittest) without colliding with the real one.
 SOCK="${COCKPIT_SOCKET_NAME:-cockpit}"
+
+# ── Antigravity (agy) events ────────────────────────────────────────────────────────────────────────────────
+# Handled first and in their own function so the output contract holds on every path: `{}` on stdout, exit 0.
+# agy sends camelCase JSON on stdin (conversationId, cwd, hookEventName, ...). Only a pane whose @agent is
+# empty or agy may be stamped; and the Claude path below refuses agy panes, so neither provider can claim the
+# other's pane. There is no needs-input event, so an agy pane is only ever working or idle.
+agy_event() {
+  local ev="$1" input="" cid cwd owner cur T
+  [[ -n "${TMUX_PANE:-}" && "${TMUX%%,*}" == */"$SOCK" ]] || return 0
+  T=(tmux -L "$SOCK")
+  if [[ ! -t 0 ]]; then input=$(cat 2>/dev/null || true); fi
+  owner=$("${T[@]}" display -p -t "$TMUX_PANE" '#{@agent}' 2>/dev/null || true)
+  [[ -z "$owner" || "$owner" == agy ]] || return 0
+  cid=""; cwd=""
+  if [[ -n "$input" ]] && command -v jq >/dev/null 2>&1; then
+    cid=$(printf '%s' "$input" | jq -r '.conversationId // empty' 2>/dev/null || true)
+    cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
+  fi
+  if [[ "$ev" != agy-idle && "$cid" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+    cur=$("${T[@]}" display -p -t "$TMUX_PANE" '#{@session_id}' 2>/dev/null || true)
+    if [[ "$cid" != "$cur" ]]; then
+      "${T[@]}" set -p -t "$TMUX_PANE" @session_id "$cid" 2>/dev/null || true
+      "${T[@]}" set -p -t "$TMUX_PANE" @state "" 2>/dev/null || true
+    fi
+    "${T[@]}" set -p -t "$TMUX_PANE" @agent agy 2>/dev/null || true
+    [[ "$cwd" = /* && -d "$cwd" ]] && "${T[@]}" set -p -t "$TMUX_PANE" @cwd "$cwd" 2>/dev/null || true
+  fi
+  local st=idle; [[ "$ev" == agy-working ]] && st=working
+  "${T[@]}" set -p -t "$TMUX_PANE" @hook_state "$st" 2>/dev/null || true
+  "${T[@]}" set -p -t "$TMUX_PANE" @hook_at "$(date +%s)" 2>/dev/null || true
+  return 0
+}
+case "${1:-}" in
+  agy-session-start|agy-working|agy-idle)
+    agy_event "$1" >/dev/null 2>&1 || true
+    printf '{}\n'; exit 0;;
+  agy-*) printf '{}\n'; exit 0;;
+esac
 
 # Only act inside a cockpit pane. $TMUX = "<socket-path>,<pid>,<session>"; cockpit's
 # socket path ends in /<SOCK>. Sessions in other tmux servers (or none) are untouched.

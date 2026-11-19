@@ -65,6 +65,7 @@ fail() {
 
 [[ -n "$record" && -n "$staging" && -n "$cwd" ]] || die "usage: cockpit-seed-exec <record> <staging> <name> <cwd> [provider-bin] [human|agent|brief-studio|execution] [orb-server-file] [claude|codex]"
 case "$profile" in human|agent|brief-studio|execution) ;; *) die "interaction profile must be 'human', 'agent', 'brief-studio' or 'execution'";; esac
+[[ "$provider" != agy ]] || die "seeded launch is not supported for agy (Antigravity has no first-prompt acceptance hook)"
 case "$provider" in claude|codex) ;; *) die "provider must be 'claude' or 'codex'";; esac
 [[ -z "$model" ]]  || cockpit_model_ok "$model"   || die "model is not a valid model id"
 [[ -z "$effort" ]] || cockpit_effort_ok "$effort" || die "effort must be low|medium|high|xhigh"

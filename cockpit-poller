@@ -138,6 +138,8 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
   if (( ${#TPATH[@]} )); then
     while read -r m s p; do [[ -n "$p" ]] && STAT[$p]="$m $s"; done \
       < <(stat -c '%Y %s %n' -- "${TPATH[@]}" 2>/dev/null)
+    # agy conversation dbs: the newer of db and -wal is the activity time (SQLite WAL leaves the db still)
+    for p in "${TPATH[@]}"; do [[ "$p" == *.db && -n "${STAT[$p]:-}" ]] && STAT[$p]=$(agy_stat "$p"); done
   fi
   # Titles for every pane's session in one sqlite3 run (newlines and tabs flattened
   # in SQL so each row stays one line; ck_clean_label still normalises the rest).
@@ -164,7 +166,7 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     [[ "$curlabel" == "$NIL" ]] && curlabel=""; [[ "$born" == "$NIL" ]] && born=""
     [[ "$agent" == "$NIL" ]] && agent=""; [[ "$hookstate" == "$NIL" ]] && hookstate=""; [[ "$hookat" == "$NIL" ]] && hookat=""; [[ "$stateopt" == "$NIL" ]] && stateopt=""; [[ "$account" == "$NIL" ]] && account=""
     WCOUNT[$win]=$(( ${WCOUNT[$win]:-0} + 1 ))
-    [[ "$agent" == claude || "$agent" == codex ]] || continue
+    [[ "$agent" == claude || "$agent" == codex || "$agent" == agy ]] || continue
     if [[ -z "$sid" ]]; then
       # a pending NEW session (Alt-N): claim the transcript that appeared for this
       # pane's agent+cwd after it was born, then track it like any other.
@@ -189,7 +191,8 @@ while $TMUX has-session -t "$COCKPIT_SESSION" 2>/dev/null; do
     if [[ -z "$st" ]]; then             # not resolved yet, or the cached file vanished
       jsonl=$(agent_transcript "$agent" "$sid" "$cwd")
       if [[ -n "$jsonl" && -f "$jsonl" ]]; then
-        TPATH[$tkey]="$jsonl"; st=$(stat -c '%Y %s' -- "$jsonl" 2>/dev/null) || st=""
+        TPATH[$tkey]="$jsonl"
+        if [[ "$agent" == agy ]]; then st=$(agy_stat "$jsonl"); else st=$(stat -c '%Y %s' -- "$jsonl" 2>/dev/null) || st=""; fi
       fi
     fi
     mtime="${st% *}"; size="${st#* }"; [[ -n "$st" ]] || { mtime=0; size=0; }

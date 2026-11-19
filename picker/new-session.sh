@@ -20,6 +20,10 @@ cockpit_new_launch() {
         printf 'exec codex%s' "$(cockpit_codex_launch_args "$cwd")"
       fi
       ;;
+    agy)
+      # Claude panes bypass only on the toggle; agy mirrors that and otherwise starts with its own defaults.
+      if [[ "$permissions" == bypass ]]; then printf 'exec agy --dangerously-skip-permissions'; else printf 'exec agy'; fi
+      ;;
     shell) printf 'exec bash -l';;
     *) return 1;;
   esac

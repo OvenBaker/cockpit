@@ -92,7 +92,7 @@ const server = http.createServer((req, res) => {
       const name = clean(body.name, 80);
       const agent = clean(body.agent, 8) || 'claude';
       if (!cwd) return sendJSON(res, 400, { error: 'cwd required' });
-      if (!['claude', 'codex', 'shell'].includes(agent)) return sendJSON(res, 400, { error: 'bad agent' });
+      if (!['claude', 'codex', 'agy', 'shell'].includes(agent)) return sendJSON(res, 400, { error: 'bad agent' });
       const args = ['--cwd', cwd, '--agent', agent];
       if (ws) args.push('--workspace', ws);
       if (name) args.push('--name', name);
