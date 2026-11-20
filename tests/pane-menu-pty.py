@@ -139,7 +139,42 @@ with tempfile.TemporaryDirectory() as tmp:
                 time.sleep(.05)
             assert json.loads(logfile.read_text()) == expected
             time.sleep(.7)
-        print('PASS: filesystem actions and menu placement in left, right and lower-right panes; labelled links, printed paths, confirmations and clicked-pane actions')
+        # Wrapped paths, clicked while scrolled back in copy mode. One path is wrapped by the
+        # terminal at the pane edge, the other by the writer itself with an indented
+        # continuation (as agents print). New output arrives after copy mode is entered, so
+        # the live screen no longer lines up with the frozen view that was clicked.
+        deep = tmp / ('a' * 40) / ('b' * 40) / 'wrapped-target.txt'
+        deep.parent.mkdir(parents=True)
+        deep.touch()
+        whole = str(deep)
+        assert len('see ' + whole) > 100
+        wrapped = ('see ' + whole + '\r\n  Saved to ' + whole[:30] + '\r\n  ' + whole[30:] + '\r\n'
+                   + ''.join(f'filler {n}\r\n' for n in range(60)))
+        writer2 = tmp / 'writer2'
+        writer2.write_text('#!/usr/bin/env python3\nimport sys,time\nsys.stdout.write(' + repr(wrapped)
+                           + ');sys.stdout.flush();time.sleep(2.5)\nsys.stdout.write("late 1\\r\\nlate 2\\r\\nlate 3\\r\\n");sys.stdout.flush();time.sleep(60)\n')
+        writer2.chmod(0o755)
+        pane = tm('new-window', '-P', '-F', '#{pane_id}', '-t', 'cockpit', str(writer2))
+        read_until(b'filler 59')
+        tm('copy-mode', '-t', pane)
+        tm('send-keys', '-t', pane, '-X', 'history-top')
+        time.sleep(3)
+        assert tm('capture-pane', '-p', '-t', pane).splitlines()[-1].startswith('late 3')
+        left, top = map(int, tm('display-message', '-p', '-t', pane, '#{pane_left} #{pane_top}').split())
+        for row, column in ((1, 3), (3, 5), (0, 8), (2, 15)):
+            x, y = left + column + 1, top + row + 1
+            os.write(fd, f'\033[<2;{x};{y}M\033[<2;{x};{y}m'.encode())
+            screen = read_until(b'Swap down')
+            assert b'Open in Explorer' in screen, (row, screen[-2000:])
+            logfile.unlink(missing_ok=True)
+            os.write(fd, b'e')
+            deadline = time.monotonic() + 5
+            while not logfile.exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            assert json.loads(logfile.read_text()) == ['/select,', 'C:/test' + whole], (row, logfile.read_text())
+            time.sleep(.7)
+        assert tm('display-message', '-p', '-t', pane, '#{pane_in_mode}') == '1'
+        print('PASS: filesystem actions and menu placement in left, right and lower-right panes; labelled links, printed paths, paths wrapped at the edge or indented (scrolled back in copy mode), confirmations and clicked-pane actions')
     finally:
         subprocess.run(['tmux', '-S', socket, 'kill-server'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if fd is not None:
